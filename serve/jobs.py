@@ -1,21 +1,30 @@
-"""Job execution — the thin layer between an HTTP request and `runners.execute_job`.
+"""Job execution inside the pod — generic, and deliberately ignorant of what it runs.
 
-## Why a subprocess rather than an in-process call
+## What changed, and why it matters
 
-`execute_job` is a long, CPU-bound, third-party-heavy pipeline. Running it inside the API
-process would mean a segfault in a native audio library takes the control surface down with
-it — and the control surface is the only way to find out what happened. A subprocess gives
-isolation, a real kill switch for cancellation, and a natural place to tee stdout into the
-job log. It also keeps the API responsive, which matters when the whole point is that a
-webapp or an agent can poll it during a 40-minute job.
+This module used to `from runners.execute_job import STAGE_CLASSES` — importing thirteen
+linguistics stage names into the container framework. That single import is what made this a
+runner for *one* pipeline rather than a runner.
 
-## Why this does not reimplement anything
+Now the spec names its own entry point:
 
-`runners/execute_job.py` already validates stage names against STAGE_CLASSES and refuses
-unknown ones up front. `runners/framework.py` already computes wiring and readiness without
-running anything. This module calls both and translates the results to HTTP — it holds no
-pipeline knowledge of its own, which is what keeps the local CLI, this API, and a future
-serverless handler genuinely equivalent rather than three subtly different pipelines.
+    "pipeline": {"stages_from": "trainer.stages:STAGES", "stages": [...]}   → lingua_core
+    "exec":     {"module": "...", "args": [...]}                            → raw escape hatch
+
+and this module launches `lingua_core.execute_job`, which imports whatever registry the
+workload published. Nothing here knows what a stage does.
+
+Stage INSIGHT is not lost by that — quite the opposite. The engine still reports per-stage
+state, verification results and sub-stage progress through the event log, so `/v1` sees more
+than it did before. What is lost is only the framework's *hardcoded knowledge* of which
+stages exist.
+
+## Why a subprocess
+
+A segfault in a native audio library must not take the control surface down with it — the
+control surface is how you find out what happened. A subprocess also gives cancellation a
+real process group to kill, and a natural place to tee stdout into the job log. Status still
+flows richly, because the subprocess writes the event log this process reads.
 """
 from __future__ import annotations
 
@@ -27,79 +36,137 @@ import sys
 import threading
 from pathlib import Path
 
-from .events import EventLog, job_dir
+from . import code as code_mod
+from lingua_core.events import EventLog, job_dir
 
 REPO = Path(__file__).resolve().parent.parent
 
-# Live subprocesses, so cancel can reach them. Jobs are not tracked across an API restart
-# on purpose — the durable record is the event log on disk, and a job whose parent died is
-# reported from its files rather than from memory.
+# Live subprocesses, so cancel can reach them. Not tracked across an API restart on purpose:
+# the durable record is the event log on disk, and a job whose parent died is reported from
+# its files rather than from memory.
 _procs: dict[str, subprocess.Popen] = {}
 _lock = threading.Lock()
 
 
-def available_stages() -> list[str]:
-    """The stage vocabulary, read from the pipeline rather than duplicated here."""
-    try:
-        sys.path.insert(0, str(REPO))
-        from runners.execute_job import STAGE_CLASSES     # type: ignore
-        return sorted(STAGE_CLASSES)
-    except Exception:
-        return []
+# --------------------------------------------------------------------------------------
+# spec handling — delegated to lingua_core so the contract has ONE definition
+# --------------------------------------------------------------------------------------
 
+def _spec_mod():
+    """Import the spec contract from the engine.
 
-def validate(spec: dict) -> dict:
-    """Cheap, total, and free — the check that stops an agent burning a pod on a typo.
-
-    Returns {ok, problems, would_run, missing, wiring_ok}. Runs NOTHING: this is
-    `Runner.wiring()` and `Runner.plan()`, which framework.py built precisely so the
-    pipeline could be trusted "without spending an hour or a pod".
+    Imported lazily and tolerantly: the harness test image ships without lingua_core, and
+    the API must still start there — it simply cannot validate specs as deeply.
     """
-    problems: list[str] = []
-    stages = spec.get("stages") or []
-    if not stages:
-        problems.append("spec has no 'stages'")
-    known = available_stages()
-    if known:
-        unknown = [s for s in stages if s not in known]
-        if unknown:
-            problems.append(f"unknown stage(s): {unknown}. Available: {known}")
-    if not spec.get("job_id"):
-        problems.append("spec has no 'job_id'")
-
-    result = {"ok": not problems, "problems": problems,
-              "wiring_ok": None, "would_run": [], "missing": {}}
-    if problems or not known:
-        return result
-
     try:
-        sys.path.insert(0, str(REPO))
-        from runners.execute_job import build_runner, context_from_spec   # type: ignore
-        runner = build_runner(stages)
-        ctx = context_from_spec(spec)
-        plan = runner.plan(ctx)
-        result["wiring_ok"] = plan.get("wiring_ok")
-        result["would_run"] = [r["stage"] for r in plan.get("stages", []) if r["would_run"]]
-        result["missing"] = {r["stage"]: r["missing"]
-                             for r in plan.get("stages", []) if r.get("missing")}
-        if not plan.get("wiring_ok"):
-            result["ok"] = False
-            result["problems"].extend(plan.get("wiring_problems", []))
+        from lingua_core import spec as spec_mod      # type: ignore
+        return spec_mod
+    except Exception:
+        return None
+
+
+def normalize_spec(raw: dict) -> tuple[dict, list[str]]:
+    """Return (spec, problems). Never raises — a bad spec is a 422, not a 500."""
+    sm = _spec_mod()
+    if sm is None:
+        if not (raw.get("pipeline") or raw.get("exec")):
+            return raw, ["spec needs 'pipeline' or 'exec' "
+                         "(lingua_core not installed here, so validation is minimal)"]
+        return raw, []
+    try:
+        return sm.normalize(raw), []
     except Exception as exc:
-        # A planning failure is information, not a crash — report it as a problem so the
-        # caller sees why, rather than a 500 that says nothing.
-        result["ok"] = False
-        result["problems"].append(f"{type(exc).__name__}: {exc}")
+        return raw, [str(exc)]
+
+
+def available_stages(cr: code_mod.CodeRoot | None = None) -> list[str]:
+    """The stage vocabulary — read from the WORKLOAD's published manifest.
+
+    Previously this imported the pipeline's STAGE_CLASSES, which is exactly the coupling
+    removed here. `capabilities.json` is generated by CI from the workload's registry, so
+    the answer is correct for whatever code this pod is carrying, and empty when no code is
+    present — which is honest rather than misleading.
+    """
+    cr = cr or code_mod.resolve()
+    caps = code_mod.load_capabilities(cr) or {}
+    return [s["name"] for s in caps.get("stages", [])]
+
+
+def validate(spec: dict, *, cr: code_mod.CodeRoot | None = None) -> dict:
+    """Cheap, total, and free — the check that stops a typo costing a pod-hour.
+
+    Two depths, and the difference is stated rather than hidden:
+      shallow — stage names and wiring against capabilities.json; no code import needed
+      deep    — Runner.plan() against real artifacts; only possible with the code loaded
+    """
+    spec, problems = normalize_spec(spec)
+    cr = cr or code_mod.resolve(spec)
+    result = {"ok": False, "problems": list(problems), "depth": "shallow",
+              "code": cr.as_dict(), "would_run": [], "missing": {}, "wiring_ok": None}
+
+    if cr.problems:
+        result["problems"].extend(cr.problems)
+
+    sm = _spec_mod()
+    caps = code_mod.load_capabilities(cr)
+    if sm and caps and not problems:
+        result["problems"].extend(sm.validate_against_capabilities(spec, caps))
+    elif not caps:
+        result["problems"].append(
+            "no capabilities.json at the code root — stage names cannot be checked here. "
+            "Publish one from CI, or submit and let the pod validate deeply.") \
+            if spec.get("pipeline") else None
+
+    # Deep check: only when the engine AND the workload code are both importable.
+    if not result["problems"] and spec.get("pipeline"):
+        try:
+            sys.path.insert(0, str(cr.path)) if cr.path else None
+            from lingua_core import execute_job as EJ       # type: ignore
+            registry = EJ.load_registry(spec["pipeline"]["stages_from"])
+            runner = EJ.build_runner(spec, registry)
+            plan = runner.plan(EJ.context_from_spec(spec))
+            result["depth"] = "deep"
+            result["wiring_ok"] = plan.get("wiring_ok")
+            result["would_run"] = [r["stage"] for r in plan["stages"] if r["would_run"]]
+            result["missing"] = {r["stage"]: r["missing"]
+                                 for r in plan["stages"] if r.get("missing")}
+            if not plan.get("wiring_ok"):
+                result["problems"].extend(plan.get("wiring_problems", []))
+        except SystemExit as exc:
+            result["problems"].append(str(exc))
+        except Exception as exc:
+            # Not fatal: a deep check is a bonus. Say why it could not run rather than
+            # silently reporting a shallow pass as if it were thorough.
+            result["problems"].append(f"deep check unavailable: {type(exc).__name__}: {exc}")
+
+    result["problems"] = [p for p in result["problems"] if p]
+    result["ok"] = not result["problems"]
     return result
 
 
-def submit(spec: dict) -> dict:
-    """Start a job. Idempotent on job_id — re-POSTing returns the existing job.
+# --------------------------------------------------------------------------------------
+# execution
+# --------------------------------------------------------------------------------------
 
-    Agents retry on timeout, and a retry that silently starts a SECOND pod-hour of work is
-    an expensive surprise. So the job id is the idempotency key.
-    """
-    job_id = spec["job_id"]
+def _command(spec: dict, spec_path: Path, job_id: str, cr: code_mod.CodeRoot) -> list[str]:
+    """Build the command line. Two shapes, and only two."""
+    if spec.get("exec"):
+        e = spec["exec"]
+        subs = {"spec_path": str(spec_path), "job_id": job_id,
+                "code_root": str(cr.path or "/app")}
+        args = [str(a).format(**subs) for a in (e.get("args") or [])]
+        return [sys.executable, "-u", "-m", e["module"], *args]
+    return [sys.executable, "-u", "-m", "lingua_core.execute_job",
+            "--spec", str(spec_path), "--job-id", job_id]
+
+
+def submit(spec: dict, *, job_id: str) -> dict:
+    """Start a job. The caller supplies the id — minted by the API, never by the client."""
+    spec, problems = normalize_spec(spec)
+    if problems:
+        return {"job_id": job_id, "state": "failed", "problems": problems}
+
+    cr = code_mod.resolve(spec)
     log = EventLog(job_id, spec=spec)
     st = log.status()
     with _lock:
@@ -108,35 +175,43 @@ def submit(spec: dict) -> dict:
     if st.get("job_state") in ("running", "done", "failed", "cancelled"):
         return {"job_id": job_id, "state": st.get("job_state"), "existing": True}
 
+    if cr.problems:
+        # Refusing here rather than launching is the point: running the baked code while
+        # the operator believes the synced code is running is worse than not running.
+        log.emit(stage="", state="failed", job_state="failed",
+                 event="code_root_invalid", error="; ".join(cr.problems))
+        return {"job_id": job_id, "state": "failed", "problems": cr.problems}
+
     d = job_dir(job_id)
     spec_path = d / "spec.json"
     spec_path.write_text(json.dumps(spec, indent=2), encoding="utf-8")
 
-    log.emit(stage="", index=0, total=len(spec.get("stages", [])),
-             state="running", job_state="running", event="submitted")
+    log.emit(stage="", index=0,
+             total=len((spec.get("pipeline") or {}).get("stages") or []),
+             state="running", job_state="running", event="submitted",
+             code_rev=cr.rev, code_source=cr.source)
 
     env = dict(os.environ)
     env["LINGUA_JOB_ID"] = job_id
     env["PYTHONUNBUFFERED"] = "1"
+    env["PYTHONPATH"] = code_mod.pythonpath(cr)
     logfile = (d / "job.log").open("ab")
     proc = subprocess.Popen(
-        [sys.executable, "-u", "-m", "runners.execute_job", "--spec", str(spec_path)],
+        _command(spec, spec_path, job_id, cr),
         cwd=str(REPO), env=env, stdout=logfile, stderr=subprocess.STDOUT,
-        start_new_session=True,     # own process group, so cancel kills children too
+        start_new_session=True,      # own process group, so cancel kills children too
     )
     with _lock:
         _procs[job_id] = proc
     threading.Thread(target=_reap, args=(job_id, proc, logfile), daemon=True).start()
-    return {"job_id": job_id, "state": "running", "existing": False}
+    return {"job_id": job_id, "state": "running", "existing": False,
+            "code": cr.as_dict()}
 
 
 def _reap(job_id: str, proc: subprocess.Popen, logfile) -> None:
-    """Wait for exit and record the terminal event.
-
-    Without this a crashed job sits at 'running' forever and every poller waits on a
-    process that is gone — the failure mode where the status endpoint is worse than no
-    status endpoint, because it is confidently wrong.
-    """
+    """Record the terminal state. Without this a crashed job sits at 'running' forever and
+    every poller waits on a process that is gone — a status endpoint that is confidently
+    wrong is worse than none."""
     rc = proc.wait()
     try:
         logfile.close()
@@ -147,20 +222,22 @@ def _reap(job_id: str, proc: subprocess.Popen, logfile) -> None:
     log = EventLog(job_id)
     st = log.status()
 
-    # A cancelled job exits non-zero because we SIGTERM'd it, so the naive reading is
-    # "failed" — which is wrong, and wrong in a way that matters: an operator scanning for
-    # failures should not have to sift out the jobs they cancelled on purpose. Cancellation
-    # is already terminal, so preserve it rather than racing over it.
+    # A cancelled job exits non-zero because we SIGTERM'd it. Reporting that as "failed"
+    # would make an operator sift deliberate cancellations out of real failures.
     if st.get("job_state") == "cancelled":
         log.emit(stage="", state="skipped", index=st.get("index", 0),
                  total=st.get("total", 0), job_state="cancelled", returncode=rc,
                  note="process exited after cancellation")
         return
 
-    state = "done" if rc == 0 else "failed"
+    # The engine already emitted job_done; this only covers a process that died without
+    # reporting — a crash, an OOM kill, an import error before the reporter existed.
+    if st.get("job_state") in ("done", "failed"):
+        return
     log.emit(stage="", state="ok" if rc == 0 else "failed",
              index=st.get("index", 0), total=st.get("total", 0),
-             job_state=state, returncode=rc)
+             job_state="done" if rc == 0 else "failed", returncode=rc,
+             note="process exited without reporting completion" if rc else None)
 
 
 def cancel(job_id: str) -> dict:
@@ -168,20 +245,44 @@ def cancel(job_id: str) -> dict:
         proc = _procs.get(job_id)
     if not proc or proc.poll() is not None:
         return {"job_id": job_id, "cancelled": False, "reason": "not running"}
-
-    # Record the intent BEFORE killing. The reaper thread wakes the instant the process
-    # dies and writes a terminal state from the exit code; if the kill came first it could
-    # win that race and stamp "failed" on a job the operator deliberately stopped. Marking
-    # first makes the outcome deterministic — _reap sees "cancelled" and preserves it.
+    # Record intent BEFORE killing: the reaper wakes the instant the process dies and would
+    # otherwise win the race and stamp "failed" on a deliberate stop.
     EventLog(job_id).emit(stage="", state="skipped", job_state="cancelled",
                           event="cancelled")
     os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
     return {"job_id": job_id, "cancelled": True}
 
 
+def find_by_idempotency_key(key: str) -> dict | None:
+    """Locate an existing job by the client's de-duplication key.
+
+    Read from each job's stored spec rather than from status.json: the spec is the durable
+    record of what was asked for, and adding the key to the status snapshot would duplicate
+    it into a file whose job is to describe progress, not intent.
+
+    In-pod this is a directory scan, which is fine for the handful of jobs one pod sees. The
+    control plane answers the same question from the registry's unique index.
+    """
+    root = job_dir("_").parent
+    if not key or not root.exists():
+        return None
+    for d in sorted(root.iterdir(), reverse=True):
+        sp = d / "spec.json"
+        if not sp.is_file():
+            continue
+        try:
+            spec = json.loads(sp.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if spec.get("idempotency_key") == key:
+            st = EventLog(d.name).status()
+            return {"job_id": d.name, "job_state": st.get("job_state"),
+                    "progress": f"{st.get('index', 0)}/{st.get('total', 0)}"}
+    return None
+
+
 def list_jobs() -> list[dict]:
-    """Every job this pod knows about, read from disk rather than memory so it survives
-    an API restart."""
+    """Read from disk rather than memory, so the list survives an API restart."""
     root = job_dir("_").parent
     if not root.exists():
         return []
@@ -195,3 +296,22 @@ def list_jobs() -> list[dict]:
                     "progress": f"{st.get('index', 0)}/{st.get('total', 0)}",
                     "updated_at": st.get("updated_at")})
     return out
+
+
+def stages(job_id: str) -> dict:
+    """Per-stage table, including verification detail.
+
+    This is the endpoint that would have been impossible under a stage-blind design, and it
+    is the one an operator actually wants when a job fails: which stage, how long, and what
+    verification rejected.
+    """
+    st = EventLog(job_id).status()
+    rows = []
+    for name, s in (st.get("stages") or {}).items():
+        rows.append({"stage": name, "state": s.get("state"), "index": s.get("index"),
+                     "seconds": s.get("seconds"), "error": s.get("error"),
+                     "verification": s.get("verification"),
+                     "progress": s.get("progress")})
+    rows.sort(key=lambda r: r.get("index") or 0)
+    return {"job_id": job_id, "job_state": st.get("job_state"),
+            "progress": f"{st.get('index', 0)}/{st.get('total', 0)}", "stages": rows}

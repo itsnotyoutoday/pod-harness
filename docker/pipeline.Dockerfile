@@ -95,6 +95,14 @@ COPY requirements-pipeline.txt requirements-serve.txt ./
 RUN $PY -m pip install --no-cache-dir \
         -r requirements-pipeline.txt -r requirements-serve.txt
 
+# --- lingua-core: the stage engine ------------------------------------------------------
+# The image ships the ENGINE (stage model, runner, resume, status protocol) but never a
+# workload's stages — those arrive at runtime from the volume. Pinned by ref so an image
+# rebuild is the only thing that can change the engine under a running fleet.
+ARG LINGUA_CORE_REF=main
+RUN $PY -m pip install --no-cache-dir \
+        "git+https://github.com/itsnotyoutoday/lingua-core.git@${LINGUA_CORE_REF}"
+
 # --- 3b. ABI check, immediately after the install --------------------------------------
 # Imports every compiled extension in dependency order. Without this the first symptom of
 # a mismatch is an ImportError raised from inside a model download in the next layer,
@@ -102,6 +110,7 @@ RUN $PY -m pip install --no-cache-dir \
 RUN echo "=== ABI check ===" \
  && $PY -c "\
 import numpy, scipy, scipy.spatial, sklearn, librosa, soundfile, torch, torchaudio, speechbrain, sys; \
+import lingua_core, lingua_core.framework, lingua_core.execute_job; \
 print('compiled stack imports OK on', sys.version.split()[0]); \
 print('numpy', numpy.__version__, '| scipy', scipy.__version__, \
       '| torch', torch.__version__, '| cuda', torch.version.cuda)"
@@ -192,8 +201,9 @@ RUN mkdir -p /workspace/corpus /workspace/out /workspace/logs /workspace/manifes
 RUN echo "=== runtime sanity check ===" \
  && echo "python3 -> $(readlink -f $(which python3))" \
  && python3 --version \
- && python3 -c "import serve.events, serve.jobs, control.mount, control.objectstore; \
-print('harness + control imports OK')" \
+ && python3 -c "import serve.jobs, serve.code, serve.api; \
+import lingua_core.events, lingua_core.registry, lingua_core.resume; \
+print('harness + engine imports OK')" \
  && ffmpeg -version | head -1 \
  && mfa version \
  && test -d /opt/models/speechbrain/ecapa || (echo 'ECAPA not baked' && exit 1) \

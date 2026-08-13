@@ -1,0 +1,71 @@
+{
+  "stages": [
+    {
+      "name": "acquire",
+      "number": 1,
+      "requires": [],
+      "produces": [
+        "sources"
+      ],
+      "optional": false
+    },
+    {
+      "name": "normalize",
+      "number": 2,
+      "requires": [
+        "sources"
+      ],
+      "produces": [
+        "normalized"
+      ],
+      "optional": false
+    },
+    {
+      "name": "embed",
+      "number": 3,
+      "requires": [
+        "normalized"
+      ],
+      "produces": [
+        "embeddings"
+      ],
+      "optional": false
+    },
+    {
+      "name": "measure",
+      "number": 4,
+      "requires": [
+        "normalized"
+      ],
+      "produces": [
+        "measurements"
+      ],
+      "optional": false
+    },
+    {
+      "name": "_fail",
+      "number": 90,
+      "requires": [],
+      "produces": [],
+      "optional": false
+    },
+    {
+      "name": "_liar",
+      "number": 91,
+      "requires": [],
+      "produces": [
+        "never_made"
+      ],
+      "optional": false
+    },
+    {
+      "name": "_slow",
+      "number": 92,
+      "requires": [],
+      "produces": [],
+      "optional": false
+    }
+  ],
+  "rev": "fixture",
+  "generated_at": "fixed-for-tests"
+}

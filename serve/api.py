@@ -34,8 +34,25 @@ from pathlib import Path
 from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from fastapi.responses import JSONResponse
 
+from . import code as code_mod
 from . import jobs as J
-from .events import EventLog, job_dir, log_root, read_tail
+from lingua_core.events import EventLog, job_dir, log_root, read_tail
+
+
+def _mint_job_id() -> str:
+    """Job ids are minted HERE, never accepted from the client.
+
+    A client-chosen id collides the moment two callers pick the same string, and there is no
+    way to detect that after the fact. ULIDs are server-minted and sort by creation time, so
+    a job listing is chronological and log correlation needs no join. The client's channel
+    for de-duplication is `idempotency_key`, which is checked separately.
+    """
+    try:
+        from lingua_core.registry import new_job_id
+        return new_job_id()
+    except Exception:
+        import secrets, time
+        return f"job_{int(time.time()*1000):013d}{secrets.token_hex(5)}"
 
 API_VERSION = "1"
 MAX_TAIL = 262_144          # 256 KB ceiling on any single log read
@@ -84,7 +101,10 @@ def discover() -> dict:
         "version": API_VERSION,
         "pod_id": os.environ.get("RUNPOD_POD_ID", "local"),
         "log_root": str(log_root()),
+        # Read from the workload's published capabilities.json, not from a hardcoded
+        # import. Empty means no code is loaded here — honest rather than misleading.
         "stages": J.available_stages(),
+        "code": code_mod.resolve().as_dict(),
         "endpoints": {
             "GET  /v1/":                       "this document",
             "GET  /v1/health":                 "liveness, no auth",
@@ -93,22 +113,28 @@ def discover() -> dict:
             "GET  /v1/jobs":                   "list known jobs",
             "GET  /v1/jobs/{id}":              "status snapshot (cheap poll target)",
             "GET  /v1/jobs/{id}/summary":      "~500-token digest — start here",
+            "GET  /v1/jobs/{id}/stages":       "per-stage table incl. verification detail",
             "GET  /v1/jobs/{id}/log?tail=N":   "bounded log tail, reports total_bytes",
             "GET  /v1/jobs/{id}/events":       "?since_seq=N&wait=S — long-poll",
             "GET  /v1/jobs/{id}/artifacts":    "produced files",
             "DEL  /v1/jobs/{id}":              "cancel",
         },
         "job_spec_schema": {
-            "job_id": "str — required, also the idempotency key",
-            "region": "str",
-            "mount": {"kind": "local|s3", "root": "corpus/"},
-            "sources": [{"id": "str", "path": "str relative to mount root",
-                         "limit": "int|null"}],
-            "stages": "list[str] — must all appear in .stages above",
-            "opts": "dict — stage-specific",
+            "spec_version": 2,
+            "idempotency_key": "str|null — YOUR de-dup key; the job_id is minted here",
+            "code": {"root": "code/<repo>/<sha>", "rev": "sha"},
+            "pipeline": {"stages_from": "module:REGISTRY", "stages": "list[str]"},
+            "exec": "{module, args} — escape hatch, mutually exclusive with pipeline",
+            "mount": {"kind": "volume|object", "root": "corpus/"},
+            "runner": {"provider": "runpod|local", "flavor": "cpu3c",
+                       "budget_min": "int — enforced EXTERNALLY by the reaper"},
+            "resume": {"enabled": "bool", "from": "auto|<stage>|never"},
+            "params": "dict — opaque to the engine, meaningful to your stages",
         },
         "conventions": {
             "auth": "header X-Lingua-Token",
+            "job_ids": "server-minted ULIDs; use idempotency_key to de-duplicate",
+            "dry_run_depth": "shallow (capabilities.json, no code) vs deep (Runner.plan)",
             "bounded_reads": "log and event responses are capped; check `truncated`",
             "cursor": "events carry monotonic `seq`; resume with since_seq",
         },
@@ -117,10 +143,22 @@ def discover() -> dict:
 
 @app.post("/v1/jobs", dependencies=[Depends(auth)])
 def submit_job(spec: dict, dry_run: bool = Query(default=False)) -> JSONResponse:
-    if not isinstance(spec, dict) or "stages" not in spec:
+    """Submit, or validate for free.
+
+    The job id is minted here. A client-supplied id is IGNORED — it collides the moment two
+    callers pick the same string, with no way to detect it afterwards. Use
+    `idempotency_key` instead: a retried submit returns the existing job rather than
+    starting a second pod-hour.
+    """
+    if not isinstance(spec, dict):
         raise HTTPException(422, detail={
-            "error": "body must be a job spec object with a 'stages' list",
-            "hint": "GET /v1/ returns job_spec_schema and the valid stage names"})
+            "error": "body must be a job spec object",
+            "hint": "GET /v1/ returns job_spec_schema"})
+    if not (spec.get("pipeline") or spec.get("exec") or spec.get("stages")):
+        raise HTTPException(422, detail={
+            "error": "spec needs 'pipeline' (stage-based) or 'exec' (raw command)",
+            "hint": "GET /v1/ returns job_spec_schema; v1 specs with a top-level "
+                    "'stages' list are accepted and lifted automatically"})
 
     check = J.validate(spec)
     if dry_run:
@@ -128,9 +166,30 @@ def submit_job(spec: dict, dry_run: bool = Query(default=False)) -> JSONResponse
     if not check["ok"]:
         raise HTTPException(422, detail={
             "error": "spec did not validate", "problems": check["problems"],
+            "depth": check.get("depth"),
             "hint": "POST the same body with ?dry_run=true to iterate for free"})
 
-    return JSONResponse(J.submit(spec), status_code=202)
+    # Idempotency: an existing job with this key is returned rather than duplicated. An
+    # agent that retries on timeout must not start a second pod-hour.
+    key = spec.get("idempotency_key") or spec.get("job_id")
+    existing = J.find_by_idempotency_key(key) if key else None
+    if existing:
+        return JSONResponse({**existing, "existing": True}, status_code=200)
+
+    job_id = _mint_job_id()
+    return JSONResponse(J.submit(spec, job_id=job_id), status_code=202)
+
+
+@app.get("/v1/jobs/{job_id}/stages", dependencies=[Depends(auth)])
+def job_stages(job_id: str) -> dict:
+    """Per-stage table, including what verification checked and what it rejected.
+
+    This endpoint is only possible because the engine understands stages. Under a
+    stage-blind design the best available answer would be "the job failed"; here it is
+    "align failed, 42.1s, verification rejected it because alignments were not produced".
+    """
+    _require(job_id)
+    return J.stages(job_id)
 
 
 @app.get("/v1/jobs", dependencies=[Depends(auth)])

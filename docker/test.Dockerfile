@@ -26,7 +26,7 @@ FROM python:3.11-slim
 ENV PYTHONUNBUFFERED=1 DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends \
-        curl tar unzip ca-certificates procps tini fuse3 \
+        curl tar unzip ca-certificates procps tini fuse3 git \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 ARG CADDY_VERSION=2.8.4
@@ -40,6 +40,12 @@ WORKDIR /app
 COPY requirements-serve.txt .
 RUN pip install --no-cache-dir -r requirements-serve.txt
 
+# Same engine the real image carries — so the harness test exercises the real code path
+# (serve/jobs.py shelling lingua_core.execute_job) rather than a stand-in for it.
+ARG LINGUA_CORE_REF=main
+RUN pip install --no-cache-dir \
+        "git+https://github.com/itsnotyoutoday/lingua-core.git@${LINGUA_CORE_REF}"
+
 COPY docker/harness/Caddyfile /etc/caddy/Caddyfile
 COPY docker/harness/lingua-init         /usr/local/bin/lingua-init
 COPY docker/harness/lingua-preflight    /usr/local/bin/lingua-preflight
@@ -51,8 +57,10 @@ RUN chmod +x /usr/local/bin/lingua-*
 
 COPY serve/ /app/serve/
 COPY control/ /app/control/
-# Stands in for the real runners/ package so the job path is exercised end to end.
-COPY tests/fixture_pipeline/runners/ /app/runners/
+# A fake WORKLOAD: stage classes plus a registry and a capabilities.json, exactly what a
+# real workload publishes. The engine loads it through pipeline.stages_from, so the test
+# exercises the real resolution path instead of a special case.
+COPY tests/fixture_workload/ /workspace/code/fixture/
 
 ENV LINGUA_CACHE_ROOT=/workspace/.cache \
     LINGUA_LOG_ROOT=/workspace/logs \
@@ -65,7 +73,10 @@ ENV LINGUA_CACHE_ROOT=/workspace/.cache \
 
 RUN mkdir -p /workspace/logs /workspace/.cache
 
-RUN python -c "import serve.events, serve.jobs, serve.api; print('harness imports OK')"
+ENV LINGUA_CODE_ROOT=/workspace/code/fixture \
+    LINGUA_DEFAULT_STAGES_FROM=fixture.stages:STAGES
+RUN python -c "import serve.jobs, serve.code, serve.api, lingua_core.execute_job; \
+print('harness + engine imports OK')"
 
 EXPOSE 8000
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/lingua-init"]
