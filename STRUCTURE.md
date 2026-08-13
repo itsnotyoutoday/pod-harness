@@ -68,9 +68,43 @@ is why `generated/` sits under `assets/` (we made it, same as `derived/`) while
 
 | store | holds | why |
 |---|---|---|
-| **RunPod volume** | `corpus/ assets/ runs/ cache/ code/` | mounted at `/workspace`, fast, and no credential ever reaches the pod |
-| **R2** | client-facing `generated/`, `releases/` | **RunPod's S3 API supports no presigned URLs** (also no ACLs, no versioning) — anything a client fetches by URL cannot come off the volume |
+| **Cloudflare R2** | `corpus/ assets/ runs/ releases/ code/` | the durable primary. Real S3 semantics, no datacenter pin, and measured **faster** than the volume at useful concurrency |
+| **RunPod volume** | optional scratch only | fast for one-at-a-time reads, but it pins compute to its datacenter — and that pin, not throughput, is what stops jobs running |
+| **container disk** | `cache/`, working files | fastest of all and ephemeral, which is exactly right for anything trivially recreatable |
 | **R2, separate bucket** | `contributed/` | opt-in user recordings. Consent records, retention limits and deletion requests are bucket-level concerns |
+
+### Why this changed — measured 2026-08-13
+
+The original table made the RunPod volume the primary store because it was assumed fast,
+with R2 kept only for client-facing URLs (RunPod's endpoint supports no presigned URLs, no
+ACLs, no versioning — all still true, and still a reason R2 is required rather than
+optional).
+
+Three independent benchmark runs on separate pods say the speed premise was wrong:
+
+| backend | 400 × 500 KB reads |
+|---|---|
+| container disk | ~150 MB/s |
+| **Cloudflare R2 @ 32 concurrent** | **123–128 MB/s** |
+| RunPod volume | ~84 MB/s |
+| Cloudflare R2, one at a time | ~8 MB/s |
+
+`volume_vs_r2` came out 0.66, 0.70, 0.66 — the volume runs at roughly two thirds of R2's
+throughput. Reproduced across separate pods, so it is not one bad machine.
+
+**The decisive number is the last row, and it is about our code, not the store.** A remote
+object costs ~30 ms of latency; read 400 of them one at a time and you pay it 400 times.
+Overlap the requests and the same store returns 15× more. So any pipeline stage that reads
+sequentially will make R2 look unusable and a local volume look essential — the measurement
+would be of our own concurrency, not of storage.
+
+**Consequence: a stage that reads a corpus must read it concurrently.** `parallel.pmap`
+exists for this. A stage that loops one file at a time is the reason to keep a volume, and
+fixing the stage is cheaper than paying for the pin.
+
+The pin is the other half. A network volume forces compute into its datacenter, and on the
+day of these measurements every CPU shape in US-NC-1 was exhausted repeatedly — work simply
+did not run, whatever the throughput would have been.
 
 Selected by `PODH_S3_PROFILE` — configuration, not code. See `pod_loader/objectstore.py`.
 
