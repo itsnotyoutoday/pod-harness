@@ -204,6 +204,11 @@ RUN mkdir -p /workspace/corpus /workspace/runs /workspace/cache
 RUN echo "=== runtime sanity check ===" \
  && echo "python3 -> $(readlink -f $(which python3))" \
  && python3 --version \
+ && grep -oE 'lingua_core\.[a-z_]+' /usr/local/bin/lingua-init | sort -u | while read -r m; do \
+        python3 -c "import importlib,sys; importlib.import_module('$m')" \
+        || { echo "lingua-init references $m, which does not import"; exit 1; }; \
+    done \
+ && python3 -m lingua_core.execute_job --help >/dev/null \
  && python3 -c "import serve.jobs, serve.code, serve.api; \
 import lingua_core.events, lingua_core.registry, lingua_core.resume; \
 print('harness + engine imports OK')" \

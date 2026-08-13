@@ -78,8 +78,15 @@ RUN mkdir -p /workspace/logs /workspace/.cache
 
 ENV LINGUA_CODE_ROOT=/workspace/code/fixture \
     LINGUA_DEFAULT_STAGES_FROM=fixture.stages:STAGES
-RUN python -c "import serve.jobs, serve.code, serve.api, lingua_core.execute_job; \
-print('harness + engine imports OK')"
+# Every module lingua-init names must actually import. Added after a pod spent 13 minutes
+# failing because the shell script still referenced runners.execute_job, three Python moves
+# later. Catching it here costs 2 minutes; catching it on a pod cost real money.
+RUN grep -oE 'lingua_core\.[a-z_]+' /usr/local/bin/lingua-init | sort -u | while read -r m; do \
+        python -c "import importlib; importlib.import_module('$m')" \
+        || { echo "lingua-init references $m, which does not import"; exit 1; }; \
+    done \
+ && python -m lingua_core.execute_job --help >/dev/null \
+ && python -c "import serve.jobs, serve.code, serve.api; print('harness + engine imports OK')"
 
 EXPOSE 8000
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/lingua-init"]
