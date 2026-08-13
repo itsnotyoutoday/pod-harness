@@ -105,6 +105,33 @@ curl "localhost:8000/v1/jobs/$JOB/log?tail=8192"    # bounded, reports total_byt
 > `None` and a silently wrong answer — which is why response keys are pinned in
 > `contract.json`.
 
+### Reporting to a control plane
+
+If the launcher supplies `PODH_CONTROL_URL`, `PODH_CONTROL_TOKEN` and
+`PODH_CONTROL_FINGERPRINT`, the harness reports `/alive` while working and `/done` when it
+finishes — so a finished pod stops billing in a second rather than at the next poll.
+
+Three properties worth knowing:
+
+- **The token is scoped to this pod.** It says "I am alive" and "I am finished" about
+  itself and nothing else. It cannot terminate another pod, submit work or read a queue.
+  The control plane's master credential never enters a pod.
+- **TLS is verified by pinned certificate.** A control plane on a bare IP has no CA to
+  vouch for it, so the harness checks for one exact certificate — stronger than trusting
+  every CA. With no fingerprint set, verification stays at the default and a self-signed
+  endpoint simply fails to connect; nothing silently downgrades.
+- **None of it is load-bearing.** A pod that cannot reach the control plane still gets
+  reaped, because the control plane polls the provider and that is the authority. Losing
+  these requests costs money, never correctness.
+
+### A batch job idles when it finishes
+
+It does not exit. A container that exits is restarted by the provider, and a restarted
+batch container runs the same job again — observed as eight runs of one benchmark across
+eighteen boots, which would have continued until the budget ran out. Idling costs pennies
+a minute and is bounded by the reaper; restarting costs a whole job each time and is
+bounded by nothing.
+
 ### Cost control — read this
 
 An in-pod timeout **cannot terminate a RunPod pod**. Verified on real hardware:
