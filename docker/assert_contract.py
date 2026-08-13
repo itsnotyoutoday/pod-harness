@@ -50,9 +50,17 @@ def _env_read_anywhere() -> set[str]:
         names |= set(re.findall(r'environ(?:\.get)?[\(\[]"([A-Z_]+)"', f.read_text()))
     for f in (ROOT / "serve").glob("*.py"):
         names |= set(re.findall(r'environ(?:\.get)?[\(\[]"([A-Z_]+)"', f.read_text()))
-    for f in (ROOT / "docker" / "harness").glob("lingua-*"):
+    # Match by shebang rather than by name: this globbed "lingua-*" and silently
+    # scanned nothing after the scripts were renamed, so every variable only the
+    # shell reads looked unread.
+    for f in (ROOT / "docker" / "harness").iterdir():
         try:
-            names |= set(re.findall(r'\$\{?([A-Z_]+)', f.read_text()))
+            if not f.is_file():
+                continue
+            text = f.read_text()
+            if not text.startswith("#!"):
+                continue                      # Caddyfile and friends
+            names |= set(re.findall(r'\$\{?([A-Z_]+)', text))
         except Exception:
             pass
     return names
