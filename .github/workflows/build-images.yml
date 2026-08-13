@@ -80,28 +80,101 @@ jobs:
           code=$(curl -s -o /tmp/dry.json -w '%{http_code}' \
             -X POST 'http://localhost:8000/v1/jobs?dry_run=true' \
             -H 'X-Lingua-Token: ci' -H 'Content-Type: application/json' \
-            -d '{"job_id":"ci-dry","stages":["normalize","bogus"]}')
+            -d '{"spec_version":2,"pipeline":{"stages_from":"fixture.stages:STAGES",
+                 "stages":["acquire","bogus"]},"params":{}}')
           test "$code" = "422"
           grep -q 'unknown stage' /tmp/dry.json
 
-      - name: Job lifecycle, idempotency and summary
+      - name: Job lifecycle, minted ids, idempotency
         run: |
+          set -euo pipefail
+          H='X-Lingua-Token: ci'
+          post() { curl -sf -X POST http://localhost:8000/v1/jobs -H "$H" \
+                     -H 'Content-Type: application/json' -d "$1"; }
+          jid()  { python3 -c 'import sys,json;print(json.load(sys.stdin)["job_id"])'; }
+
+          # The id is MINTED here. A client-supplied job_id must be ignored, because a
+          # client-chosen id collides undetectably once two callers pick the same string.
+          ID=$(post '{"spec_version":2,"idempotency_key":"ci-1","job_id":"CLIENT-SET",
+                      "pipeline":{"stages_from":"fixture.stages:STAGES",
+                                  "stages":["acquire","normalize","embed"]},"params":{}}' | jid)
+          echo "minted: $ID"
+          case "$ID" in CLIENT-SET) echo "client id honoured — must not be"; exit 1;; esac
+          case "$ID" in job_*) ;; *) echo "not a ULID: $ID"; exit 1;; esac
+          sleep 6
+
+          # Same idempotency_key must return the SAME job, never a second pod-hour.
+          ID2=$(post '{"spec_version":2,"idempotency_key":"ci-1",
+                       "pipeline":{"stages_from":"fixture.stages:STAGES",
+                                   "stages":["acquire","normalize","embed"]},"params":{}}' | jid)
+          test "$ID" = "$ID2"
+          curl -sf "http://localhost:8000/v1/jobs/$ID/summary" -H "$H" | grep -q '"job_state": *"done"'
+          echo "$ID" > /tmp/ci_job_id
+
+      - name: Stage insight survives a generic framework
+        run: |
+          set -euo pipefail
+          ID=$(cat /tmp/ci_job_id)
+          curl -sf "http://localhost:8000/v1/jobs/$ID/stages" -H 'X-Lingua-Token: ci' > /tmp/st.json
+          cat /tmp/st.json
+          python3 -c "
+          import json
+          d = json.load(open('/tmp/st.json'))
+          names = [s['stage'] for s in d['stages']]
+          assert names == ['acquire','normalize','embed'], names
+          assert all(s['state']=='ok' for s in d['stages']), d
+          assert all((s.get('verification') or {}).get('ok') for s in d['stages']), d
+          print('per-stage state + verification present:', names)"
+
+      - name: A stage that produces nothing is CAUGHT
+        run: |
+          set -euo pipefail
           curl -sf -X POST http://localhost:8000/v1/jobs -H 'X-Lingua-Token: ci' \
             -H 'Content-Type: application/json' \
-            -d '{"job_id":"ci-run","stages":["normalize","embed"]}' >/dev/null
+            -d '{"spec_version":2,"pipeline":{"stages_from":"fixture.stages:STAGES",
+                 "stages":["_liar"]},"params":{}}' > /tmp/liar.json
+          ID=$(python3 -c "import json;print(json.load(open('/tmp/liar.json'))['job_id'])")
+          sleep 5
+          curl -sf "http://localhost:8000/v1/jobs/$ID/summary" -H 'X-Lingua-Token: ci' > /tmp/lsum.json
+          python3 -c "
+          import json
+          d = json.load(open('/tmp/lsum.json'))
+          assert d['job_state']=='failed', d
+          f = d['failures'][0]
+          assert f['stage']=='_liar' and f['state']=='failed', f
+          why = ' '.join((f.get('verification') or {}).get('failures', []))
+          assert 'without producing it' in why, f
+          print('caught:', why[:72])"
+
+      - name: v1 specs still run
+        run: |
+          set -euo pipefail
+          curl -sf -X POST http://localhost:8000/v1/jobs -H 'X-Lingua-Token: ci' \
+            -H 'Content-Type: application/json' \
+            -d '{"job_id":"legacy","region":"_x","stages":["acquire","normalize"],"opts":{}}' \
+            > /tmp/v1.json
+          ID=$(python3 -c "import json;print(json.load(open('/tmp/v1.json'))['job_id'])")
+          sleep 5
+          curl -sf "http://localhost:8000/v1/jobs/$ID" -H 'X-Lingua-Token: ci' \
+            | grep -q '"job_state": *"done"'
+
+      - name: A missing code root refuses rather than running baked code
+        run: |
+          set -euo pipefail
           curl -s -X POST http://localhost:8000/v1/jobs -H 'X-Lingua-Token: ci' \
             -H 'Content-Type: application/json' \
-            -d '{"job_id":"ci-run","stages":["normalize","embed"]}' | grep -q '"existing":true'
-          sleep 5
-          curl -sf http://localhost:8000/v1/jobs/ci-run/summary -H 'X-Lingua-Token: ci' \
-            | grep -q '"job_state": *"done"'
+            -d '{"spec_version":2,"code":{"root":"code/nope/abc"},
+                 "pipeline":{"stages_from":"fixture.stages:STAGES","stages":["acquire"]},
+                 "params":{}}' | grep -q "does not exist"
 
       - name: Long-poll returns immediately on a terminal job
         run: |
-          seq=$(curl -sf http://localhost:8000/v1/jobs/ci-run -H 'X-Lingua-Token: ci' \
+          set -euo pipefail
+          ID=$(cat /tmp/ci_job_id)
+          seq=$(curl -sf "http://localhost:8000/v1/jobs/$ID" -H 'X-Lingua-Token: ci' \
                 | python3 -c 'import sys,json;print(json.load(sys.stdin)["seq"])')
           start=$(date +%s)
-          curl -sf "http://localhost:8000/v1/jobs/ci-run/events?since_seq=$seq&wait=15" \
+          curl -sf "http://localhost:8000/v1/jobs/$ID/events?since_seq=$seq&wait=15" \
             -H 'X-Lingua-Token: ci' >/dev/null
           took=$(( $(date +%s) - start ))
           echo "long-poll on terminal job took ${took}s"
@@ -109,25 +182,17 @@ jobs:
 
       - name: Cancel reports cancelled, not failed
         run: |
+          set -euo pipefail
           curl -sf -X POST http://localhost:8000/v1/jobs -H 'X-Lingua-Token: ci' \
             -H 'Content-Type: application/json' \
-            -d '{"job_id":"ci-cancel","stages":["_slow","_slow"]}' >/dev/null
-          sleep 2
-          curl -sf -X DELETE http://localhost:8000/v1/jobs/ci-cancel \
-            -H 'X-Lingua-Token: ci' >/dev/null
+            -d '{"spec_version":2,"pipeline":{"stages_from":"fixture.stages:STAGES",
+                 "stages":["_slow"]},"params":{}}' > /tmp/c.json
+          ID=$(python3 -c "import json;print(json.load(open('/tmp/c.json'))['job_id'])")
           sleep 3
-          curl -sf http://localhost:8000/v1/jobs/ci-cancel -H 'X-Lingua-Token: ci' \
+          curl -sf -X DELETE "http://localhost:8000/v1/jobs/$ID" -H 'X-Lingua-Token: ci' >/dev/null
+          sleep 3
+          curl -sf "http://localhost:8000/v1/jobs/$ID" -H 'X-Lingua-Token: ci' \
             | grep -q '"job_state": *"cancelled"'
-
-      - name: Failure surfaces in summary
-        run: |
-          curl -sf -X POST http://localhost:8000/v1/jobs -H 'X-Lingua-Token: ci' \
-            -H 'Content-Type: application/json' \
-            -d '{"job_id":"ci-fail","stages":["normalize","_fail"]}' >/dev/null
-          sleep 4
-          curl -sf http://localhost:8000/v1/jobs/ci-fail/summary -H 'X-Lingua-Token: ci' \
-            | tee /tmp/sum.json | grep -q '"job_state": *"failed"'
-          grep -q '_fail' /tmp/sum.json
 
       - name: Container log on failure
         if: failure()
