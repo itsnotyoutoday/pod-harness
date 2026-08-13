@@ -1,0 +1,202 @@
+name: Build images
+
+# Builds the lingua images and pushes them to GitHub Container Registry.
+#
+# ## Why GHCR rather than Docker Hub
+#
+# Docker Hub rate-limits anonymous pulls (100 per 6h per IP). RunPod machines share
+# datacentre IPs, so a fleet of pods hits that ceiling and fails to START — which presents
+# as a mysterious provisioning failure, not as a registry error. plexus hit this for real;
+# `build-trainer-image.yml` in that repo records it as the reason it moved to GHCR. GHCR
+# public pulls have no such limit and need no credentials on the pod side.
+#
+# ## Why the package can be public while the repo is private
+#
+# The images carry third-party dependencies and third-party pretrained weights only. No
+# pipeline code, no corpora, no rulesets — those arrive at runtime from the volume or
+# object storage. A public package means RunPod needs no registry auth, which removes a
+# PAT that would otherwise expire silently and break every launch.
+#
+# ## Build time
+#
+# First build of lingua-pipeline is ~30-40 minutes: conda MFA is genuinely slow and the
+# baked weights are a few hundred MB. Subsequent builds are minutes, because the layer
+# order in pipeline.Dockerfile puts the slow, stable layers first and the cache below is
+# keyed per image.
+#
+# Note that layer COUNT is not what costs time here — Docker pulls layers in parallel, and
+# more, smaller layers make an incremental pull cheaper, not dearer. Layer ORDER is what
+# matters, and it is deliberate in the Dockerfile.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'docker/**'
+      - 'serve/**'
+      - 'control/**'
+      - 'requirements-*.txt'
+      - '.github/workflows/build-images.yml'
+  pull_request:
+    paths:
+      - 'docker/**'
+      - 'serve/**'
+      - 'control/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write          # required for ghcr.io push
+
+jobs:
+  # Fast gate. Builds the lean harness image and exercises the real HTTP surface, so a
+  # broken entrypoint or a regressed endpoint fails in ~2 minutes instead of after the
+  # 35-minute pipeline build. Both bugs found during initial development — a long-poll that
+  # blocked on terminal jobs, and a cancel/reap race — are covered here.
+  harness-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build harness test image
+        run: docker build -f docker/test.Dockerfile -t lingua-harness-test .
+
+      - name: Run harness
+        run: |
+          docker run -d --name lht -p 8000:8000 \
+            -e LINGUA_API_TOKEN=ci -e MAX_IDLE_SEC=0 lingua-harness-test
+          for i in $(seq 1 30); do
+            curl -sf http://localhost:8000/v1/health >/dev/null && break || sleep 1
+          done
+
+      - name: Auth is enforced
+        run: |
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8000/v1/)" = "401"
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8000/)" = "401"
+          curl -sf -H 'X-Lingua-Token: ci' http://localhost:8000/v1/ >/dev/null
+
+      - name: Dry-run rejects an unknown stage, and costs nothing
+        run: |
+          code=$(curl -s -o /tmp/dry.json -w '%{http_code}' \
+            -X POST 'http://localhost:8000/v1/jobs?dry_run=true' \
+            -H 'X-Lingua-Token: ci' -H 'Content-Type: application/json' \
+            -d '{"job_id":"ci-dry","stages":["normalize","bogus"]}')
+          test "$code" = "422"
+          grep -q 'unknown stage' /tmp/dry.json
+
+      - name: Job lifecycle, idempotency and summary
+        run: |
+          curl -sf -X POST http://localhost:8000/v1/jobs -H 'X-Lingua-Token: ci' \
+            -H 'Content-Type: application/json' \
+            -d '{"job_id":"ci-run","stages":["normalize","embed"]}' >/dev/null
+          curl -s -X POST http://localhost:8000/v1/jobs -H 'X-Lingua-Token: ci' \
+            -H 'Content-Type: application/json' \
+            -d '{"job_id":"ci-run","stages":["normalize","embed"]}' | grep -q '"existing":true'
+          sleep 5
+          curl -sf http://localhost:8000/v1/jobs/ci-run/summary -H 'X-Lingua-Token: ci' \
+            | grep -q '"job_state": *"done"'
+
+      - name: Long-poll returns immediately on a terminal job
+        run: |
+          seq=$(curl -sf http://localhost:8000/v1/jobs/ci-run -H 'X-Lingua-Token: ci' \
+                | python3 -c 'import sys,json;print(json.load(sys.stdin)["seq"])')
+          start=$(date +%s)
+          curl -sf "http://localhost:8000/v1/jobs/ci-run/events?since_seq=$seq&wait=15" \
+            -H 'X-Lingua-Token: ci' >/dev/null
+          took=$(( $(date +%s) - start ))
+          echo "long-poll on terminal job took ${took}s"
+          test "$took" -lt 5
+
+      - name: Cancel reports cancelled, not failed
+        run: |
+          curl -sf -X POST http://localhost:8000/v1/jobs -H 'X-Lingua-Token: ci' \
+            -H 'Content-Type: application/json' \
+            -d '{"job_id":"ci-cancel","stages":["_slow","_slow"]}' >/dev/null
+          sleep 2
+          curl -sf -X DELETE http://localhost:8000/v1/jobs/ci-cancel \
+            -H 'X-Lingua-Token: ci' >/dev/null
+          sleep 3
+          curl -sf http://localhost:8000/v1/jobs/ci-cancel -H 'X-Lingua-Token: ci' \
+            | grep -q '"job_state": *"cancelled"'
+
+      - name: Failure surfaces in summary
+        run: |
+          curl -sf -X POST http://localhost:8000/v1/jobs -H 'X-Lingua-Token: ci' \
+            -H 'Content-Type: application/json' \
+            -d '{"job_id":"ci-fail","stages":["normalize","_fail"]}' >/dev/null
+          sleep 4
+          curl -sf http://localhost:8000/v1/jobs/ci-fail/summary -H 'X-Lingua-Token: ci' \
+            | tee /tmp/sum.json | grep -q '"job_state": *"failed"'
+          grep -q '_fail' /tmp/sum.json
+
+      - name: Container log on failure
+        if: failure()
+        run: docker logs lht
+
+  build-and-push:
+    needs: harness-test
+    runs-on: ubuntu-latest
+    # Never push from a PR: a fork could otherwise publish to our registry.
+    if: github.event_name != 'pull_request'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - dockerfile: docker/pipeline.Dockerfile
+            image: lingua-pipeline
+          # Adding a capability is one entry here plus one Dockerfile:
+          # - dockerfile: docker/recognize.Dockerfile
+          #   image: lingua-recognize
+          # - dockerfile: docker/generate.Dockerfile
+          #   image: lingua-generate
+    steps:
+      - uses: actions/checkout@v4
+
+      # A 5 GB image plus build cache plus a conda env is tight against the runner's
+      # ~14 GB. Reclaiming the preinstalled toolchains costs seconds and avoids a
+      # no-space-left failure 30 minutes into the build.
+      - name: Free disk space
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /usr/local/share/boost "$AGENT_TOOLSDIRECTORY" || true
+          df -h /
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute tags
+        id: meta
+        run: |
+          echo "sha_short=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+          # GHCR rejects uppercase paths, and GitHub owners may contain capitals.
+          echo "owner=$(echo '${{ github.repository_owner }}' | tr A-Z a-z)" >> $GITHUB_OUTPUT
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build and push ${{ matrix.image }}
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          platforms: linux/amd64        # RunPod is x86; an arm64 image fails opaquely there
+          push: true
+          tags: |
+            ghcr.io/${{ steps.meta.outputs.owner }}/${{ matrix.image }}:latest
+            ghcr.io/${{ steps.meta.outputs.owner }}/${{ matrix.image }}:${{ steps.meta.outputs.sha_short }}
+          # Per-image cache scope so matrix jobs do not evict each other. NOTE: the GHA
+          # cache is capped at 10 GB per repo — once a second heavy image lands here,
+          # switch to registry cache (type=registry,ref=...:buildcache) which has no cap.
+          cache-from: type=gha,scope=${{ matrix.image }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.image }}
+
+      - name: Summary
+        run: |
+          echo "### ${{ matrix.image }}" >> $GITHUB_STEP_SUMMARY
+          echo "\`ghcr.io/${{ steps.meta.outputs.owner }}/${{ matrix.image }}:latest\`" \
+            >> $GITHUB_STEP_SUMMARY
+          echo "pinned: \`${{ steps.meta.outputs.sha_short }}\`" >> $GITHUB_STEP_SUMMARY
