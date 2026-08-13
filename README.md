@@ -216,11 +216,28 @@ spec runs on a pod with a volume, a serverless worker with neither, or a laptop.
 **On RunPod, use `volume`.** The network volume is the native path: fastest, and no
 credentials ever reach the pod. `fuse` and `object` exist for portability, not for RunPod.
 
-**FUSE does not work on RunPod — verified.** A probe on a real pod found `/dev/fuse`
-**absent** entirely. Not a capability we could request; the device node isn't there. The
-earlier OrbStack success only happened because we passed `--device /dev/fuse --cap-add
-SYS_ADMIN`, which RunPod does not let you do. `FuseMount.probe()` therefore refuses at
-startup with a pointer to `object` rather than failing obscurely mid-job.
+**FUSE does not work on RunPod — settled.** Three independent confirmations:
+
+| evidence | finding |
+|---|---|
+| our probe on a live pod | `/dev/fuse` absent; `CapEff 0xa80405fb` → **MKNOD granted, SYS_ADMIN denied**, so `mount(2)` cannot succeed even after creating the device node |
+| community reports | FUSE unsupported — requires container privileges |
+| [skypilot#8592](https://github.com/skypilot-org/skypilot/issues/8592) | JuiceFS mount fails on RunPod, **still fails with `--privileged`**, works unchanged on AWS |
+
+`FuseMount.probe()` therefore refuses at startup with a pointer to `object`, rather than
+failing obscurely mid-job.
+
+**Accepted limitation (2026-08-13).** Mounting *foreign* object storage (R2, GCS) inside a
+RunPod pod is not possible, and we are **not** building an fsspec or JuiceFS abstraction to
+work around it. RunPod already provides a real POSIX mount — the network volume — which
+covers the need, and is simultaneously readable over S3 from outside. Building a portability
+layer for a provider we are not on is speculative. Revisit if we ever target elsewhere; the
+`MountStrategy` interface makes that a contained change rather than a rewrite.
+
+Worth knowing if it is revisited: neither fsspec nor the JuiceFS Python SDK can help **MFA**,
+because Kaldi is a subprocess that needs real files on disk. Materialisation is required
+whichever abstraction is chosen. And JuiceFS additionally needs an always-on metadata engine
+(Redis/MySQL/TiKV) reachable from every pod.
 
 FUSE remains a valid strategy for providers that permit it, and it does work: verified
 against MinIO with POSIX read and — the risky part — **atomic rename surviving** under

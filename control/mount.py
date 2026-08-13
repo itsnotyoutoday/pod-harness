@@ -196,15 +196,37 @@ class FuseMount(MountStrategy):
     against a 20 GB container disk, and one code path instead of two. When the abstraction
     holds, this is simply better than ObjectMount.
 
+    ## NOT USABLE ON RUNPOD — settled, do not re-litigate
+
+    Three independent confirmations, 2026-08-13:
+
+      1. Our own probe on a live pod: /dev/fuse ABSENT, and the effective capability mask
+         (CapEff 0xa80405fb) decodes to MKNOD granted but **SYS_ADMIN denied**. So even
+         after mknod succeeds in creating the device node, mount(2) cannot succeed. This is
+         structural, not a configuration anyone can be talked into.
+      2. Community reports that RunPod does not support FUSE because it requires granting
+         container privileges.
+      3. skypilot-org/skypilot#8592 — JuiceFS specifically, failing on RunPod with
+         "mknod /dev/fuse: operation not permitted", still failing WITH --privileged, and
+         working unchanged on AWS. Unresolved.
+
+    None of this matters much in practice, because RunPod already provides a real POSIX
+    mount: the network volume. Use VolumeMount there. FuseMount exists for providers that
+    do permit FUSE, and it is verified working against MinIO — including atomic rename
+    surviving under --vfs-cache-mode full, which is the property S3 cannot offer natively.
+
+    DECISION (2026-08-13): foreign object storage on RunPod is an accepted LIMITATION. We
+    are not building an fsspec/JuiceFS abstraction layer to work around it, because on
+    RunPod the volume covers the need and building for a provider we are not on is
+    speculative. Revisit only if we target somewhere else. The interfaces here already make
+    that a contained change rather than a rewrite.
+
     ## Why it is a third strategy and not a replacement
 
     Two things can make the abstraction leak, and neither is hypothetical:
 
-    1. CAPABILITIES. FUSE needs /dev/fuse and usually SYS_ADMIN. On RunPod we do not control
-       the docker run flags, and `batch_pod.py:47` records dockerd failing without NET_ADMIN
-       and buildah failing without user namespaces — both verified on a pod. Whether
-       /dev/fuse is exposed is an empirical question per provider, so `prepare()` probes for
-       it and reports a usable reason rather than failing obscurely mid-job.
+    1. CAPABILITIES. See above — `prepare()` probes and reports a usable reason rather than
+       failing obscurely mid-job.
 
     2. RENAME IS NOT ATOMIC. S3 has no rename; it is copy-then-delete. Anything relying on
        write-temp-then-rename for crash safety silently loses that guarantee — including
