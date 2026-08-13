@@ -160,6 +160,17 @@ COPY control/ /app/control/
 # --- 6. runtime defaults ---------------------------------------------------------------
 # CACHE_ROOT and the log root sit on the volume: writable, growable, surviving the pod.
 # Only the baked subdirectories resolve into /opt, via symlink.
+#
+# PYTHONPATH puts /workspace/code AHEAD of the baked /app. That single ordering is what
+# makes the deps-only doctrine work at runtime: the image ships dependencies, the volume
+# ships CODE, and editing a stage is a few-KB upload rather than a 5 GB image rebuild.
+# batch_pod.py has always exported this inline in its start command; setting it as an image
+# default means every launch path gets it — LINGUA_MODE=batch, a job submitted through /v1,
+# or an interactive shell — instead of only the one launcher that remembered.
+#
+# Missing it does not error. It silently runs the BAKED code while you believe you are
+# running what you just synced, which is the "succeeded against the wrong thing" failure
+# runners/framework.py exists to catch.
 ENV LINGUA_CORPUS_ROOT=/workspace/corpus \
     LINGUA_OUT_ROOT=/workspace/out \
     LINGUA_CACHE_ROOT=/workspace/.cache \
@@ -168,7 +179,7 @@ ENV LINGUA_CORPUS_ROOT=/workspace/corpus \
     MFA_ROOT_DIR=/workspace/.cache/mfa \
     LINGUA_API_PORT=8010 \
     LINGUA_SERVE_API=1 \
-    PYTHONPATH=/app \
+    PYTHONPATH=/workspace/code:/app \
     HF_HOME=/opt/models/hf \
     PATH=/env/bin:$PATH
 

@@ -68,6 +68,29 @@ for p in "${LINGUA_CACHE_ROOT:-/workspace/.cache}/speechbrain/ecapa" \
 done
 
 echo
+echo "[code source]  <- which code is ACTUALLY running"
+# The deps-only doctrine means code arrives on the volume and shadows the baked copy via
+# PYTHONPATH. When the sync did not happen, the pod runs the BAKED code and reports success
+# — against the wrong thing. This block makes that visible instead of silent.
+echo "  PYTHONPATH:  ${PYTHONPATH:-(unset)}"
+if [ -d /workspace/code ]; then
+    n=$(find /workspace/code -name "*.py" 2>/dev/null | wc -l | tr -d " ")
+    echo "  /workspace/code: present, $n .py files"
+else
+    echo "  /workspace/code: ABSENT — the pod will run the BAKED code in /app."
+    echo "                   If you expected synced code, the upload did not happen."
+fi
+python3 - <<'PYEOF' 2>/dev/null || echo "  (could not resolve runners package)"
+try:
+    import runners, os
+    p = os.path.dirname(runners.__file__)
+    print(f"  runners resolves to: {p}")
+    print("  -> VOLUME code" if p.startswith("/workspace") else "  -> BAKED image code")
+except Exception as e:
+    print(f"  runners not importable: {type(e).__name__} (pipeline not synced yet)")
+PYEOF
+
+echo
 echo "[python]"
 echo "  interpreter: $(command -v python3)"
 echo "  version:     $(python3 --version 2>&1)"
