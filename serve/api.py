@@ -36,7 +36,7 @@ from fastapi.responses import JSONResponse
 
 from . import code as code_mod
 from . import jobs as J
-from lingua_harness.events import EventLog, job_dir, log_root, read_tail
+from pod_harness.events import EventLog, job_dir, log_root, read_tail
 
 
 def _mint_job_id() -> str:
@@ -48,7 +48,7 @@ def _mint_job_id() -> str:
     for de-duplication is `idempotency_key`, which is checked separately.
     """
     try:
-        from lingua_harness.registry import new_job_id
+        from pod_harness.registry import new_job_id
         return new_job_id()
     except Exception:
         import secrets, time
@@ -92,6 +92,26 @@ def health() -> dict:
     return {"ok": True, "version": API_VERSION,
             "pod_id": os.environ.get("RUNPOD_POD_ID", "local"),
             "uptime_hint": "see /v1/ for the full surface (requires token)"}
+
+
+@app.get("/v1/contract", dependencies=[Depends(auth)])
+def contract() -> dict:
+    """The interface this harness implements, served by the harness itself.
+
+    A loader can validate its spec against the contract of the EXACT image it is about to
+    launch, rather than against a vendored copy that may have drifted from it. That is the
+    whole reason the two repos can share no code and still stay in step: the authority
+    travels with the running code.
+    """
+    import json
+    from pathlib import Path
+    for c in (Path("/app/contract.json"), Path(__file__).resolve().parent.parent / "contract.json"):
+        if c.is_file():
+            return json.loads(c.read_text())
+    raise HTTPException(
+        status_code=500,
+        detail={"error": "contract.json is not present in this image",
+                "hint": "the image was built without its interface definition; rebuild it"})
 
 
 @app.get("/v1/", dependencies=[Depends(auth)])

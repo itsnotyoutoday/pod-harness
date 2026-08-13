@@ -20,7 +20,7 @@ So the split is not "framework knows nothing about pipelines". It is:
       region, sources, opts — the engine passes them through untouched
 
 `params` is opaque to the transport, not invisible to the system. Stages read it; nothing
-in `lingua_harness` interprets it.
+in `pod_harness` interprets it.
 
 ## Versioning
 

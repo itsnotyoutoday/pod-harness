@@ -45,28 +45,28 @@ INIT = pathlib.Path("/usr/local/bin/lingua-init")
 
 def check_forbidden() -> list[str]:
     return [m for m in FORBIDDEN
-            if importlib.util.find_spec(f"lingua_harness.{m}") is not None]
+            if importlib.util.find_spec(f"pod_harness.{m}") is not None]
 
 
 def check_required() -> list[tuple[str, str]]:
     bad = []
     for m in REQUIRED:
         try:
-            importlib.import_module(f"lingua_harness.{m}")
+            importlib.import_module(f"pod_harness.{m}")
         except Exception as e:
             bad.append((m, f"{type(e).__name__}: {e}"))
     return bad
 
 
 def check_harness_script() -> list[tuple[str, str]]:
-    """Every lingua_harness.X named in the shell harness must import."""
+    """Every pod_harness.X named in the shell harness must import."""
     if not INIT.is_file():
         return []
-    named = sorted(set(re.findall(r"lingua_harness\.([a-z_]+)", INIT.read_text())))
+    named = sorted(set(re.findall(r"pod_harness\.([a-z_]+)", INIT.read_text())))
     bad = []
     for m in named:
         try:
-            importlib.import_module(f"lingua_harness.{m}")
+            importlib.import_module(f"pod_harness.{m}")
         except Exception as e:
             bad.append((m, f"{type(e).__name__}: {e}"))
     return bad

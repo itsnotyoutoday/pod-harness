@@ -1,10 +1,10 @@
 # Storage structure
 
-The agreed layout for every store the backend touches. **`lingua_core/paths.py` is the
+The agreed layout for every store the backend touches. **`pod_loader/paths.py` is the
 executable form of this document** — code never writes a path literal, and this file
 explains the reasoning that the code cannot.
 
-Enforced in `lingua-harness`, `lingua-loader-rpc` and every workload repo.
+Enforced in `pod-harness`, `pod-loader-rpc` and every workload repo.
 
 ---
 
@@ -72,7 +72,7 @@ is why `generated/` sits under `assets/` (we made it, same as `derived/`) while
 | **R2** | client-facing `generated/`, `releases/` | **RunPod's S3 API supports no presigned URLs** (also no ACLs, no versioning) — anything a client fetches by URL cannot come off the volume |
 | **R2, separate bucket** | `contributed/` | opt-in user recordings. Consent records, retention limits and deletion requests are bucket-level concerns |
 
-Selected by `LINGUA_S3_PROFILE` — configuration, not code. See `lingua_core/objectstore.py`.
+Selected by `LINGUA_S3_PROFILE` — configuration, not code. See `pod_loader/objectstore.py`.
 
 ### `contributed/` — what it is and why it is isolated
 

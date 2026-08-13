@@ -22,8 +22,8 @@
 # So the framework is built ONCE, here, and every other image takes it from this image:
 #
 #     FROM mmcauliffe/montreal-forced-aligner@sha256:...        # or any base a workload needs
-#     COPY --from=ghcr.io/itsnotyoutoday/lingua-harness:latest /usr/local/bin/lingua-* /usr/local/bin/
-#     COPY --from=ghcr.io/itsnotyoutoday/lingua-harness:latest /app/serve /app/serve
+#     COPY --from=ghcr.io/itsnotyoutoday/pod-harness:latest /usr/local/bin/lingua-* /usr/local/bin/
+#     COPY --from=ghcr.io/itsnotyoutoday/pod-harness:latest /app/serve /app/serve
 #
 # One framework, many bases. A workload picks whatever base its dependencies demand — MFA,
 # a CUDA image, a TTS stack — and inherits an identical control surface. Two images cannot
@@ -83,10 +83,13 @@ COPY --chmod=0755 docker/harness/lingua-init docker/harness/lingua-mount \
      /usr/local/bin/
 COPY docker/harness/Caddyfile /etc/caddy/Caddyfile
 COPY serve/ /app/serve/
-COPY lingua_harness/ /app/lingua_harness/
+COPY src/pod_harness/ /app/pod_harness/
+# The interface this image implements, served at /v1/contract so a loader can
+# validate against the EXACT image it is about to launch.
+COPY contract.json /app/contract.json
 
 # Assertions, not documentation. The same guard `pipeline.Dockerfile` carries: every
-# lingua_harness module the shell harness names must actually import. Three separate times a
+# pod_harness module the shell harness names must actually import. Three separate times a
 # Python move left the harness pointing at a module that no longer existed, and the last
 # one was only visible as a pod that billed for 13 minutes and served 404. Failing the
 # build is the cheapest place to find it.

@@ -73,9 +73,9 @@ The whole harness runs in OrbStack with no cloud involvement. This is the loop t
 never push to CI to find out whether an entrypoint works.
 
 ```bash
-docker build -f docker/test.Dockerfile -t lingua-harness-test .
+docker build -f docker/test.Dockerfile -t pod-harness-test .
 docker run -d --name lht -p 8000:8000 -e LINGUA_API_TOKEN=dev -e MAX_IDLE_SEC=0 \
-  lingua-harness-test
+  pod-harness-test
 
 curl -s localhost:8000/v1/health
 curl -s -H 'X-Lingua-Token: dev' localhost:8000/v1/ | jq
@@ -298,7 +298,7 @@ while the pod keeps billing. That settles the contradiction between plexus's
 So termination is external, and automatic:
 
 ```python
-from lingua_core.reaper import pod
+from pod_loader.reaper import pod
 with pod(create_kwargs, budget_min=15) as p:
     ...                       # pod CANNOT outlive the budget
 ```
@@ -318,9 +318,9 @@ while the main thread slept for 10 minutes was killed at 2 minutes.
 Anything a `kill -9`'d process left behind is collected by the janitor:
 
 ```bash
-python -m lingua_core.reaper list              # what's billing right now
-python -m lingua_core.reaper sweep --dry-run   # what would be collected
-python -m lingua_core.reaper sweep             # collect it
+python -m pod_loader.reaper list              # what's billing right now
+python -m pod_loader.reaper sweep --dry-run   # what would be collected
+python -m pod_loader.reaper sweep             # collect it
 ```
 
 ### Ephemeral pods are named differently from real work — deliberately

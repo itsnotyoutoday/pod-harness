@@ -1,0 +1,356 @@
+{
+  "contract_version": 1,
+  "_comment": [
+    "The complete interface between the harness and whatever launches it. This file is the",
+    "ONLY thing the two sides share; they share no code at all.",
+    "",
+    "That is deliberate. A shared Python package does not even guarantee agreement \u2014 a pip",
+    "install served a stale engine out of a Docker layer cache exactly once, which is how",
+    "the lesson was learned \u2014 whereas a versioned contract can be tested independently from",
+    "both sides. The harness asserts it honours this file; the loader asserts every spec it",
+    "emits validates against it.",
+    "",
+    "It is also served live at GET /v1/contract, so a loader can validate against the",
+    "contract of the exact image it is about to launch rather than against a vendored copy",
+    "that may have drifted."
+  ],
+  "env": {
+    "_comment": "Supplied BY the loader, consumed BY the harness. The harness computes none of these; it refuses to start rather than defaulting, because every default is a second definition of something the loader owns.",
+    "required_always": {
+      "LINGUA_WORKSPACE": "root of the mounted data view, e.g. /workspace",
+      "LINGUA_LOG_ROOT": "directory for run output. The harness used to derive this as $LINGUA_WORKSPACE/runs, which meant the layout was defined here AND in the loader; the copies drifted three times in one day.",
+      "LINGUA_MODE": "batch | serve | shell"
+    },
+    "required_for_batch": {
+      "LINGUA_JOB_ID": "the job this pod owns. Assigned at creation, never discovered \u2014 workers that scan for work can race, and object storage cannot arbitrate.",
+      "LINGUA_JOB_SPEC": "absolute path to the job spec, written BEFORE the pod is created",
+      "LINGUA_RUN_PREFIX": "object-key prefix where this job publishes status, e.g. runs/<job_id>",
+      "LINGUA_WRITE_PREFIXES": "comma-separated object-key prefixes this job may write to. The harness refuses any write outside them. A harness that could write anywhere could overwrite corpus/raw/, the one thing here that cannot be regenerated."
+    },
+    "optional": {
+      "LINGUA_CODE_ROOT": "path to the workload's code; prepended to PYTHONPATH. Absent means run the image's baked code, and the harness says which it used.",
+      "LINGUA_MOUNT_KIND": "volume | object  (default: volume)",
+      "LINGUA_API_TOKEN": "bearer token for /v1. Absent disables the API.",
+      "LINGUA_API_PORT": "default 8000",
+      "LINGUA_ENTRY": "override the batch entry module (default pod_harness.execute_job)",
+      "LINGUA_SERVE_API": "0 to skip the control surface",
+      "MAX_LIFE_SEC": "in-pod deadline. DETECTS but cannot terminate \u2014 runpodctl inside a pod returns Unauthorized, so cost control must be external.",
+      "MAX_IDLE_SEC": "idle shutdown; 0 disables"
+    },
+    "provider_supplied": {
+      "RUNPOD_POD_ID": "set by RunPod; used only for labelling, never for logic"
+    }
+  },
+  "spec": {
+    "_comment": "Written by the loader, read by the harness. `params` is opaque to both \u2014 only the workload interprets it. Everything else is framework surface the harness acts on.",
+    "type": "object",
+    "required": [
+      "spec_version",
+      "pipeline"
+    ],
+    "properties": {
+      "spec_version": {
+        "const": 2
+      },
+      "idempotency_key": {
+        "type": "string",
+        "description": "optional, unique. A re-POST returns the existing job rather than starting a second pod-hour \u2014 agents retry on timeout, and this makes that safe."
+      },
+      "code": {
+        "type": "object",
+        "properties": {
+          "root": {
+            "type": "string",
+            "description": "immutable code/<workload>/<rev>/, or code/<workload>/dev/ for iteration"
+          },
+          "rev": {
+            "type": "string"
+          }
+        }
+      },
+      "pipeline": {
+        "type": "object",
+        "required": [
+          "stages_from",
+          "stages"
+        ],
+        "properties": {
+          "stages_from": {
+            "type": "string",
+            "pattern": "^[A-Za-z_][A-Za-z0-9_.]*:[A-Za-z_][A-Za-z0-9_]*$",
+            "description": "module:attribute naming the workload's stage registry"
+          },
+          "stages": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "minItems": 1
+          }
+        }
+      },
+      "mount": {
+        "type": "object",
+        "properties": {
+          "kind": {
+            "enum": [
+              "volume",
+              "object"
+            ]
+          },
+          "root": {
+            "type": "string"
+          }
+        }
+      },
+      "runner": {
+        "type": "object",
+        "description": "how to provision. The harness ignores this entirely \u2014 it is the loader talking to itself, carried in the spec so a job record is self-describing.",
+        "properties": {
+          "provider": {
+            "type": "string"
+          },
+          "image": {
+            "type": "string"
+          },
+          "budget_min": {
+            "type": "number",
+            "exclusiveMinimum": 0
+          }
+        }
+      },
+      "resume": {
+        "type": "object",
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          },
+          "from": {
+            "description": "auto | <stage name> | never. `auto` re-runs verify_outputs() per completed stage and restarts at the first that does not verify. Never marker-driven: a .DONE marker once survived a wiped volume and reported 'done: 24' over no outputs."
+          }
+        }
+      },
+      "params": {
+        "type": "object",
+        "description": "workload-specific; opaque to the transport"
+      }
+    }
+  },
+  "events": {
+    "_comment": "Written by the harness, read by the loader. Append-only JSON lines plus an atomically-replaced status.json snapshot.",
+    "files": {
+      "$LINGUA_LOG_ROOT/$LINGUA_JOB_ID/events.jsonl": "append-only",
+      "$LINGUA_LOG_ROOT/$LINGUA_JOB_ID/status.json": "snapshot, atomic replace",
+      "$LINGUA_LOG_ROOT/$LINGUA_JOB_ID/job.log": "stdout and stderr",
+      "$LINGUA_RUN_PREFIX/status.json": "the same snapshot in object storage, so status survives the pod"
+    },
+    "event": {
+      "type": "object",
+      "required": [
+        "job_id",
+        "seq",
+        "ts",
+        "state"
+      ],
+      "properties": {
+        "job_id": {
+          "type": "string"
+        },
+        "seq": {
+          "type": "integer",
+          "description": "monotonic per job. A client resumes from where it stopped on any transport."
+        },
+        "ts": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "stage": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "index": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "total": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "state": {
+          "enum": [
+            "queued",
+            "running",
+            "done",
+            "failed",
+            "cancelled",
+            "ok",
+            "skipped",
+            "unverified"
+          ]
+        },
+        "detail": {
+          "type": "object",
+          "properties": {
+            "seconds": {
+              "type": "number"
+            },
+            "produces": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "verification": {
+              "type": "object",
+              "properties": {
+                "ok": {
+                  "type": "boolean"
+                },
+                "checks": {
+                  "type": "object"
+                },
+                "failures": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              }
+            },
+            "progress": {
+              "type": "object",
+              "properties": {
+                "done": {
+                  "type": "integer"
+                },
+                "total": {
+                  "type": "integer"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "invariants": [
+      "`state` carries StageResult.status verbatim. Collapsing `unverified` into `ok` would make status report green for exactly the bug class the verification layer exists to catch: three separate bugs where a stage reported success and produced nothing.",
+      "`seq` never decreases and never repeats within a job.",
+      "A terminal job answers a long-poll immediately rather than waiting out the timeout."
+    ]
+  },
+  "api": {
+    "_comment": "Identical on a pod and on a control plane, so a client written against one works against the other. That is what lets compute move to serverless or another vendor without touching callers.",
+    "auth": "Bearer token or X-Lingua-Token header; /v1/health is unauthenticated",
+    "endpoints": [
+      {
+        "method": "GET",
+        "path": "/v1/health",
+        "auth": false
+      },
+      {
+        "method": "GET",
+        "path": "/v1/",
+        "note": "discovery: endpoints, stage vocabulary, spec schema"
+      },
+      {
+        "method": "GET",
+        "path": "/v1/contract",
+        "note": "this file, as served by the running harness"
+      },
+      {
+        "method": "POST",
+        "path": "/v1/jobs",
+        "note": "?dry_run=true validates and runs nothing"
+      },
+      {
+        "method": "GET",
+        "path": "/v1/jobs"
+      },
+      {
+        "method": "GET",
+        "path": "/v1/jobs/{job_id}"
+      },
+      {
+        "method": "GET",
+        "path": "/v1/jobs/{job_id}/summary",
+        "note": "~500-token digest; start here"
+      },
+      {
+        "method": "GET",
+        "path": "/v1/jobs/{job_id}/stages",
+        "note": "per-stage state, seconds, verification"
+      },
+      {
+        "method": "GET",
+        "path": "/v1/jobs/{job_id}/log",
+        "note": "bounded; always reports total_bytes"
+      },
+      {
+        "method": "GET",
+        "path": "/v1/jobs/{job_id}/events",
+        "note": "?since_seq=N&wait=S long-poll"
+      },
+      {
+        "method": "GET",
+        "path": "/v1/jobs/{job_id}/artifacts"
+      },
+      {
+        "method": "DELETE",
+        "path": "/v1/jobs/{job_id}",
+        "note": "cancel"
+      }
+    ],
+    "invariants": [
+      "No unbounded responses: every payload is capped and reports total_bytes/truncated.",
+      "dry_run costs nothing and starts no stage.",
+      "Submit is idempotent when idempotency_key is supplied.",
+      "Errors carry a `hint` naming the fix."
+    ],
+    "responses": {
+      "_comment": "Response shapes a loader depends on. Added because my own polling scripts read `state` twice in one day when the job endpoint returns `job_state` \u2014 the poll silently reported None while the job had genuinely failed. An endpoint list is not enough; the keys are part of the interface.",
+      "GET /v1/jobs/{job_id}": {
+        "required": [
+          "job_id",
+          "job_state"
+        ],
+        "properties": {
+          "job_id": "string",
+          "job_state": "queued | running | done | failed | cancelled \u2014 NOT `state`",
+          "seq": "integer, cursor into the event stream",
+          "stages": "object keyed by stage name; each has state, index, seconds, verification"
+        }
+      },
+      "GET /v1/jobs/{job_id}/stages": {
+        "required": [
+          "job_id",
+          "job_state",
+          "stages"
+        ],
+        "properties": {
+          "stages": "array, ordered by index"
+        }
+      },
+      "POST /v1/jobs": {
+        "required": [
+          "job_id"
+        ],
+        "properties": {
+          "job_id": "server-minted ULID, sortable by creation"
+        }
+      },
+      "GET /v1/health": {
+        "required": [
+          "ok",
+          "version"
+        ],
+        "auth": false
+      }
+    }
+  }
+}

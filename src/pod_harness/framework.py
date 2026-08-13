@@ -222,7 +222,7 @@ class NullReporter:
     """Does nothing, cheaply — the default.
 
     Declared HERE rather than imported from the status module on purpose: the stage model
-    must not depend on the transport that reports it. `lingua_harness.status.EventReporter`
+    must not depend on the transport that reports it. `pod_harness.status.EventReporter`
     subclasses this and writes the event protocol; a local run with no harness gets the
     no-op and behaves identically.
     """

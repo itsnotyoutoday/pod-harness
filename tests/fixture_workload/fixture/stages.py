@@ -6,7 +6,7 @@ harness test exercises the real code-loading path rather than a special case for
 """
 import time
 
-from lingua_harness.framework import Stage, Verification
+from pod_harness.framework import Stage, Verification
 
 
 class Acquire(Stage):

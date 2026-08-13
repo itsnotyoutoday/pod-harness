@@ -58,13 +58,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Contract and independence
+        run: |
+          PYTHONPATH=src python3 docker/assert_contract.py
+          PYTHONPATH=src python3 docker/assert_independence.py
+
       - name: Build harness test image
-        run: docker build -f docker/test.Dockerfile -t lingua-harness-test .
+        run: docker build -f docker/test.Dockerfile -t pod-harness-test .
 
       - name: Run harness
         run: |
           docker run -d --name lht -p 8000:8000 \
-            -e LINGUA_API_TOKEN=ci -e MAX_IDLE_SEC=0 lingua-harness-test
+            -e LINGUA_API_TOKEN=ci -e MAX_IDLE_SEC=0 pod-harness-test
           for i in $(seq 1 30); do
             curl -sf http://localhost:8000/v1/health >/dev/null && break || sleep 1
           done
@@ -213,7 +218,7 @@ jobs:
           # storage benchmark whose only import is boto3 was pulling multiple gigabytes
           # of torch and MFA — 2-4 minutes of image pull on every retry.
           - dockerfile: docker/harness.Dockerfile
-            image: lingua-harness
+            image: pod-harness
           # The ML image: forced alignment plus the measurement stack.
           - dockerfile: docker/pipeline.Dockerfile
             image: lingua-pipeline

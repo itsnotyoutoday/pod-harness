@@ -50,6 +50,40 @@ from pathlib import Path
 from typing import Any
 
 
+
+def mount_roots(spec: dict | None = None) -> dict[str, str]:
+    """The named directories a workload expects, relative to the mount root.
+
+    Supplied by the loader, never invented here. This used to be hardcoded as
+    corpus/, out/ and code/corpus_research.json — the linguistics layout, baked into what
+    is otherwise a completely generic pod harness. Imports looked clean; the coupling was
+    in string literals, which is why the dependency graph did not show it.
+
+    A harness that names a workload's directories can only ever serve that workload. A
+    harness that is told them serves any of them, which is the whole point.
+
+    Precedence: spec.mount.roots, then LINGUA_MOUNT_ROOTS as JSON, then a single generic
+    `data` root — a fallback that belongs to no domain, so a workload that forgets to
+    declare its roots gets an obviously-wrong answer rather than a plausibly-wrong one.
+    """
+    import json as _json
+    if spec:
+        r = (spec.get("mount") or {}).get("roots")
+        if isinstance(r, dict) and r:
+            return {k: str(v) for k, v in r.items()}
+    raw = os.environ.get("LINGUA_MOUNT_ROOTS", "").strip()
+    if raw:
+        try:
+            r = _json.loads(raw)
+            if isinstance(r, dict) and r:
+                return {k: str(v) for k, v in r.items()}
+        except ValueError:
+            raise ValueError(
+                f"LINGUA_MOUNT_ROOTS is not valid JSON: {raw[:80]!r}\n"
+                f"  Expected e.g. {{\"corpus_root\": \"corpus\", \"out_root\": \"out\"}}")
+    return {"data_root": "data"}
+
+
 class MountStrategy(ABC):
     """How a job sees its data. Chosen from JobSpec.mount.kind."""
 
@@ -91,12 +125,15 @@ class VolumeMount(MountStrategy):
         self.root = Path(root)
 
     def prepare(self, spec: dict) -> dict:
-        roots = {"corpus_root": self.root / "corpus",
-                 "out_root": self.root / "out",
-                 "manifest": self.root / "code" / "corpus_research.json"}
-        for p in (roots["corpus_root"], roots["out_root"]):
-            p.mkdir(parents=True, exist_ok=True)
-        missing = [str(p) for p in (roots["corpus_root"],) if not p.exists()]
+        rel = mount_roots(spec)
+        roots = {k: self.root / v for k, v in rel.items()}
+        # Directories, not files: a declared root ending in a suffix is a pointer to a
+        # file the workload supplies, and creating it as a directory would mask its
+        # absence with something worse than an error.
+        for k, p in roots.items():
+            if not p.suffix:
+                p.mkdir(parents=True, exist_ok=True)
+        missing = [str(p) for p in roots.values() if not p.exists()]
         return {**{k: str(v) for k, v in roots.items()},
                 "ready": not missing, "missing": missing, "strategy": self.kind}
 
@@ -105,9 +142,10 @@ class VolumeMount(MountStrategy):
         return {"published": True, "strategy": self.kind, "location": str(out_root)}
 
     def launch_env(self, spec: dict) -> dict:
-        return {"LINGUA_CORPUS_ROOT": str(self.root / "corpus"),
-                "LINGUA_OUT_ROOT": str(self.root / "out"),
-                "LINGUA_MANIFEST": str(self.root / "code" / "corpus_research.json")}
+        """Export each declared root as LINGUA_<NAME>, derived from the name the loader
+        chose rather than from a list this harness carries."""
+        return {f"LINGUA_{k.upper()}": str(self.root / v)
+                for k, v in mount_roots(spec).items()}
 
 
 class ObjectMount(MountStrategy):
@@ -132,25 +170,29 @@ class ObjectMount(MountStrategy):
         return get_storage(self.profile)
 
     def prepare(self, spec: dict) -> dict:
-        corpus = self.scratch / "corpus"
-        out = self.scratch / "out"
-        corpus.mkdir(parents=True, exist_ok=True)
-        out.mkdir(parents=True, exist_ok=True)
+        rel_roots = mount_roots(spec)
+        roots = {k: self.scratch / v for k, v in rel_roots.items()}
+        for k, d in roots.items():
+            if not d.suffix:
+                d.mkdir(parents=True, exist_ok=True)
+        # Sources land in the FIRST declared root, which the loader orders deliberately.
+        # This used to be hardcoded to a directory named "corpus", which quietly made a
+        # generic pod harness serve exactly one domain.
+        landing = next(iter(roots.values()))
         pulled = []
         try:
             st = self._storage()
             for src in spec.get("sources", []):
                 rel = src.get("path") or f"raw/{src['id']}"
                 key = f"{self.prefix}/{rel}".strip("/")
-                st.download_prefix(key, corpus / rel)
+                st.download_prefix(key, landing / rel)
                 pulled.append(key)
         except Exception as exc:
             return {"ready": False, "strategy": self.kind, "missing": [],
                     "error": f"{type(exc).__name__}: {exc}",
                     "hint": "check LINGUA_S3_* env on the compute — ObjectMount needs "
                             "credentials at launch, unlike VolumeMount"}
-        return {"corpus_root": str(corpus), "out_root": str(out),
-                "manifest": str(self.scratch / "corpus_research.json"),
+        return {**{k: str(v) for k, v in roots.items()},
                 "ready": True, "pulled": pulled, "strategy": self.kind}
 
     def publish(self, spec: dict, out_root: Path) -> dict:
@@ -174,9 +216,9 @@ class ObjectMount(MountStrategy):
         """
         from .objectstore import resolve_config
         cfg = resolve_config(self.profile)
-        env = {"LINGUA_CORPUS_ROOT": str(self.scratch / "corpus"),
-               "LINGUA_OUT_ROOT": str(self.scratch / "out"),
-               "LINGUA_MOUNT_KIND": "object"}
+        env = {f"LINGUA_{k.upper()}": str(self.scratch / v)
+               for k, v in mount_roots(spec).items()}
+        env["LINGUA_MOUNT_KIND"] = "object"
         if cfg is not None:
             env.update({"LINGUA_S3_BUCKET": cfg.bucket,
                         "LINGUA_S3_ENDPOINT": cfg.endpoint_url,
@@ -332,7 +374,7 @@ class FuseMount(MountStrategy):
             return {"ready": False, "strategy": self.kind,
                     "error": f"{type(exc).__name__}: {exc}"}
 
-        return {"corpus_root": str(self.mountpoint),
+        return {"corpus_root": str(self.mountpoint),   # FUSE exposes ONE tree
                 "out_root": str(self.mountpoint.parent / "out"),
                 "manifest": str(self.mountpoint.parent / "corpus_research.json"),
                 "ready": True, "strategy": self.kind, "remote": remote, "probe": probe}

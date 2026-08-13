@@ -95,7 +95,7 @@ COPY requirements-pipeline.txt requirements-serve.txt ./
 RUN $PY -m pip install --no-cache-dir \
         -r requirements-pipeline.txt -r requirements-serve.txt
 
-# --- lingua_harness: the stage engine ------------------------------------------------------
+# --- pod_harness: the stage engine ------------------------------------------------------
 # The image ships the ENGINE (stage model, runner, resume, status protocol) but never a
 # workload's stages — those arrive at runtime from the volume. Pinned by ref so an image
 # rebuild is the only thing that can change the engine under a running fleet.
@@ -110,7 +110,10 @@ RUN $PY -m pip install --no-cache-dir \
 # they shipped beside; and a floating ref served a STALE build out of the layer cache,
 # which is why a SHA was pinned here and had to be bumped by hand on every engine change.
 # The engine is part of this repo now, so the image is self-contained and always coherent.
-COPY lingua_harness/ /app/lingua_harness/
+COPY src/pod_harness/ /app/pod_harness/
+# The interface this image implements, served at /v1/contract so a loader can
+# validate against the EXACT image it is about to launch.
+COPY contract.json /app/contract.json
 
 # --- 3b. ABI check, immediately after the install --------------------------------------
 # Imports every compiled extension in dependency order. Without this the first symptom of
@@ -119,7 +122,7 @@ COPY lingua_harness/ /app/lingua_harness/
 RUN echo "=== ABI check ===" \
  && $PY -c "\
 import numpy, scipy, scipy.spatial, sklearn, librosa, soundfile, torch, torchaudio, speechbrain, sys; \
-import lingua_harness, lingua_harness.framework, lingua_harness.execute_job; \
+import pod_harness, pod_harness.framework, pod_harness.execute_job; \
 print('compiled stack imports OK on', sys.version.split()[0]); \
 print('numpy', numpy.__version__, '| scipy', scipy.__version__, \
       '| torch', torch.__version__, '| cuda', torch.version.cuda)"
@@ -211,7 +214,7 @@ RUN echo "=== runtime sanity check ===" \
  && echo "python3 -> $(readlink -f $(which python3))" \
  && python3 --version \
  && python3 /tmp/assert_independence.py \
- && python3 -m lingua_harness.execute_job --help >/dev/null \
+ && python3 -m pod_harness.execute_job --help >/dev/null \
  && python3 -c "import serve.jobs, serve.code, serve.api; print('serve imports OK')" \
  && ffmpeg -version | head -1 \
  && mfa version \

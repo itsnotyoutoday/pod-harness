@@ -28,7 +28,7 @@ name: Publish workload code
 #
 #   jobs:
 #     publish:
-#       uses: itsnotyoutoday/lingua-harness/.github/workflows/publish-code.yml@main
+#       uses: itsnotyoutoday/pod-harness/.github/workflows/publish-code.yml@main
 #       with:
 #         stages_from: trainer.stages:STAGES
 #       secrets: inherit
@@ -44,7 +44,7 @@ on:
         description: "module:ATTR of the stage registry; empty to skip the manifest"
         type: string
         default: ""
-      lingua_harness_ref:
+      pod_harness_ref:
         description: engine ref used to generate capabilities.json
         type: string
         default: main
@@ -68,10 +68,10 @@ jobs:
         if: inputs.stages_from != ''
         run: |
           set -euo pipefail
-          pip install -q "git+https://github.com/itsnotyoutoday/lingua-harness.git@${{ inputs.lingua_harness_ref }}"
+          pip install -q "git+https://github.com/itsnotyoutoday/pod-harness.git@${{ inputs.pod_harness_ref }}"
           # Run from the code root so the workload's own package is importable.
           cd "${{ inputs.code_dir }}"
-          PYTHONPATH=. python -m lingua_harness.capabilities "${{ inputs.stages_from }}" \
+          PYTHONPATH=. python -m pod_harness.capabilities "${{ inputs.stages_from }}" \
             -o capabilities.json --rev "${GITHUB_SHA}"
           cat capabilities.json
 

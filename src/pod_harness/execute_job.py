@@ -1,6 +1,6 @@
 """The generic entry point. Runs a workload's stages; knows nothing about what they do.
 
-    python -m lingua_harness.execute_job --spec /workspace/jobs/<job_id>.json
+    python -m pod_harness.execute_job --spec /workspace/jobs/<job_id>.json
 
 ## What moved, and why it matters
 
@@ -65,7 +65,7 @@ def load_registry(stages_from: str) -> dict[str, Any]:
     if registry is None:
         raise SystemExit(
             f"{module_path!r} has no attribute {attr!r}. A stage registry is a dict of "
-            f"{{name: StageClass}} — see lingua-loader-rpc/README.md")
+            f"{{name: StageClass}} — see pod-loader-rpc/README.md")
     if not isinstance(registry, dict):
         raise SystemExit(
             f"{stages_from} is {type(registry).__name__}, expected a dict of "

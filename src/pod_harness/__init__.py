@@ -1,4 +1,4 @@
-"""lingua_harness — the in-pod execution engine.
+"""pod_harness — the in-pod execution engine.
 
 Self-contained by design: this package imports nothing of ours. It knows HOW to run a
 job — stage ordering, wiring, verification, resume, status reporting — and nothing about

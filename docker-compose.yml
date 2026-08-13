@@ -101,8 +101,8 @@ services:
     build:
       context: .
       dockerfile: docker/test.Dockerfile
-    image: lingua-harness-test
-    container_name: lingua-harness
+    image: pod-harness-test
+    container_name: pod-harness
     environment:
       LINGUA_API_TOKEN: ${LINGUA_API_TOKEN:-dev}
       LINGUA_STATUS_S3: "0"

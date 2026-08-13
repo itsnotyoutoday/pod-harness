@@ -1,4 +1,4 @@
-# lingua-harness-test — the SAME harness, without the ten-minute conda layer.
+# pod-harness-test — the SAME harness, without the ten-minute conda layer.
 #
 # ## Why this image exists
 #
@@ -18,8 +18,8 @@
 # pipeline.Dockerfile is what guards them.
 #
 # Build and run:
-#   docker build -f docker/test.Dockerfile -t lingua-harness-test .
-#   docker run --rm -p 8000:8000 -e LINGUA_API_TOKEN=dev lingua-harness-test
+#   docker build -f docker/test.Dockerfile -t pod-harness-test .
+#   docker run --rm -p 8000:8000 -e LINGUA_API_TOKEN=dev pod-harness-test
 
 FROM python:3.11-slim
 
@@ -41,7 +41,7 @@ COPY requirements-serve.txt .
 RUN pip install --no-cache-dir -r requirements-serve.txt
 
 # Same engine the real image carries — so the harness test exercises the real code path
-# (serve/jobs.py shelling lingua_harness.execute_job) rather than a stand-in for it.
+# (serve/jobs.py shelling pod_harness.execute_job) rather than a stand-in for it.
 # Pinned by SHA, not a branch. A mutable ref means Docker's layer cache can serve a
 # STALE engine: the RUN line is unchanged, so the cache hits even though the branch has
 # moved. That is the same immutability argument as code/<repo>/<sha>/ for workloads —
@@ -53,7 +53,10 @@ RUN pip install --no-cache-dir -r requirements-serve.txt
 # they shipped beside; and a floating ref served a STALE build out of the layer cache,
 # which is why a SHA was pinned here and had to be bumped by hand on every engine change.
 # The engine is part of this repo now, so the image is self-contained and always coherent.
-COPY lingua_harness/ /app/lingua_harness/
+COPY src/pod_harness/ /app/pod_harness/
+# The interface this image implements, served at /v1/contract so a loader can
+# validate against the EXACT image it is about to launch.
+COPY contract.json /app/contract.json
 
 COPY docker/harness/Caddyfile /etc/caddy/Caddyfile
 COPY docker/harness/lingua-init         /usr/local/bin/lingua-init
