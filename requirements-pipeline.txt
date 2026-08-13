@@ -19,4 +19,22 @@
 requests>=2.31
 pypdf>=4.0
 boto3>=1.34            # S3-compatible object storage
-speechbrain>=1.0       # ECAPA speaker embeddings (pure python over torch)
+
+# ECAPA speaker embeddings. The >=1.1 floor is NOT cosmetic.
+#
+# speechbrain 1.0.3 — which `>=1.0` resolved to, and which plexus verified against an
+# older stack — calls huggingface_hub.hf_hub_download(use_auth_token=...). That argument
+# was removed in huggingface_hub 1.x, and the MFA base image ships 1.23.0, so 1.0.3 dies
+# with:
+#
+#     TypeError: hf_hub_download() got an unexpected keyword argument 'use_auth_token'
+#
+# This is NOT only a build-time problem. pipeline/speech/diarize.py:127 calls
+# EncoderClassifier.from_hparams() at RUNTIME, so the embed stage would fail on a pod
+# exactly the same way. Pinning huggingface_hub<1.0 instead was rejected: MFA's own
+# models/classes.py imports huggingface_hub, so dragging it backwards risks breaking
+# alignment to fix embedding.
+#
+# speechbrain 1.1.0 uses token= and fetches ECAPA cleanly against hf_hub 1.23 (verified).
+speechbrain>=1.1
+

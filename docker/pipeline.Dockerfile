@@ -6,150 +6,149 @@
 # OUT: the pipeline code, the corpora, the rulesets, the audio. Those arrive at runtime
 #      from the volume / S3.
 #
-# That split is not tidiness, it is what makes the GHCR package PUBLIC — and a public
-# package is what avoids both registry auth on every pod template and the Docker Hub
-# anonymous pull rate-limit that plexus kept hitting from RunPod datacentre IPs.
-# It also means a code change needs no image rebuild at all.
+# That split is what makes the GHCR package PUBLIC — and a public package avoids both
+# registry auth on every pod template and the Docker Hub anonymous pull rate-limit that
+# plexus kept hitting from RunPod datacentre IPs. It also means a code change needs no
+# image rebuild at all.
 #
-# ## Two hard constraints, inherited from Dockerfile.pod
+# ## Why the OFFICIAL MFA image is the base
 #
-#   linux/amd64      RunPod is x86. An arm64 image built on an M-series Mac will not start
-#                    there, and it fails opaquely.
-#   CPU-only torch   from the /whl/cpu index, installed BEFORE the generic resolver so
-#                    speechbrain cannot drag the multi-gigabyte CUDA build in behind it.
-#                    This job measures ~12 CPU-min against ~6 GPU-min: CUDA buys minutes
-#                    and costs ~8 GB.
+# Two CI builds died trying to hand-assemble a conda environment here:
 #
-# ## Why micromamba is the base
+#   1. pip-installed scipy against Ubuntu's older libstdc++ ->
+#      ImportError: ... version `CXXABI_1.3.15' not found
+#   2. moving the compiled stack to conda-forge ->
+#      libmamba: Could not solve for environment specs
 #
-# MFA is conda-only — `pip install montreal-forced-aligner` fails because `baumwelch` has
-# no PyPI distribution. So conda has to be underneath and pip goes on top. Note this is
-# why we do NOT rebase on runpod/base the way plexus did; runpodctl is a single static Go
-# binary we can just drop in, so nothing is lost.
+# Both are the same underlying problem: MFA pins a large, opinionated dependency set, and
+# any pin of ours has to agree with it. Upstream already solved that, and their solution is
+# published. `runners/batch_pod.py` reached the same conclusion independently and runs this
+# exact image on pods today.
 #
-# ## Layer order is deliberate
+# What it already carries, verified by inspection:
 #
-# Slowest and most stable first, so a change to the harness or requirements does not
-# rebuild the ten-minute conda layer, and RunPod re-pulls only the small tail. Layer COUNT
-# costs nothing — Docker pulls layers in parallel — but layer ORDER is worth real minutes.
+#   MFA 3.4.2, python 3.13, conda env at /env
+#   numpy 2.4.6  scipy 1.18.0  librosa 0.11.0  soundfile 0.14.0  scikit-learn 1.9.0
+#   torch 2.8.0 — CPU-ONLY (torch.version.cuda is None), which is exactly what we want:
+#                 the measurement stages are CPU-bound and CUDA would add ~8 GB
+#   ffmpeg + ffprobe on PATH, tar, tini, git
+#
+# So this file adds six pip packages, three static binaries, the weights and the harness.
+#
+# ## The size trade, stated honestly
+#
+# The base is ~5.3 GB and includes things Spanish work never touches — sudachidict_core
+# (208 MB, Japanese), pythainlp (64 MB, Thai), statsmodels, sympy. We cannot delete those
+# to shrink the pull: removing a file in a later layer only MASKS it, the base's bytes
+# still ship. Genuinely shrinking it needs a multi-stage `COPY --from` that flattens a
+# pruned /env into one layer. That is a worthwhile follow-up, deliberately not attempted
+# before the first green build.
+#
+# Offsetting it: `batch_pod.py` already pulls this image, so RunPod machines in our pool
+# may hold its layers, and a pull that hits cache costs nothing.
+#
+# ## Pinned by digest
+#
+# `:latest` would let an upstream rebuild change our image with no commit from us. To
+# update deliberately:
+#   docker pull mmcauliffe/montreal-forced-aligner:latest
+#   docker image inspect … --format '{{index .RepoDigests 0}}'
+FROM --platform=linux/amd64 mmcauliffe/montreal-forced-aligner@sha256:33ce62903cc9b213324634ef2461c3b32ff96c648035e18bc6112628491bb41d
 
-FROM --platform=linux/amd64 mambaorg/micromamba:1.5-jammy
-
+# The base runs as mfauser. RunPod pods run as root, and a non-root user cannot write to
+# the network volume mount without extra setup.
 USER root
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1 \
-    MAMBA_DOCKERFILE_ACTIVATE=1 \
-    DEBIAN_FRONTEND=noninteractive
+    DEBIAN_FRONTEND=noninteractive \
+    PY=/env/bin/python
 
-# --- 1. system ------------------------------------------------------------------------
-# ffmpeg/ffprobe do every conversion and probe; libsndfile1 backs soundfile; procps keeps
-# joblib's loky cleanup quiet; tini reaps the sidecars so a crashed workload leaves no
-# zombies holding the pod open.
+# --- 1. the few system tools the base lacks -------------------------------------------
+# ffmpeg, ffprobe, tar, tini and git are already present in /env — only these are missing.
+# fuse3 provides fusermount3, needed to unmount cleanly in FuseMount.publish().
 RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends \
-        ffmpeg libsndfile1 ca-certificates curl git tar procps tzdata tini unzip fuse3 \
+        curl ca-certificates unzip procps fuse3 \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # --- 2. static tooling ----------------------------------------------------------------
+# caddy serves logs and proxies /v1; runpodctl is best-effort self-delete; rclone backs
+# the FuseMount strategy. All three are single static binaries.
 ARG CADDY_VERSION=2.8.4
 RUN curl -sL "https://github.com/caddyserver/caddy/releases/download/v${CADDY_VERSION}/caddy_${CADDY_VERSION}_linux_amd64.tar.gz" \
         | tar -xz -C /usr/local/bin caddy \
  && chmod +x /usr/local/bin/caddy \
  && curl -sL https://github.com/runpod/runpodctl/releases/latest/download/runpodctl-linux-amd64 \
         -o /usr/local/bin/runpodctl \
- && chmod +x /usr/local/bin/runpodctl && curl -sL https://downloads.rclone.org/rclone-current-linux-amd64.zip -o /tmp/rc.zip \
+ && chmod +x /usr/local/bin/runpodctl \
+ && curl -sL https://downloads.rclone.org/rclone-current-linux-amd64.zip -o /tmp/rc.zip \
  && cd /tmp && unzip -q rc.zip && mv rclone-*/rclone /usr/local/bin/rclone \
  && chmod +x /usr/local/bin/rclone && rm -rf /tmp/rc.zip /tmp/rclone-*
 
-# --- 3. MFA + the compiled scientific stack (the slow layer — keep it high) ------------
-#
-# numpy/scipy/librosa/soundfile/scikit-learn come from conda-forge, NOT pip, and that is
-# load-bearing rather than stylistic. Installed by pip they are built against a newer
-# libstdc++ than Ubuntu jammy ships, and since the system copy wins the linker search the
-# import dies with:
-#
-#     ImportError: /lib/x86_64-linux-gnu/libstdc++.so.6: version `CXXABI_1.3.15' not found
-#                  (required by .../scipy/spatial/_distance_pybind...so)
-#
-# Taking them from the same conda-forge environment as MFA means one consistent toolchain
-# and one libstdc++. The alternative — forcing LD_LIBRARY_PATH=/opt/conda/lib — makes
-# conda's libraries shadow the system ones for every binary in the image, including the
-# apt-installed ffmpeg, which is a much larger blast radius for the same problem.
-#
-# Pip keeps only what conda-forge does not carry well: the CPU-only torch wheels and the
-# pure-Python packages.
-RUN micromamba install -y -n base -c conda-forge \
-        python=3.11 \
-        montreal-forced-aligner \
-        numpy scipy librosa soundfile scikit-learn \
- && micromamba clean --all --yes
-
-ENV PATH=/opt/conda/bin:$PATH
-
-# --- 4. CPU torch, before anything that could pull CUDA -------------------------------
-RUN /opt/conda/bin/python -m pip install --no-cache-dir \
-        --index-url https://download.pytorch.org/whl/cpu torch torchaudio
-
-# --- 5. the rest of the python stack --------------------------------------------------
+# --- 3. the handful of python packages the base lacks ---------------------------------
+# Into the base's own interpreter, so there is one environment and one libstdc++. These
+# are pure-python or thin wrappers over what is already installed, so no ABI question
+# arises — which is the entire reason for adopting this base.
 WORKDIR /app
 COPY requirements-pipeline.txt requirements-serve.txt ./
-RUN /opt/conda/bin/python -m pip install --no-cache-dir \
+RUN $PY -m pip install --no-cache-dir \
         -r requirements-pipeline.txt -r requirements-serve.txt
 
-# --- 5b. ABI check, immediately after the installs ------------------------------------
-# Imports every compiled extension in dependency order and prints which libstdc++ actually
-# resolved. Without this the first symptom of a conda/pip ABI mismatch is a CXXABI
-# ImportError raised from inside a model download in the NEXT layer, which reads like a
-# network problem and sends you debugging the wrong thing entirely. Fail here, where the
-# error names its own cause.
+# --- 3b. ABI check, immediately after the install --------------------------------------
+# Imports every compiled extension in dependency order. Without this the first symptom of
+# a mismatch is an ImportError raised from inside a model download in the next layer,
+# which reads like a network problem and sends you debugging the wrong thing.
 RUN echo "=== ABI check ===" \
- && python3 -c "\
-import ctypes.util, subprocess, sys; \
-import numpy, scipy, scipy.spatial, sklearn, librosa, soundfile, torch, torchaudio, speechbrain; \
-print('compiled stack imports OK'); \
-print('numpy', numpy.__version__, '| scipy', scipy.__version__, '| torch', torch.__version__)" \
- && python3 -c "\
-import scipy.spatial, subprocess; \
-so = scipy.spatial._distance_pybind.__file__; \
-print(subprocess.run(['ldd', so], capture_output=True, text=True).stdout.strip())" \
-    | grep -E "libstdc\+\+" || true
+ && $PY -c "\
+import numpy, scipy, scipy.spatial, sklearn, librosa, soundfile, torch, torchaudio, speechbrain, sys; \
+print('compiled stack imports OK on', sys.version.split()[0]); \
+print('numpy', numpy.__version__, '| scipy', scipy.__version__, \
+      '| torch', torch.__version__, '| cuda', torch.version.cuda)"
 
-# --- 6. baked weights -----------------------------------------------------------------
-# These MUST live outside /workspace and /corpus. RunPod mounts the network volume over
-# /workspace, and a mount SHADOWS whatever the image had at that path — so weights baked
-# under the mount point are invisible at runtime and the download happens anyway.
-# lingua-seed-models links these into the cache tree at container start.
+# --- 4. baked weights ------------------------------------------------------------------
+# MUST live outside /workspace: RunPod mounts the network volume there, and a mount
+# SHADOWS whatever the image had at that path — so weights baked under the mount point are
+# invisible at runtime and download again anyway. lingua-seed-models links these into the
+# cache tree at container start.
+# HF_HOME matters more than it looks. speechbrain's `savedir` holds SYMLINKS into the
+# huggingface cache, not copies — so the real 85 MB of ECAPA weights live wherever HF_HOME
+# points. Left at its default that is /root/.cache/huggingface, which means the baked
+# weights would sit outside /opt and the symlink chain would depend on nothing ever
+# shadowing /root. Pointing it into /opt keeps the whole bake self-contained under one
+# path, consistent with the rule that baked artifacts never live where a mount can hide
+# them. It is set again in the runtime ENV below so the pipeline resolves the same cache.
 ENV LINGUA_MODEL_ROOT=/opt/models \
     LINGUA_BAKED_MFA=/opt/mfa \
-    MFA_ROOT_DIR=/opt/mfa
+    MFA_ROOT_DIR=/opt/mfa \
+    HF_HOME=/opt/models/hf
 
 RUN mkdir -p /opt/models /opt/mfa \
  && mfa model download acoustic spanish_mfa \
  && mfa model download dictionary spanish_mfa \
- && /opt/conda/bin/python -c "\
+ && $PY -c "\
 from speechbrain.inference.speaker import EncoderClassifier; \
 EncoderClassifier.from_hparams(source='speechbrain/spkrec-ecapa-voxceleb', \
                                savedir='/opt/models/speechbrain/ecapa'); \
 print('ECAPA cached')" \
  && du -sh /opt/mfa /opt/models
 
-# --- 7. harness + control API ---------------------------------------------------------
+# --- 5. harness + control API ----------------------------------------------------------
+# One COPY for the scripts rather than one per file: seven layers holding 25 KB is pure
+# manifest overhead.
 COPY docker/harness/Caddyfile /etc/caddy/Caddyfile
-COPY docker/harness/lingua-init         /usr/local/bin/lingua-init
-COPY docker/harness/lingua-preflight    /usr/local/bin/lingua-preflight
-COPY docker/harness/lingua-watchdog     /usr/local/bin/lingua-watchdog
-COPY docker/harness/lingua-self-delete  /usr/local/bin/lingua-self-delete
-COPY docker/harness/lingua-seed-models  /usr/local/bin/lingua-seed-models
-COPY docker/harness/lingua-mount         /usr/local/bin/lingua-mount
+COPY docker/harness/lingua-init docker/harness/lingua-preflight \
+     docker/harness/lingua-watchdog docker/harness/lingua-self-delete \
+     docker/harness/lingua-seed-models docker/harness/lingua-mount \
+     /usr/local/bin/
 RUN chmod +x /usr/local/bin/lingua-*
 
 COPY serve/ /app/serve/
 COPY control/ /app/control/
 
-# --- 8. runtime defaults --------------------------------------------------------------
-# CACHE_ROOT and the log root sit on the volume: writable, growable, and they survive the
-# pod. Only the baked subdirectories resolve into /opt, via symlink.
+# --- 6. runtime defaults ---------------------------------------------------------------
+# CACHE_ROOT and the log root sit on the volume: writable, growable, surviving the pod.
+# Only the baked subdirectories resolve into /opt, via symlink.
 ENV LINGUA_CORPUS_ROOT=/workspace/corpus \
     LINGUA_OUT_ROOT=/workspace/out \
     LINGUA_CACHE_ROOT=/workspace/.cache \
@@ -157,26 +156,32 @@ ENV LINGUA_CORPUS_ROOT=/workspace/corpus \
     LINGUA_MANIFEST=/workspace/manifest/corpus_research.json \
     LINGUA_API_PORT=8010 \
     LINGUA_SERVE_API=1 \
-    PYTHONPATH=/app
+    PYTHONPATH=/app \
+    HF_HOME=/opt/models/hf \
+    PATH=/env/bin:$PATH
 
 RUN mkdir -p /workspace/corpus /workspace/out /workspace/logs /workspace/manifest
 
-# --- 9. build-time sanity check -------------------------------------------------------
+# --- 7. build-time sanity check ---------------------------------------------------------
 # Fails the image, and therefore the GHA run, the moment a dependency is broken or landed
 # on a different interpreter than `python3` resolves to. plexus added this after a real
 # incident where pip succeeded and the runtime still raised ModuleNotFoundError.
 RUN echo "=== runtime sanity check ===" \
  && echo "python3 -> $(readlink -f $(which python3))" \
  && python3 --version \
- && python3 -c "\
-import numpy, scipy, librosa, soundfile, torch, torchaudio, speechbrain, sklearn, boto3, fastapi, uvicorn, sys; \
-assert not torch.cuda.is_available() or True; \
-print('imports OK on', sys.executable, sys.version.split()[0]); \
-print('torch', torch.__version__)" \
- && python3 -c "import serve.events, serve.jobs; print('harness imports OK')" \
+ && python3 -c "import serve.events, serve.jobs, control.mount, control.objectstore; \
+print('harness + control imports OK')" \
  && ffmpeg -version | head -1 \
  && mfa version \
  && test -d /opt/models/speechbrain/ecapa || (echo 'ECAPA not baked' && exit 1) \
+ && python3 -c "\
+import os; \
+p='/opt/models/speechbrain/ecapa/embedding_model.ckpt'; \
+assert os.path.exists(os.path.realpath(p)), 'ECAPA symlink dangles: '+os.path.realpath(p); \
+sz=os.path.getsize(os.path.realpath(p)); \
+assert sz > 10_000_000, f'ECAPA weights look truncated: {sz} bytes'; \
+print(f'ECAPA weights resolve, {sz/1e6:.1f} MB')" \
+ && test -d /opt/mfa/pretrained_models || (echo 'MFA models not baked' && exit 1) \
  && runpodctl version \
  && caddy version \
  && rclone version | head -1 \
