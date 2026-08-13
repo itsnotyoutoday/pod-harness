@@ -6,7 +6,10 @@ build-backend = "setuptools.build_meta"
 name = "pod-harness"
 version = "0.1.0"
 description = "The in-pod execution engine: stage model, verification, resume, status"
-requires-python = ">=3.10"
+# 3.9 because that is what ships on macOS and what this actually runs on — every module
+# imports under it, since the annotations are all postponed via __future__. Claiming 3.10
+# made "pip install -e ." fail outright on the maintainer's own machine.
+requires-python = ">=3.9"
 
 # Deliberately minimal, and it must stay that way. This is imported inside every image,
 # including GPU ones where each megabyte is cold-start latency. boto3 is here because the

@@ -1,0 +1,11 @@
+Metadata-Version: 2.4
+Name: pod-harness
+Version: 0.1.0
+Summary: The in-pod execution engine: stage model, verification, resume, status
+Requires-Python: >=3.9
+Requires-Dist: boto3>=1.34
+Provides-Extra: serve
+Requires-Dist: fastapi>=0.110; extra == "serve"
+Requires-Dist: uvicorn[standard]>=0.29; extra == "serve"
+Provides-Extra: dev
+Requires-Dist: pytest>=8; extra == "dev"
