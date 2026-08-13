@@ -120,12 +120,23 @@ print('numpy', numpy.__version__, '| scipy', scipy.__version__, \
 # them. It is set again in the runtime ENV below so the pipeline resolves the same cache.
 ENV LINGUA_MODEL_ROOT=/opt/models \
     LINGUA_BAKED_MFA=/opt/mfa \
-    MFA_ROOT_DIR=/opt/mfa \
     HF_HOME=/opt/models/hf
 
+# MFA_ROOT_DIR is set INLINE for the download only, never as a persistent ENV.
+#
+# It has two different correct values at two different times, and collapsing them into one
+# ENV silently broke the seeding. At BUILD time it must point into /opt so the models bake
+# outside any future mount point. At RUN time it must point at writable volume storage,
+# because MFA writes corpus and temporary state under this root during alignment — with it
+# left at /opt that state lands on the container disk (20 GB on the pod we tested) instead
+# of the volume, which is fine for a smoke test and wrong for a real alignment run.
+#
+# Setting both to /opt/mfa also made lingua-seed-models a no-op: source and destination
+# were the same path, so it logged "keep … not overriding" and linked nothing. Verified on
+# a real pod. The runtime value is set in the ENV block further down.
 RUN mkdir -p /opt/models /opt/mfa \
- && mfa model download acoustic spanish_mfa \
- && mfa model download dictionary spanish_mfa \
+ && MFA_ROOT_DIR=/opt/mfa mfa model download acoustic spanish_mfa \
+ && MFA_ROOT_DIR=/opt/mfa mfa model download dictionary spanish_mfa \
  && $PY -c "\
 from speechbrain.inference.speaker import EncoderClassifier; \
 EncoderClassifier.from_hparams(source='speechbrain/spkrec-ecapa-voxceleb', \
@@ -154,6 +165,7 @@ ENV LINGUA_CORPUS_ROOT=/workspace/corpus \
     LINGUA_CACHE_ROOT=/workspace/.cache \
     LINGUA_LOG_ROOT=/workspace/logs \
     LINGUA_MANIFEST=/workspace/manifest/corpus_research.json \
+    MFA_ROOT_DIR=/workspace/.cache/mfa \
     LINGUA_API_PORT=8010 \
     LINGUA_SERVE_API=1 \
     PYTHONPATH=/app \

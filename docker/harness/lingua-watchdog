@@ -1,21 +1,26 @@
 #!/usr/bin/env bash
 # lingua-watchdog — in-pod backstop against a pod that bills without working.
 #
-# ## This is the BACKSTOP, not the primary kill path
+# ## On RunPod this script CANNOT terminate the pod. It only detects.
 #
-# plexus learned this the hard way. `runpod_cleanup.py` records the finding:
+# VERIFIED on a real pod, 2026-08-13: runpodctl invoked from inside a RunPod pod returns
 #
-#     "RunPod blocks pod-side self-delete (HTTP 403 from any user key called from inside
-#      the pod)... External cleanup is the only reliable way."
+#     Error: Unauthorized
 #
-# A watchdog inside the pod cannot survive the failure modes that matter most — the kernel
-# OOM-killing everything, the container being frozen, the network partitioning so the
-# delete call never lands. So the PRIMARY guard is the control plane, which created the
-# runner and can therefore destroy it from outside with no cooperation from the pod.
+# There is no pod-scoped credential. plexus's runpod_cleanup.py said exactly this and its
+# trainer.Dockerfile claimed the opposite; the former was right.
 #
-# This script covers the cheaper cases the control plane cannot see quickly: a workload
-# that wedged with no output, or a dev pod left idle. It tries, and if it cannot, the
-# external janitor still catches it.
+# So read the triggers below as DETECTION, never as cost control. When MAX_LIFE_SEC fires
+# here, this script will dutifully call self-delete, be refused, log the refusal, and the
+# pod will keep billing. Anyone who reads "absolute lifetime ceiling" and believes their
+# spend is capped has been misled — which is how a pod runs overnight.
+#
+# The only thing that actually stops billing is external termination: control/reaper.py,
+# whose `pod()` context manager holds a wall-clock budget outside the pod, and whose
+# `sweep()` collects anything a dead launcher left behind.
+#
+# This script still earns its place on providers that DO permit self-delete, and as a
+# loud signal in the log that a job wedged. It is a smoke alarm, not a sprinkler.
 #
 # ## Two independent triggers
 #

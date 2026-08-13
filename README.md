@@ -207,22 +207,25 @@ locality.
 | kind | mechanism | needs | when |
 |---|---|---|---|
 | `volume` | provider attaches it; plain file I/O | nothing on the pod | RunPod today — fastest, no credentials |
-| `fuse` | `rclone mount --vfs-cache-mode full` | `/dev/fuse` + `SYS_ADMIN`, rclone in image | POSIX over any S3, where the capability exists |
+| `fuse` | `rclone mount --vfs-cache-mode full` | `/dev/fuse` + `SYS_ADMIN`, rclone in image | POSIX over any S3 — **not RunPod**, see below |
 | `object` | pull working set → run → push | nothing special | the guaranteed floor: serverless, any vendor |
 
 `best_available()` degrades `volume → fuse → object` when a job doesn't name one, so the same
 spec runs on a pod with a volume, a serverless worker with neither, or a laptop.
 
-**FUSE is genuinely viable** — verified locally against MinIO: `/dev/fuse` present, rclone
-mounts, POSIX read works, and **atomic rename survives** with `--vfs-cache-mode full` (rclone
-caches locally and uploads on close). That was the main risk, since S3 has no native rename
-and `serve/events.py._atomic_write` depends on it.
+**On RunPod, use `volume`.** The network volume is the native path: fastest, and no
+credentials ever reach the pod. `fuse` and `object` exist for portability, not for RunPod.
 
-Two caveats: that test was on OrbStack where we control `--device`/`--cap-add`. **Whether
-RunPod permits `/dev/fuse` is still unverified** — `batch_pod.py:47` records dockerd failing
-without `NET_ADMIN` there, so capabilities are trimmed. And the official rclone image ships
-no `fusermount`, so `FuseMount.publish()` tries `fusermount3`/`fusermount`/`umount` and
-reports failure rather than silently leaving cached writes unflushed.
+**FUSE does not work on RunPod — verified.** A probe on a real pod found `/dev/fuse`
+**absent** entirely. Not a capability we could request; the device node isn't there. The
+earlier OrbStack success only happened because we passed `--device /dev/fuse --cap-add
+SYS_ADMIN`, which RunPod does not let you do. `FuseMount.probe()` therefore refuses at
+startup with a pointer to `object` rather than failing obscurely mid-job.
+
+FUSE remains a valid strategy for providers that permit it, and it does work: verified
+against MinIO with POSIX read and — the risky part — **atomic rename surviving** under
+`--vfs-cache-mode full`, which matters because S3 has no native rename and
+`serve/events.py._atomic_write` depends on one.
 
 ### Object store profiles
 
@@ -269,19 +272,49 @@ grow to gigabytes and container disk is small.
 
 ## Cost control
 
-Two layers, and the outer one is primary:
+**An in-pod ceiling is not cost control.** Verified on a real pod: `runpodctl` from inside a
+RunPod pod returns `Error: Unauthorized`. There is no pod-scoped credential, so
+`lingua-watchdog` will detect a timeout, call self-delete, be refused, and log the refusal —
+while the pod keeps billing. That settles the contradiction between plexus's
+`trainer.Dockerfile` and its `runpod_cleanup.py`: the latter was right.
 
-1. **The control plane** destroys runners it created, from outside. No permission question
-   arises and it survives the pod being wedged or OOM-killed.
-2. **`lingua-watchdog`** in the pod, as a backstop: `MAX_IDLE_SEC` (no heartbeat *or* API
-   activity — so a dev pod dies after you walk away but never mid-job) and `MAX_LIFE_SEC`
-   (absolute ceiling, catches a wedged job that keeps its heartbeat fresh). Either may be 0
-   to disable.
+So termination is external, and automatic:
 
-`lingua-self-delete` is best-effort only. The two plexus source files disagree about whether
-pod-side self-delete works at all — `runpod_cleanup.py` reports HTTP 403 and concludes an
-external janitor is the only reliable path. **This is unverified and worth settling on a
-cheap `cpu3c` pod before anything depends on it.**
+```python
+from control.reaper import pod
+with pod(create_kwargs, budget_min=15) as p:
+    ...                       # pod CANNOT outlive the budget
+```
+
+Four independent kill paths, because each covers a failure the others don't:
+
+| path | covers |
+|---|---|
+| `finally` | normal exit, ordinary exceptions |
+| SIGINT/SIGTERM handlers | operator pressing ctrl-C |
+| `atexit` | shutdown paths that skip `finally` |
+| **deadline thread** | wall clock, *even while the main thread is blocked on a hung call* |
+
+That last one is the one that matters, and it's tested: a pod launched with `budget_min=2`
+while the main thread slept for 10 minutes was killed at 2 minutes.
+
+Anything a `kill -9`'d process left behind is collected by the janitor:
+
+```bash
+python control/reaper.py list                  # what's billing right now
+python control/reaper.py sweep --dry-run       # what would be collected
+python control/reaper.py sweep                 # collect it
+```
+
+### Ephemeral pods are named differently from real work — deliberately
+
+`batch_pod.py` names real jobs `lingua-<job_id>`. `sweep()` only touches **`lingua-test-`**,
+which only `reaper.pod()` assigns, and it **refuses** a broader prefix without `force=True`.
+A corpus build that is meant to run for days is invisible to the janitor by construction —
+a deliberate long job must never be at the mercy of an age limit.
+
+`lingua-watchdog` still earns its place as a loud signal in the log that a job wedged, and
+on providers that do permit self-delete. It's a smoke alarm, not a sprinkler.
 
 ---
 

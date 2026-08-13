@@ -126,7 +126,17 @@ def status_source_for(runner: Any, *, token: str = "", log_root: str = "") -> An
     endpoint = ""
     try:
         st = runner.status()
-        endpoint = (st.detail or {}).get("endpoint", "") if hasattr(st, "detail") else ""
+        detail = (st.detail or {}) if hasattr(st, "detail") else {}
+        endpoint = detail.get("endpoint", "")
+        # RunPod does NOT populate publicIp/portMappings for HTTP ports — it proxies them,
+        # and those API fields stay empty forever. During the first pod test that made a
+        # perfectly healthy pod look dead for two minutes while it was already serving. So
+        # derive the endpoint from the pod id rather than waiting for fields that will
+        # never arrive. (TCP ports behave the opposite way: publicIp plus a mapped port.)
+        if not endpoint and detail.get("pod_id"):
+            from .reaper import http_endpoint
+            endpoint = http_endpoint(detail["pod_id"],
+                                     int(detail.get("api_port", 8000)))
     except Exception:
         pass
     if endpoint and token:
