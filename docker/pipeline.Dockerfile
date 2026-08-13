@@ -99,7 +99,11 @@ RUN $PY -m pip install --no-cache-dir \
 # The image ships the ENGINE (stage model, runner, resume, status protocol) but never a
 # workload's stages — those arrive at runtime from the volume. Pinned by ref so an image
 # rebuild is the only thing that can change the engine under a running fleet.
-ARG LINGUA_CORE_REF=main
+# Pinned by SHA, not a branch. A mutable ref means Docker's layer cache can serve a
+# STALE engine: the RUN line is unchanged, so the cache hits even though the branch has
+# moved. That is the same immutability argument as code/<repo>/<sha>/ for workloads —
+# bump this deliberately.
+ARG LINGUA_CORE_REF=dbb6132
 RUN $PY -m pip install --no-cache-dir \
         "git+https://github.com/itsnotyoutoday/lingua-core.git@${LINGUA_CORE_REF}"
 

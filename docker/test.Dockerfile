@@ -42,7 +42,11 @@ RUN pip install --no-cache-dir -r requirements-serve.txt
 
 # Same engine the real image carries — so the harness test exercises the real code path
 # (serve/jobs.py shelling lingua_core.execute_job) rather than a stand-in for it.
-ARG LINGUA_CORE_REF=main
+# Pinned by SHA, not a branch. A mutable ref means Docker's layer cache can serve a
+# STALE engine: the RUN line is unchanged, so the cache hits even though the branch has
+# moved. That is the same immutability argument as code/<repo>/<sha>/ for workloads —
+# bump this deliberately.
+ARG LINGUA_CORE_REF=dbb6132
 RUN pip install --no-cache-dir \
         "git+https://github.com/itsnotyoutoday/lingua-core.git@${LINGUA_CORE_REF}"
 
