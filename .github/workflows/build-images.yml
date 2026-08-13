@@ -218,16 +218,16 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # The framework image. Slim, few layers, no ML — everything needed to RUN a
-          # job and nothing to do linguistics with. Most jobs here are not machine
-          # learning (maintenance, mirroring, surveys, pruning, benchmarks), and a
-          # storage benchmark whose only import is boto3 was pulling multiple gigabytes
-          # of torch and MFA — 2-4 minutes of image pull on every retry.
+          # Each image declares what it is built FROM, so a change to one does not
+          # rebuild the others. `shared` is the engine and harness every image embeds —
+          # touching that legitimately rebuilds everything, because every image contains
+          # a copy of it.
           - dockerfile: docker/harness.Dockerfile
             image: pod-harness
-          # The ML image: forced alignment plus the measurement stack.
+            watch: docker/harness.Dockerfile
           - dockerfile: docker/pipeline.Dockerfile
             image: lingua-pipeline
+            watch: docker/pipeline.Dockerfile requirements-pipeline.txt
           # Adding a capability is one entry here plus one Dockerfile:
           # - dockerfile: docker/recognize.Dockerfile
           #   image: lingua-recognize
