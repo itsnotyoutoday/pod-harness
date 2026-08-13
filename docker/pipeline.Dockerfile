@@ -206,17 +206,13 @@ RUN mkdir -p /workspace/corpus /workspace/runs /workspace/cache
 # Fails the image, and therefore the GHA run, the moment a dependency is broken or landed
 # on a different interpreter than `python3` resolves to. plexus added this after a real
 # incident where pip succeeded and the runtime still raised ModuleNotFoundError.
+COPY docker/assert_independence.py /tmp/assert_independence.py
 RUN echo "=== runtime sanity check ===" \
  && echo "python3 -> $(readlink -f $(which python3))" \
  && python3 --version \
- && grep -oE 'lingua_harness\.[a-z_]+' /usr/local/bin/lingua-init | sort -u | while read -r m; do \
-        python3 -c "import importlib,sys; importlib.import_module('$m')" \
-        || { echo "lingua-init references $m, which does not import"; exit 1; }; \
-    done \
+ && python3 /tmp/assert_independence.py \
  && python3 -m lingua_harness.execute_job --help >/dev/null \
- && python3 -c "import serve.jobs, serve.code, serve.api; \
-import lingua_harness.events, lingua_harness.registry, lingua_harness.resume; \
-print('harness + engine imports OK')" \
+ && python3 -c "import serve.jobs, serve.code, serve.api; print('serve imports OK')" \
  && ffmpeg -version | head -1 \
  && mfa version \
  && test -d /opt/models/speechbrain/ecapa || (echo 'ECAPA not baked' && exit 1) \

@@ -4,7 +4,7 @@ The agreed layout for every store the backend touches. **`lingua_core/paths.py` 
 executable form of this document** — code never writes a path literal, and this file
 explains the reasoning that the code cannot.
 
-Enforced in `lingua-runner`, `lingua-core` and every workload repo.
+Enforced in `lingua-harness`, `lingua-loader-rpc` and every workload repo.
 
 ---
 

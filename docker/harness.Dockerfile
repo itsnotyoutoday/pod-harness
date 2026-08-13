@@ -22,8 +22,8 @@
 # So the framework is built ONCE, here, and every other image takes it from this image:
 #
 #     FROM mmcauliffe/montreal-forced-aligner@sha256:...        # or any base a workload needs
-#     COPY --from=ghcr.io/itsnotyoutoday/lingua-runner:latest /usr/local/bin/lingua-* /usr/local/bin/
-#     COPY --from=ghcr.io/itsnotyoutoday/lingua-runner:latest /app/serve /app/serve
+#     COPY --from=ghcr.io/itsnotyoutoday/lingua-harness:latest /usr/local/bin/lingua-* /usr/local/bin/
+#     COPY --from=ghcr.io/itsnotyoutoday/lingua-harness:latest /app/serve /app/serve
 #
 # One framework, many bases. A workload picks whatever base its dependencies demand — MFA,
 # a CUDA image, a TTS stack — and inherits an identical control surface. Two images cannot
@@ -71,7 +71,7 @@ RUN set -eux; \
     chmod +x /usr/local/bin/caddy; \
     pip install --no-cache-dir \
         "boto3>=1.34" "botocore>=1.34" \
-        "fastapi>=0.110" "uvicorn[standard]>=0.29" \
+        "fastapi>=0.110" "uvicorn[standard]>=0.29"; \
     apt-get clean; \
     rm -rf /var/lib/apt/lists/* /root/.cache; \
     mkdir -p /workspace /opt/models /app
@@ -90,16 +90,8 @@ COPY lingua_harness/ /app/lingua_harness/
 # Python move left the harness pointing at a module that no longer existed, and the last
 # one was only visible as a pod that billed for 13 minutes and served 404. Failing the
 # build is the cheapest place to find it.
-RUN set -eux; \
-    grep -oE 'lingua_harness\.[a-z_]+' /usr/local/bin/lingua-init | sort -u | while read -r m; do \
-        python -c "import importlib; importlib.import_module('$m')" \
-        || { echo "lingua-init references $m, which does not import"; exit 1; }; \
-    done; \
-    python -m lingua_harness.execute_job --help >/dev/null; \
-    python -c "import serve.jobs, serve.code, serve.api, lingua_harness.framework, \
-lingua_harness.registry, lingua_harness.sync, lingua_harness.volume, lingua_harness.capabilities"; \
-    caddy version >/dev/null; \
-    echo "runner image OK"
+COPY docker/assert_independence.py /tmp/assert_independence.py
+RUN python /tmp/assert_independence.py && rm /tmp/assert_independence.py
 
 WORKDIR /app
 EXPOSE 8000

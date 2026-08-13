@@ -207,6 +207,14 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # The framework image. Slim, few layers, no ML — everything needed to RUN a
+          # job and nothing to do linguistics with. Most jobs here are not machine
+          # learning (maintenance, mirroring, surveys, pruning, benchmarks), and a
+          # storage benchmark whose only import is boto3 was pulling multiple gigabytes
+          # of torch and MFA — 2-4 minutes of image pull on every retry.
+          - dockerfile: docker/harness.Dockerfile
+            image: lingua-harness
+          # The ML image: forced alignment plus the measurement stack.
           - dockerfile: docker/pipeline.Dockerfile
             image: lingua-pipeline
           # Adding a capability is one entry here plus one Dockerfile:

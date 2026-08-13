@@ -28,7 +28,7 @@ name: Publish workload code
 #
 #   jobs:
 #     publish:
-#       uses: itsnotyoutoday/lingua-runner/.github/workflows/publish-code.yml@main
+#       uses: itsnotyoutoday/lingua-harness/.github/workflows/publish-code.yml@main
 #       with:
 #         stages_from: trainer.stages:STAGES
 #       secrets: inherit

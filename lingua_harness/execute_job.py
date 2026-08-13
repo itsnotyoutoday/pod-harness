@@ -65,7 +65,7 @@ def load_registry(stages_from: str) -> dict[str, Any]:
     if registry is None:
         raise SystemExit(
             f"{module_path!r} has no attribute {attr!r}. A stage registry is a dict of "
-            f"{{name: StageClass}} — see lingua-core/README.md")
+            f"{{name: StageClass}} — see lingua-loader-rpc/README.md")
     if not isinstance(registry, dict):
         raise SystemExit(
             f"{stages_from} is {type(registry).__name__}, expected a dict of "
