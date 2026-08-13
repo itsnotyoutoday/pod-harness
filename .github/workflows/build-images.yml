@@ -32,16 +32,22 @@ on:
   push:
     branches: [main]
     paths:
+      # Anything baked INTO an image must trigger a rebuild. src/ was missing after the
+      # engine moved here, which meant a pure engine change published nothing and pods
+      # kept pulling :latest with the old engine inside — the same staleness that made
+      # `pip install ...@main` serve a cached build, just moved one layer down.
+      - 'src/**'
       - 'docker/**'
       - 'serve/**'
-      - 'control/**'
+      - 'contract.json'
       - 'requirements-*.txt'
       - '.github/workflows/build-images.yml'
   pull_request:
     paths:
+      - 'src/**'
       - 'docker/**'
       - 'serve/**'
-      - 'control/**'
+      - 'contract.json'
   workflow_dispatch:
 
 permissions:
