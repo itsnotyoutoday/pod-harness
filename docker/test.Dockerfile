@@ -56,7 +56,6 @@ COPY docker/harness/lingua-mount         /usr/local/bin/lingua-mount
 RUN chmod +x /usr/local/bin/lingua-*
 
 COPY serve/ /app/serve/
-COPY control/ /app/control/
 # A fake WORKLOAD: stage classes plus a registry and a capabilities.json, exactly what a
 # real workload publishes. The engine loads it through pipeline.stages_from, so the test
 # exercises the real resolution path instead of a special case.

@@ -76,7 +76,7 @@ case "$KIND" in
     python3 - <<'PY'
 import json, os, sys
 sys.path.insert(0, "/app")
-from control.mount import FuseMount
+from lingua_core.mount import FuseMount
 m = FuseMount(prefix=os.environ.get("LINGUA_S3_PREFIX", ""),
               mountpoint=os.environ.get("LINGUA_CORPUS_ROOT", "/workspace/corpus"))
 r = m.prepare({"job_id": os.environ.get("LINGUA_JOB_ID", "startup")})

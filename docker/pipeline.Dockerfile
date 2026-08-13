@@ -164,7 +164,6 @@ COPY docker/harness/lingua-init docker/harness/lingua-preflight \
 RUN chmod +x /usr/local/bin/lingua-*
 
 COPY serve/ /app/serve/
-COPY control/ /app/control/
 
 # --- 6. runtime defaults ---------------------------------------------------------------
 # CACHE_ROOT and the log root sit on the volume: writable, growable, surviving the pod.
