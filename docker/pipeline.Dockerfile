@@ -62,9 +62,27 @@ RUN curl -sL "https://github.com/caddyserver/caddy/releases/download/v${CADDY_VE
  && cd /tmp && unzip -q rc.zip && mv rclone-*/rclone /usr/local/bin/rclone \
  && chmod +x /usr/local/bin/rclone && rm -rf /tmp/rc.zip /tmp/rclone-*
 
-# --- 3. MFA (the slow layer — keep it high) -------------------------------------------
+# --- 3. MFA + the compiled scientific stack (the slow layer — keep it high) ------------
+#
+# numpy/scipy/librosa/soundfile/scikit-learn come from conda-forge, NOT pip, and that is
+# load-bearing rather than stylistic. Installed by pip they are built against a newer
+# libstdc++ than Ubuntu jammy ships, and since the system copy wins the linker search the
+# import dies with:
+#
+#     ImportError: /lib/x86_64-linux-gnu/libstdc++.so.6: version `CXXABI_1.3.15' not found
+#                  (required by .../scipy/spatial/_distance_pybind...so)
+#
+# Taking them from the same conda-forge environment as MFA means one consistent toolchain
+# and one libstdc++. The alternative — forcing LD_LIBRARY_PATH=/opt/conda/lib — makes
+# conda's libraries shadow the system ones for every binary in the image, including the
+# apt-installed ffmpeg, which is a much larger blast radius for the same problem.
+#
+# Pip keeps only what conda-forge does not carry well: the CPU-only torch wheels and the
+# pure-Python packages.
 RUN micromamba install -y -n base -c conda-forge \
-        python=3.11 montreal-forced-aligner \
+        python=3.11 \
+        montreal-forced-aligner \
+        numpy scipy librosa soundfile scikit-learn \
  && micromamba clean --all --yes
 
 ENV PATH=/opt/conda/bin:$PATH
@@ -78,6 +96,24 @@ WORKDIR /app
 COPY requirements-pipeline.txt requirements-serve.txt ./
 RUN /opt/conda/bin/python -m pip install --no-cache-dir \
         -r requirements-pipeline.txt -r requirements-serve.txt
+
+# --- 5b. ABI check, immediately after the installs ------------------------------------
+# Imports every compiled extension in dependency order and prints which libstdc++ actually
+# resolved. Without this the first symptom of a conda/pip ABI mismatch is a CXXABI
+# ImportError raised from inside a model download in the NEXT layer, which reads like a
+# network problem and sends you debugging the wrong thing entirely. Fail here, where the
+# error names its own cause.
+RUN echo "=== ABI check ===" \
+ && python3 -c "\
+import ctypes.util, subprocess, sys; \
+import numpy, scipy, scipy.spatial, sklearn, librosa, soundfile, torch, torchaudio, speechbrain; \
+print('compiled stack imports OK'); \
+print('numpy', numpy.__version__, '| scipy', scipy.__version__, '| torch', torch.__version__)" \
+ && python3 -c "\
+import scipy.spatial, subprocess; \
+so = scipy.spatial._distance_pybind.__file__; \
+print(subprocess.run(['ldd', so], capture_output=True, text=True).stdout.strip())" \
+    | grep -E "libstdc\+\+" || true
 
 # --- 6. baked weights -----------------------------------------------------------------
 # These MUST live outside /workspace and /corpus. RunPod mounts the network volume over
