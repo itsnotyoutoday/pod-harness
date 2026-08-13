@@ -110,7 +110,11 @@ def alive(deadline_ts: float | None = None) -> dict | None:
     url, _, pod_id = _cfg()
     if not url or not pod_id:
         return None
-    body = {"pod_id": pod_id, "provider": "runpod"}
+    # job_id accompanies every call: the scoped token is bound to it, and
+    # pod-control checks that this job actually owns this pod.
+    body = {"pod_id": pod_id, "provider": "runpod",
+            "job_id": os.environ.get("PODH_CONTROL_JOB_ID")
+                      or os.environ.get("PODH_JOB_ID", "")}
     if deadline_ts:
         body["deadline_ts"] = deadline_ts
     return _post("/v1/alive", body)
@@ -121,7 +125,9 @@ def done() -> dict | None:
     url, _, pod_id = _cfg()
     if not url or not pod_id:
         return None
-    return _post("/v1/done", {"pod_id": pod_id, "provider": "runpod"})
+    return _post("/v1/done", {"pod_id": pod_id, "provider": "runpod",
+                              "job_id": os.environ.get("PODH_CONTROL_JOB_ID")
+                                        or os.environ.get("PODH_JOB_ID", "")})
 
 
 def start(interval_sec: float = 60.0) -> threading.Thread | None:

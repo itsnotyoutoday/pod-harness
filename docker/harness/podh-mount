@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# lingua-mount — establish the job's data view at container start, per instruction.
+# podh-mount — establish the job's data view at container start, per instruction.
 #
 # ## Why this is a startup step and not a job step
 #

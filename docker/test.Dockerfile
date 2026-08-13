@@ -59,13 +59,13 @@ COPY src/pod_harness/ /app/pod_harness/
 COPY contract.json /app/contract.json
 
 COPY docker/harness/Caddyfile /etc/caddy/Caddyfile
-COPY docker/harness/lingua-init         /usr/local/bin/lingua-init
-COPY docker/harness/lingua-preflight    /usr/local/bin/lingua-preflight
-COPY docker/harness/lingua-watchdog     /usr/local/bin/lingua-watchdog
-COPY docker/harness/lingua-self-delete  /usr/local/bin/lingua-self-delete
-COPY docker/harness/lingua-seed-models  /usr/local/bin/lingua-seed-models
-COPY docker/harness/lingua-mount         /usr/local/bin/lingua-mount
-RUN chmod +x /usr/local/bin/lingua-*
+COPY docker/harness/podh-init         /usr/local/bin/podh-init
+COPY docker/harness/podh-preflight    /usr/local/bin/podh-preflight
+COPY docker/harness/podh-watchdog     /usr/local/bin/podh-watchdog
+COPY docker/harness/podh-self-delete  /usr/local/bin/podh-self-delete
+COPY docker/harness/podh-seed-models  /usr/local/bin/podh-seed-models
+COPY docker/harness/podh-mount         /usr/local/bin/podh-mount
+RUN chmod +x /usr/local/bin/podh-*
 
 COPY serve/ /app/serve/
 # A fake WORKLOAD: stage classes plus a registry and a capabilities.json, exactly what a
@@ -86,7 +86,7 @@ RUN mkdir -p /workspace/logs /workspace/.cache
 
 ENV PODH_CODE_ROOT=/workspace/code/fixture \
     PODH_DEFAULT_STAGES_FROM=fixture.stages:STAGES
-# Every module lingua-init names must actually import. Added after a pod spent 13 minutes
+# Every module podh-init names must actually import. Added after a pod spent 13 minutes
 # failing because the shell script still referenced runners.execute_job, three Python moves
 # later. Catching it here costs 2 minutes; catching it on a pod cost real money.
 COPY docker/assert_independence.py /tmp/assert_independence.py
@@ -94,5 +94,5 @@ RUN python /tmp/assert_independence.py \
  && python -c "import serve.jobs, serve.code, serve.api; print('serve imports OK')"
 
 EXPOSE 8000
-ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/lingua-init"]
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/podh-init"]
 CMD []

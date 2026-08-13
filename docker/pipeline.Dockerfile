@@ -130,7 +130,7 @@ print('numpy', numpy.__version__, '| scipy', scipy.__version__, \
 # --- 4. baked weights ------------------------------------------------------------------
 # MUST live outside /workspace: RunPod mounts the network volume there, and a mount
 # SHADOWS whatever the image had at that path — so weights baked under the mount point are
-# invisible at runtime and download again anyway. lingua-seed-models links these into the
+# invisible at runtime and download again anyway. podh-seed-models links these into the
 # cache tree at container start.
 # HF_HOME matters more than it looks. speechbrain's `savedir` holds SYMLINKS into the
 # huggingface cache, not copies — so the real 85 MB of ECAPA weights live wherever HF_HOME
@@ -152,7 +152,7 @@ ENV PODH_MODEL_ROOT=/opt/models \
 # left at /opt that state lands on the container disk (20 GB on the pod we tested) instead
 # of the volume, which is fine for a smoke test and wrong for a real alignment run.
 #
-# Setting both to /opt/mfa also made lingua-seed-models a no-op: source and destination
+# Setting both to /opt/mfa also made podh-seed-models a no-op: source and destination
 # were the same path, so it logged "keep … not overriding" and linked nothing. Verified on
 # a real pod. The runtime value is set in the ENV block further down.
 RUN mkdir -p /opt/models /opt/mfa \
@@ -169,11 +169,11 @@ print('ECAPA cached')" \
 # One COPY for the scripts rather than one per file: seven layers holding 25 KB is pure
 # manifest overhead.
 COPY docker/harness/Caddyfile /etc/caddy/Caddyfile
-COPY docker/harness/lingua-init docker/harness/lingua-preflight \
-     docker/harness/lingua-watchdog docker/harness/lingua-self-delete \
-     docker/harness/lingua-seed-models docker/harness/lingua-mount \
+COPY docker/harness/podh-init docker/harness/podh-preflight \
+     docker/harness/podh-watchdog docker/harness/podh-self-delete \
+     docker/harness/podh-seed-models docker/harness/podh-mount \
      /usr/local/bin/
-RUN chmod +x /usr/local/bin/lingua-*
+RUN chmod +x /usr/local/bin/podh-*
 
 COPY serve/ /app/serve/
 
@@ -233,5 +233,5 @@ print(f'ECAPA weights resolve, {sz/1e6:.1f} MB')" \
  && echo "=== image is good ==="
 
 EXPOSE 8000
-ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/lingua-init"]
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/podh-init"]
 CMD []

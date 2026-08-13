@@ -1,5 +1,5 @@
 #!/bin/bash
-# lingua-init — container ENTRYPOINT. Everything in this file happens regardless of
+# podh-init — container ENTRYPOINT. Everything in this file happens regardless of
 # what command the operator passes, so observability is a property of the IMAGE and not
 # something a launcher can forget to switch on.
 #
@@ -10,7 +10,7 @@
 #      container output — bash echoes, python prints, subprocess noise, crash traces —
 #      i.e. the same bytes RunPod's dashboard shows.
 #
-#   2. Seed the model symlinks. Baked weights live in /opt (see lingua-seed-models for
+#   2. Seed the model symlinks. Baked weights live in /opt (see podh-seed-models for
 #      why they cannot live under the volume mount). This wires them into the cache
 #      paths the pipeline actually looks in.
 #
@@ -61,15 +61,15 @@ touch "$CONSOLE"
 exec > >(tee -a "$CONSOLE") 2>&1
 
 echo "================================================================================"
-echo "  lingua-init  $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+echo "  podh-init  $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 echo "  pod:      ${RUNPOD_POD_ID}"
 echo "  log dir:  ${LOG_DIR}"
 echo "  pid:      $$"
 echo "================================================================================"
 
 # -- 2. baked models ------------------------------------------------------------------
-if [ -x /usr/local/bin/lingua-seed-models ]; then
-    /usr/local/bin/lingua-seed-models || echo "  ! model seeding failed (continuing)"
+if [ -x /usr/local/bin/podh-seed-models ]; then
+    /usr/local/bin/podh-seed-models || echo "  ! model seeding failed (continuing)"
 fi
 
 # -- 2b. data view --------------------------------------------------------------------
@@ -80,8 +80,8 @@ fi
 # A failure here is fatal on purpose. Continuing would run the job against an empty
 # directory, and a stage that processes zero files can still report success — the failure
 # mode this project's whole verification framework exists to prevent.
-if [ -x /usr/local/bin/lingua-mount ]; then
-    if ! /usr/local/bin/lingua-mount; then
+if [ -x /usr/local/bin/podh-mount ]; then
+    if ! /usr/local/bin/podh-mount; then
         echo "  ✗ data view could not be established — refusing to run."
         echo "    Set PODH_MOUNT_KIND=object for the strategy that needs no capabilities."
         exit 1
@@ -171,13 +171,30 @@ case "$PODH_MODE" in
         fi
     fi
 
-    [ -x /usr/local/bin/lingua-preflight ] && /usr/local/bin/lingua-preflight
+    [ -x /usr/local/bin/podh-preflight ] && /usr/local/bin/podh-preflight
     # The GENERIC engine, not a workload's module. This said runners.execute_job until a
     # pod spent 13 minutes proving the module no longer exists — the third time today a
     # Python move left this shell script pointing at the old location. The Dockerfile now
     # asserts this exact module imports, so the mismatch fails the BUILD instead.
-    exec python3 -u -m "${PODH_ENTRY:-pod_harness.execute_job}" \
-        --spec "$PODH_JOB_SPEC"
+    # NOT exec: the job must not be the container's last breath.
+    #
+    # A batch job that exits takes the container with it, and RunPod restarts a container
+    # that exits — so a finished job runs again, and again. Observed: 18 boots, 8 complete
+    # runs of the same benchmark, which would have continued until the budget or somebody
+    # noticed. Billing eight times for one answer.
+    python3 -u -m "${PODH_ENTRY:-pod_harness.execute_job}" --spec "$PODH_JOB_SPEC"
+    rc=$?
+    echo "  job finished (exit $rc)"
+
+    # Ask to be terminated. pod-control acts within a second; the poll would catch it
+    # within a minute anyway, which is why losing this request is survivable.
+    python3 -c "from pod_harness import heartbeat; heartbeat.done()" 2>/dev/null || true
+
+    # Then hold the container open. Idling costs pennies a minute and is bounded by the
+    # reaper; restarting costs a whole job every time and is bounded by nothing.
+    echo "  idling until terminated externally — an exiting container gets restarted,"
+    echo "  which would run this job again from the top."
+    while true; do sleep 300; done
     ;;
 
   serve)

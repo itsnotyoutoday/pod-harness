@@ -1,13 +1,18 @@
 #!/usr/bin/env bash
-# lingua-preflight — one block of diagnostic state at job start.
+# podh-preflight — one block of diagnostic state at job start.
+#
+# Reports what is ACTUALLY present rather than a fixed list of one workload's tools. This
+# printed ffmpeg and MFA and LINGUA_* paths inside a slim image that contains none of
+# them, which is confusing at best — and at worst tells you a lightweight container is
+# dragging a linguistics stack around. It is not; the report was.
 #
 # Sits at the top of every job log so "why was this slow" and "did it get the right inputs"
 # are answerable without re-running anything. The expensive version of this question is a
 # second pod-hour; the cheap version is thirty lines of shell.
 #
 # Adapted from plexus-preflight, with the checks that matter for THIS pipeline:
-#   - ffmpeg/ffprobe, because every conversion and probe goes through them
-#   - mfa on PATH, because when it is missing AlignStage silently skips and every
+#   - optional tooling, reported only when present, because a slim image legitimately
+#     has none of it and "MISSING" implies breakage
 #     segmental rule reports UNTESTED — the exact failure Dockerfile.pod was written to fix
 #   - whether the baked models actually resolved, since a mount can shadow them
 #   - GPU, when present, so the same script serves the CPU and GPU images unchanged
@@ -17,7 +22,7 @@
 set -u
 
 echo "================================================================================"
-echo "  lingua preflight"
+echo "  ${PODH_IMAGE_KIND:-pod} harness preflight"
 echo "================================================================================"
 
 echo "[identity]"
@@ -45,27 +50,26 @@ fi
 
 echo
 echo "[audio toolchain]"
-echo "  ffmpeg:      $(ffmpeg -version 2>/dev/null | head -1 | cut -c1-60 || echo 'MISSING')"
-echo "  ffprobe:     $(command -v ffprobe >/dev/null 2>&1 && echo present || echo MISSING)"
-# MFA absent is not merely a missing feature: AlignStage skips, sibilants fall back to
-# wholefile_proxy, and every segmental rule reports UNTESTED. Say so loudly.
-if command -v mfa >/dev/null 2>&1; then
-    echo "  mfa:         $(mfa version 2>/dev/null || echo 'present, version unknown')"
-else
-    echo "  mfa:         MISSING — alignment will SKIP and segmental rules report UNTESTED"
-fi
-
-echo
-echo "[baked models]"
-for p in "${PODH_CACHE_ROOT:-/workspace/cache}/speechbrain/ecapa" \
-         "${MFA_ROOT_DIR:-/workspace/cache/mfa}/pretrained_models"; do
-    if [ -e "$p" ]; then
-        tgt=$(readlink -f "$p" 2>/dev/null || echo "$p")
-        echo "  ok    $p -> $tgt"
-    else
-        echo "  MISS  $p (downloads at first use)"
+# Optional tooling: reported when present, silent when not. A slim image legitimately has
+# none of this, and listing it as MISSING implies something is broken.
+for t in ffmpeg ffprobe mfa; do
+    if command -v "$t" >/dev/null 2>&1; then
+        echo "  $t: $("$t" -version 2>/dev/null | head -1 | cut -c1-60)"
     fi
 done
+echo "  ffprobe:     $(command -v ffprobe >/dev/null 2>&1 && echo present || echo MISSING)"
+# Model directories, reported only when the image was told it has some. Which models,
+# and what their absence means, is the workload's business — a harness announcing that
+# "alignment will SKIP and segmental rules report UNTESTED" is a harness that only serves
+# one pipeline. The same finding as mount.py hardcoding corpus/: imports were clean, the
+# coupling was in strings.
+if [ -n "${PODH_MODEL_ROOT:-}" ] && [ -d "${PODH_MODEL_ROOT}" ]; then
+    echo "  models: $PODH_MODEL_ROOT"
+    for d in "$PODH_MODEL_ROOT"/*/; do
+        [ -d "$d" ] || continue
+        echo "    $(basename "$d")  $(du -sh "$d" 2>/dev/null | cut -f1)"
+    done
+fi
 
 echo
 echo "[code source]  <- which code is ACTUALLY running"
@@ -87,7 +91,7 @@ try:
     print(f"  runners resolves to: {p}")
     print("  -> VOLUME code" if p.startswith("/workspace") else "  -> BAKED image code")
 except Exception as e:
-    print(f"  runners not importable: {type(e).__name__} (pipeline not synced yet)")
+    print(f"  workload registry not importable yet: {type(e).__name__}")
 PYEOF
 
 echo
@@ -95,25 +99,35 @@ echo "[python]"
 echo "  interpreter: $(command -v python3)"
 echo "  version:     $(python3 --version 2>&1)"
 python3 - <<'PY' 2>/dev/null || echo "  (package versions unavailable)"
+# What is INSTALLED, not a checklist from one pipeline. This listed numpy, scipy, librosa,
+# torch, torchaudio and speechbrain as "NOT INSTALLED" inside a slim image that was never
+# meant to have them — which reads as a broken image dragging an audio stack around. The
+# image was fine; the report was written for a different one.
 import importlib.metadata as md
-for pkg in ("numpy", "scipy", "librosa", "soundfile", "torch", "torchaudio",
-            "speechbrain", "scikit-learn", "boto3", "fastapi"):
+skip = {"pip", "setuptools", "wheel"}
+names = sorted({(d.metadata["Name"] or "?") for d in md.distributions()},
+               key=str.lower)
+shown = [n for n in names if n.lower() not in skip]
+print(f"  {len(shown)} packages")
+for n in shown[:24]:
     try:
-        print(f"  {pkg+':':14} {md.version(pkg)}")
+        print(f"  {n+':':24} {md.version(n)}")
     except Exception:
-        print(f"  {pkg+':':14} NOT INSTALLED")
+        pass
+if len(shown) > 24:
+    print(f"  … and {len(shown) - 24} more")
 PY
 
 echo
 echo "[env]"
-for k in PODH_JOB_ID LINGUA_CORPUS_ROOT PODH_OUT_ROOT PODH_CACHE_ROOT \
-         PODH_LOG_ROOT PODH_MODEL_ROOT MFA_ROOT_DIR LINGUA_MANIFEST \
-         PODH_SERVE_API MAX_IDLE_SEC MAX_LIFE_SEC; do
-    echo "  $k=${!k:-(unset)}"
-done
-# Presence, never value.
-for k in PODH_API_TOKEN RUNPOD_API_KEY AWS_ACCESS_KEY_ID GEMINI_API_KEY; do
-    [ -n "${!k:-}" ] && echo "  $k=<set>" || echo "  $k=(unset)"
+# Every PODH_* and workload variable that is actually SET. A fixed list printed
+# "(unset)" for a dozen variables belonging to a pipeline this image may know nothing
+# about, which reads like breakage.
+env | grep -E "^(PODH_|LINGUA_|MFA_|MAX_)" | sort | while IFS='=' read -r k v; do
+    case "$k" in
+        *TOKEN*|*SECRET*|*KEY*|*PASSWORD*) echo "  $k=<set>" ;;
+        *) echo "  $k=$v" ;;
+    esac
 done
 
 echo "================================================================================"

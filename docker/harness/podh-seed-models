@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# lingua-seed-models — wire the baked model weights into the paths the pipeline looks in.
+# podh-seed-models — wire the baked model weights into the paths the pipeline looks in.
 #
 # ## The bug this exists to prevent
 #

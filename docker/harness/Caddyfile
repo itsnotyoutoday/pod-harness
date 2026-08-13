@@ -11,7 +11,7 @@
 # reading the last 8 KB of a 200 MB log and pulling the whole thing — which for an agent
 # is the difference between a cheap poll and a dead session. It also keeps working when
 # the API process has died, which is exactly when you want the log most: Caddy is started
-# backgrounded and disowned by lingua-init, so it outlives a crashed workload.
+# backgrounded and disowned by podh-init, so it outlives a crashed workload.
 #
 # ## Why one token rather than real auth
 #

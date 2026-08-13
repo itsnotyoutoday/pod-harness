@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# lingua-watchdog — in-pod backstop against a pod that bills without working.
+# podh-watchdog — in-pod backstop against a pod that bills without working.
 #
 # ## On RunPod this script CANNOT terminate the pod. It only detects.
 #
@@ -40,7 +40,7 @@ MAX_LIFE_SEC="${MAX_LIFE_SEC:-0}"
 POLL_SEC="${WATCHDOG_POLL_SEC:-30}"
 START=$(date +%s)
 
-log() { echo "[lingua-watchdog $(date -u +%H:%M:%S)] $*"; }
+log() { echo "[podh-watchdog $(date -u +%H:%M:%S)] $*"; }
 
 mkdir -p "$(dirname "$HEARTBEAT")" 2>/dev/null || true
 touch "$HEARTBEAT" 2>/dev/null || true
@@ -63,8 +63,8 @@ newest_activity() {
 
 terminate() {
     log "$1"
-    if [ -x /usr/local/bin/lingua-self-delete ]; then
-        /usr/local/bin/lingua-self-delete || log "self-delete failed — external janitor must collect this pod"
+    if [ -x /usr/local/bin/podh-self-delete ]; then
+        /usr/local/bin/podh-self-delete || log "self-delete failed — external janitor must collect this pod"
     else
         log "no self-delete available — external janitor must collect this pod"
     fi

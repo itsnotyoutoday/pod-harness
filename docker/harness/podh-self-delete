@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# lingua-self-delete — best-effort pod termination from inside the pod.
+# podh-self-delete — best-effort pod termination from inside the pod.
 #
 # ## Treat this as unreliable, because it is
 #
@@ -22,23 +22,23 @@ set -u
 
 POD_ID="${RUNPOD_POD_ID:-}"
 if [ -z "$POD_ID" ]; then
-    echo "[lingua-self-delete] RUNPOD_POD_ID unset — nothing to delete (running locally?)"
+    echo "[podh-self-delete] RUNPOD_POD_ID unset — nothing to delete (running locally?)"
     exit 0
 fi
 
 if ! command -v runpodctl >/dev/null 2>&1; then
-    echo "[lingua-self-delete] runpodctl not installed — external janitor must collect $POD_ID"
+    echo "[podh-self-delete] runpodctl not installed — external janitor must collect $POD_ID"
     exit 0
 fi
 
-echo "[lingua-self-delete] runpodctl remove pod $POD_ID"
+echo "[podh-self-delete] runpodctl remove pod $POD_ID"
 out=$(runpodctl remove pod "$POD_ID" 2>&1) || out="${out} (non-zero exit)"
-echo "[lingua-self-delete] $out"
+echo "[podh-self-delete] $out"
 
 case "$out" in
     *403*|*orbidden*|*nauthor*)
-        echo "[lingua-self-delete] REFUSED by RunPod — this confirms the runpod_cleanup.py"
-        echo "[lingua-self-delete] finding. External cleanup is required for this pod."
+        echo "[podh-self-delete] REFUSED by RunPod — this confirms the runpod_cleanup.py"
+        echo "[podh-self-delete] finding. External cleanup is required for this pod."
         ;;
 esac
 exit 0

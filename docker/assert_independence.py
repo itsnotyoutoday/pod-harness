@@ -19,7 +19,7 @@ its roots. Importing a layout module would quietly reintroduce the second copy.
 
 ## 3. Every module the shell harness names must import
 
-`lingua-init` execs a Python module by name. Shell cannot be type-checked, so a Python
+`podh-init` execs a Python module by name. Shell cannot be type-checked, so a Python
 move leaves the script pointing at nothing and the failure appears only on a billed pod.
 """
 from __future__ import annotations
@@ -40,7 +40,7 @@ REQUIRED = ("framework", "execute_job", "registry", "events", "status", "spec",
             "resume", "progress", "mount", "storage", "objectstore", "parallel",
             "resources")
 
-INIT = pathlib.Path("/usr/local/bin/lingua-init")
+INIT = pathlib.Path("/usr/local/bin/podh-init")
 
 
 def check_forbidden() -> list[str]:

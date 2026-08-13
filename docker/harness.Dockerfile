@@ -22,7 +22,7 @@
 # So the framework is built ONCE, here, and every other image takes it from this image:
 #
 #     FROM mmcauliffe/montreal-forced-aligner@sha256:...        # or any base a workload needs
-#     COPY --from=ghcr.io/itsnotyoutoday/pod-harness:latest /usr/local/bin/lingua-* /usr/local/bin/
+#     COPY --from=ghcr.io/itsnotyoutoday/pod-harness:latest /usr/local/bin/podh-* /usr/local/bin/
 #     COPY --from=ghcr.io/itsnotyoutoday/pod-harness:latest /app/serve /app/serve
 #
 # One framework, many bases. A workload picks whatever base its dependencies demand — MFA,
@@ -78,8 +78,8 @@ RUN set -eux; \
 
 # One COPY for every script and the API. Seven COPYs holding 25 KB would be six wasted
 # layers. `chmod` rides along rather than costing its own RUN.
-COPY --chmod=0755 docker/harness/lingua-init docker/harness/lingua-mount \
-     docker/harness/lingua-preflight docker/harness/lingua-watchdog \
+COPY --chmod=0755 docker/harness/podh-init docker/harness/podh-mount \
+     docker/harness/podh-preflight docker/harness/podh-watchdog \
      /usr/local/bin/
 COPY docker/harness/Caddyfile /etc/caddy/Caddyfile
 COPY serve/ /app/serve/
@@ -98,5 +98,5 @@ RUN python /tmp/assert_independence.py && rm /tmp/assert_independence.py
 
 WORKDIR /app
 EXPOSE 8000
-ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/lingua-init"]
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/podh-init"]
 CMD []
