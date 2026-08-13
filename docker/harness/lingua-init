@@ -149,6 +149,28 @@ case "$PODH_MODE" in
         exit 1
     fi
     echo "  mode: batch — $PODH_JOB_SPEC"
+
+    # Put the workload's code on the path BEFORE exec'ing the engine.
+    #
+    # serve/code.py does this for the API path, and batch mode used to bypass it entirely
+    # — so the code sat on the volume exactly where it belonged while Python was never
+    # told to look, and the job died with "No module named 'maintenance'" against a
+    # sys.path of ['/app', '/app']. The hint in that error even said the code was probably
+    # not synced. It was synced. Nothing read it.
+    if [ -n "${PODH_CODE_ROOT:-}" ]; then
+        if [ -d "$PODH_CODE_ROOT" ]; then
+            export PYTHONPATH="$PODH_CODE_ROOT${PYTHONPATH:+:$PYTHONPATH}"
+            echo "  code: $PODH_CODE_ROOT ($(find "$PODH_CODE_ROOT" -maxdepth 2 -name "*.py" 2>/dev/null | wc -l | tr -d " ") .py files)"
+        else
+            # Loud, and fatal. Falling back to the image's baked code would run SOMETHING
+            # and report success against the wrong source, which is worse than stopping.
+            echo "  ✗ PODH_CODE_ROOT=$PODH_CODE_ROOT does not exist on this mount."
+            echo "    The loader published code there; either the mount is wrong or the"
+            echo "    spec points at a prefix that was never written."
+            exit 1
+        fi
+    fi
+
     [ -x /usr/local/bin/lingua-preflight ] && /usr/local/bin/lingua-preflight
     # The GENERIC engine, not a workload's module. This said runners.execute_job until a
     # pod spent 13 minutes proving the module no longer exists — the third time today a
