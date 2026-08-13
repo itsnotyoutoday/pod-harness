@@ -36,7 +36,7 @@ from fastapi.responses import JSONResponse
 
 from . import code as code_mod
 from . import jobs as J
-from lingua_core.events import EventLog, job_dir, log_root, read_tail
+from lingua_harness.events import EventLog, job_dir, log_root, read_tail
 
 
 def _mint_job_id() -> str:
@@ -48,7 +48,7 @@ def _mint_job_id() -> str:
     for de-duplication is `idempotency_key`, which is checked separately.
     """
     try:
-        from lingua_core.registry import new_job_id
+        from lingua_harness.registry import new_job_id
         return new_job_id()
     except Exception:
         import secrets, time

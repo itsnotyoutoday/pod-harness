@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lingua-harness"
+version = "0.1.0"
+description = "The in-pod execution engine: stage model, verification, resume, status"
+requires-python = ">=3.10"
+
+# Deliberately minimal, and it must stay that way. This is imported inside every image,
+# including GPU ones where each megabyte is cold-start latency. boto3 is here because the
+# harness reads its spec and publishes its status through object storage; nothing else is
+# needed to run a job.
+#
+# Note what is NOT here: nothing of ours. The harness depends on no other lingua package.
+# It talks to the loader through four contracts — the job spec schema, the event/status
+# schema, the environment variable names and the /v1 endpoints — and shares no code with
+# it. That is what lets the harness stay frozen while the pipelines above it change.
+dependencies = [
+    "boto3>=1.34",
+]
+
+[project.optional-dependencies]
+# The control surface. Only needed when the image serves /v1, which is every pod today but
+# need not be true of a serverless worker.
+serve = ["fastapi>=0.110", "uvicorn[standard]>=0.29"]
+dev = ["pytest>=8"]
+
+[tool.setuptools]
+packages = ["lingua_harness"]

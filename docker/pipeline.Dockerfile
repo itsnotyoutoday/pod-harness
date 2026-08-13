@@ -95,7 +95,7 @@ COPY requirements-pipeline.txt requirements-serve.txt ./
 RUN $PY -m pip install --no-cache-dir \
         -r requirements-pipeline.txt -r requirements-serve.txt
 
-# --- lingua-core: the stage engine ------------------------------------------------------
+# --- lingua_harness: the stage engine ------------------------------------------------------
 # The image ships the ENGINE (stage model, runner, resume, status protocol) but never a
 # workload's stages — those arrive at runtime from the volume. Pinned by ref so an image
 # rebuild is the only thing that can change the engine under a running fleet.
@@ -103,9 +103,14 @@ RUN $PY -m pip install --no-cache-dir \
 # STALE engine: the RUN line is unchanged, so the cache hits even though the branch has
 # moved. That is the same immutability argument as code/<repo>/<sha>/ for workloads —
 # bump this deliberately.
-ARG LINGUA_CORE_REF=dbb6132
-RUN $PY -m pip install --no-cache-dir \
-        "git+https://github.com/itsnotyoutoday/lingua-core.git@${LINGUA_CORE_REF}"
+# --- the engine ---------------------------------------------------------------------------
+# COPIED from this repo, not pip-installed from git. It used to be a git install of
+# lingua-core, which had two faults: the engine lived in another repo, so this image could
+# not be built from its own source and the harness scripts could disagree with the engine
+# they shipped beside; and a floating ref served a STALE build out of the layer cache,
+# which is why a SHA was pinned here and had to be bumped by hand on every engine change.
+# The engine is part of this repo now, so the image is self-contained and always coherent.
+COPY lingua_harness/ /app/lingua_harness/
 
 # --- 3b. ABI check, immediately after the install --------------------------------------
 # Imports every compiled extension in dependency order. Without this the first symptom of
@@ -114,7 +119,7 @@ RUN $PY -m pip install --no-cache-dir \
 RUN echo "=== ABI check ===" \
  && $PY -c "\
 import numpy, scipy, scipy.spatial, sklearn, librosa, soundfile, torch, torchaudio, speechbrain, sys; \
-import lingua_core, lingua_core.framework, lingua_core.execute_job; \
+import lingua_harness, lingua_harness.framework, lingua_harness.execute_job; \
 print('compiled stack imports OK on', sys.version.split()[0]); \
 print('numpy', numpy.__version__, '| scipy', scipy.__version__, \
       '| torch', torch.__version__, '| cuda', torch.version.cuda)"
@@ -204,13 +209,13 @@ RUN mkdir -p /workspace/corpus /workspace/runs /workspace/cache
 RUN echo "=== runtime sanity check ===" \
  && echo "python3 -> $(readlink -f $(which python3))" \
  && python3 --version \
- && grep -oE 'lingua_core\.[a-z_]+' /usr/local/bin/lingua-init | sort -u | while read -r m; do \
+ && grep -oE 'lingua_harness\.[a-z_]+' /usr/local/bin/lingua-init | sort -u | while read -r m; do \
         python3 -c "import importlib,sys; importlib.import_module('$m')" \
         || { echo "lingua-init references $m, which does not import"; exit 1; }; \
     done \
- && python3 -m lingua_core.execute_job --help >/dev/null \
+ && python3 -m lingua_harness.execute_job --help >/dev/null \
  && python3 -c "import serve.jobs, serve.code, serve.api; \
-import lingua_core.events, lingua_core.registry, lingua_core.resume; \
+import lingua_harness.events, lingua_harness.registry, lingua_harness.resume; \
 print('harness + engine imports OK')" \
  && ffmpeg -version | head -1 \
  && mfa version \

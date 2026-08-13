@@ -8,10 +8,10 @@ runner for *one* pipeline rather than a runner.
 
 Now the spec names its own entry point:
 
-    "pipeline": {"stages_from": "trainer.stages:STAGES", "stages": [...]}   → lingua_core
+    "pipeline": {"stages_from": "trainer.stages:STAGES", "stages": [...]}   → lingua_harness
     "exec":     {"module": "...", "args": [...]}                            → raw escape hatch
 
-and this module launches `lingua_core.execute_job`, which imports whatever registry the
+and this module launches `lingua_harness.execute_job`, which imports whatever registry the
 workload published. Nothing here knows what a stage does.
 
 Stage INSIGHT is not lost by that — quite the opposite. The engine still reports per-stage
@@ -37,7 +37,7 @@ import threading
 from pathlib import Path
 
 from . import code as code_mod
-from lingua_core.events import EventLog, job_dir
+from lingua_harness.events import EventLog, job_dir
 
 REPO = Path(__file__).resolve().parent.parent
 
@@ -49,17 +49,17 @@ _lock = threading.Lock()
 
 
 # --------------------------------------------------------------------------------------
-# spec handling — delegated to lingua_core so the contract has ONE definition
+# spec handling — delegated to lingua_harness so the contract has ONE definition
 # --------------------------------------------------------------------------------------
 
 def _spec_mod():
     """Import the spec contract from the engine.
 
-    Imported lazily and tolerantly: the harness test image ships without lingua_core, and
+    Imported lazily and tolerantly: the harness test image ships without lingua_harness, and
     the API must still start there — it simply cannot validate specs as deeply.
     """
     try:
-        from lingua_core import spec as spec_mod      # type: ignore
+        from lingua_harness import spec as spec_mod      # type: ignore
         return spec_mod
     except Exception:
         return None
@@ -71,7 +71,7 @@ def normalize_spec(raw: dict) -> tuple[dict, list[str]]:
     if sm is None:
         if not (raw.get("pipeline") or raw.get("exec")):
             return raw, ["spec needs 'pipeline' or 'exec' "
-                         "(lingua_core not installed here, so validation is minimal)"]
+                         "(lingua_harness not installed here, so validation is minimal)"]
         return raw, []
     try:
         return sm.normalize(raw), []
@@ -121,7 +121,7 @@ def validate(spec: dict, *, cr: code_mod.CodeRoot | None = None) -> dict:
     if not result["problems"] and spec.get("pipeline"):
         try:
             sys.path.insert(0, str(cr.path)) if cr.path else None
-            from lingua_core import execute_job as EJ       # type: ignore
+            from lingua_harness import execute_job as EJ       # type: ignore
             registry = EJ.load_registry(spec["pipeline"]["stages_from"])
             runner = EJ.build_runner(spec, registry)
             plan = runner.plan(EJ.context_from_spec(spec))
@@ -156,7 +156,7 @@ def _command(spec: dict, spec_path: Path, job_id: str, cr: code_mod.CodeRoot) ->
                 "code_root": str(cr.path or "/app")}
         args = [str(a).format(**subs) for a in (e.get("args") or [])]
         return [sys.executable, "-u", "-m", e["module"], *args]
-    return [sys.executable, "-u", "-m", "lingua_core.execute_job",
+    return [sys.executable, "-u", "-m", "lingua_harness.execute_job",
             "--spec", str(spec_path), "--job-id", job_id]
 
 

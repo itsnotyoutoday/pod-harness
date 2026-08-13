@@ -41,14 +41,19 @@ COPY requirements-serve.txt .
 RUN pip install --no-cache-dir -r requirements-serve.txt
 
 # Same engine the real image carries — so the harness test exercises the real code path
-# (serve/jobs.py shelling lingua_core.execute_job) rather than a stand-in for it.
+# (serve/jobs.py shelling lingua_harness.execute_job) rather than a stand-in for it.
 # Pinned by SHA, not a branch. A mutable ref means Docker's layer cache can serve a
 # STALE engine: the RUN line is unchanged, so the cache hits even though the branch has
 # moved. That is the same immutability argument as code/<repo>/<sha>/ for workloads —
 # bump this deliberately.
-ARG LINGUA_CORE_REF=dbb6132
-RUN pip install --no-cache-dir \
-        "git+https://github.com/itsnotyoutoday/lingua-core.git@${LINGUA_CORE_REF}"
+# --- the engine ---------------------------------------------------------------------------
+# COPIED from this repo, not pip-installed from git. It used to be a git install of
+# lingua-core, which had two faults: the engine lived in another repo, so this image could
+# not be built from its own source and the harness scripts could disagree with the engine
+# they shipped beside; and a floating ref served a STALE build out of the layer cache,
+# which is why a SHA was pinned here and had to be bumped by hand on every engine change.
+# The engine is part of this repo now, so the image is self-contained and always coherent.
+COPY lingua_harness/ /app/lingua_harness/
 
 COPY docker/harness/Caddyfile /etc/caddy/Caddyfile
 COPY docker/harness/lingua-init         /usr/local/bin/lingua-init
@@ -81,11 +86,11 @@ ENV LINGUA_CODE_ROOT=/workspace/code/fixture \
 # Every module lingua-init names must actually import. Added after a pod spent 13 minutes
 # failing because the shell script still referenced runners.execute_job, three Python moves
 # later. Catching it here costs 2 minutes; catching it on a pod cost real money.
-RUN grep -oE 'lingua_core\.[a-z_]+' /usr/local/bin/lingua-init | sort -u | while read -r m; do \
+RUN grep -oE 'lingua_harness\.[a-z_]+' /usr/local/bin/lingua-init | sort -u | while read -r m; do \
         python -c "import importlib; importlib.import_module('$m')" \
         || { echo "lingua-init references $m, which does not import"; exit 1; }; \
     done \
- && python -m lingua_core.execute_job --help >/dev/null \
+ && python -m lingua_harness.execute_job --help >/dev/null \
  && python -c "import serve.jobs, serve.code, serve.api; print('harness + engine imports OK')"
 
 EXPOSE 8000

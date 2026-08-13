@@ -154,7 +154,7 @@ case "$LINGUA_MODE" in
     # pod spent 13 minutes proving the module no longer exists — the third time today a
     # Python move left this shell script pointing at the old location. The Dockerfile now
     # asserts this exact module imports, so the mismatch fails the BUILD instead.
-    exec python3 -u -m "${LINGUA_ENTRY:-lingua_core.execute_job}" \
+    exec python3 -u -m "${LINGUA_ENTRY:-lingua_harness.execute_job}" \
         --spec "$LINGUA_JOB_SPEC"
     ;;
 
