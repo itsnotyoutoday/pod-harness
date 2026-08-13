@@ -1,0 +1,69 @@
+#!/usr/bin/env bash
+# lingua-seed-models — wire the baked model weights into the paths the pipeline looks in.
+#
+# ## The bug this exists to prevent
+#
+# RunPod mounts the network volume at /workspace. A mount SHADOWS whatever the image had
+# at that path. So `Dockerfile.pod`'s `MFA_ROOT_DIR=/workspace/.cache/mfa` means any model
+# baked there at build time is invisible the instant the pod starts — the download happens
+# anyway, and the bake bought nothing. Same trap for LINGUA_CACHE_ROOT, whose default
+# (/corpus/.cache) is also a mount point on a real pod.
+#
+# So baked weights live in /opt, which is never a mount point, and this script links them
+# into the cache tree at container start.
+#
+# ## Why symlinks rather than changing the pipeline
+#
+# `pipeline/speech/diarize.py` resolves ECAPA to CACHE_ROOT/speechbrain/ecapa, and
+# transcribe.py, vad.py, hf.py, g2p.py and llm.py all hang their own subdirectories off
+# the same CACHE_ROOT. That root has to stay WRITABLE and on the volume — the HF cache in
+# particular can grow to gigabytes, and container disk is small. Pointing CACHE_ROOT at
+# /opt would put corpus downloads on the container disk and fill it.
+#
+# Linking gives both properties at once: CACHE_ROOT stays a writable directory on the
+# volume, while the handful of subdirectories that are actually baked resolve into /opt.
+# Zero pipeline changes.
+#
+# ## Idempotent, and never destructive
+#
+# If a real directory already exists at the target — someone downloaded a newer model onto
+# the volume — it is left alone. The bake is a default, not an override.
+
+set -u
+
+: "${LINGUA_CACHE_ROOT:=/workspace/.cache}"
+: "${LINGUA_MODEL_ROOT:=/opt/models}"
+: "${MFA_ROOT_DIR:=/workspace/.cache/mfa}"
+: "${LINGUA_BAKED_MFA:=/opt/mfa}"
+
+link() {
+    local src="$1" dst="$2"
+    [ -e "$src" ] || return 0                      # nothing baked; nothing to do
+    if [ -L "$dst" ]; then return 0; fi            # already linked
+    if [ -d "$dst" ] && [ -n "$(ls -A "$dst" 2>/dev/null)" ]; then
+        echo "    keep  $dst (non-empty on volume — not overriding baked $src)"
+        return 0
+    fi
+    rmdir "$dst" 2>/dev/null || true
+    mkdir -p "$(dirname "$dst")"
+    ln -s "$src" "$dst" && echo "    link  $dst -> $src"
+}
+
+echo "  seeding baked models"
+mkdir -p "$LINGUA_CACHE_ROOT" "$MFA_ROOT_DIR"
+
+# SpeechBrain ECAPA — pipeline/speech/diarize.py:129, runners/batch.py:201
+link "$LINGUA_MODEL_ROOT/speechbrain/ecapa" "$LINGUA_CACHE_ROOT/speechbrain/ecapa"
+
+# MFA acoustic model + dictionary. MFA writes temp state under MFA_ROOT_DIR, so that root
+# must stay writable on the volume; only pretrained_models/ is baked and linked.
+link "$LINGUA_BAKED_MFA/pretrained_models" "$MFA_ROOT_DIR/pretrained_models"
+
+# Report what actually resolved, so preflight and the log show truth rather than intent.
+for p in "$LINGUA_CACHE_ROOT/speechbrain/ecapa" "$MFA_ROOT_DIR/pretrained_models"; do
+    if [ -e "$p" ]; then
+        echo "    ok    $p"
+    else
+        echo "    MISS  $p — will download at first use"
+    fi
+done

@@ -1,0 +1,89 @@
+#!/usr/bin/env bash
+# lingua-watchdog — in-pod backstop against a pod that bills without working.
+#
+# ## This is the BACKSTOP, not the primary kill path
+#
+# plexus learned this the hard way. `runpod_cleanup.py` records the finding:
+#
+#     "RunPod blocks pod-side self-delete (HTTP 403 from any user key called from inside
+#      the pod)... External cleanup is the only reliable way."
+#
+# A watchdog inside the pod cannot survive the failure modes that matter most — the kernel
+# OOM-killing everything, the container being frozen, the network partitioning so the
+# delete call never lands. So the PRIMARY guard is the control plane, which created the
+# runner and can therefore destroy it from outside with no cooperation from the pod.
+#
+# This script covers the cheaper cases the control plane cannot see quickly: a workload
+# that wedged with no output, or a dev pod left idle. It tries, and if it cannot, the
+# external janitor still catches it.
+#
+# ## Two independent triggers
+#
+#   MAX_IDLE_SEC   nothing has touched the heartbeat, or (in dev mode) nobody has hit the
+#                  API, for this long. The friendly one: a dev pod dies after you walk
+#                  away, but never mid-job.
+#   MAX_LIFE_SEC   absolute ceiling regardless of activity. The unfriendly one, and the
+#                  only one that catches a job stuck in a CPU loop that keeps its heartbeat
+#                  fresh. Set it above the longest job you actually expect.
+#
+# Set either to 0 to disable it.
+set -u
+
+HEARTBEAT="${HEARTBEAT:-${LINGUA_LOG_DIR:-/workspace/logs/local}/heartbeat}"
+MAX_IDLE_SEC="${MAX_IDLE_SEC:-1800}"
+MAX_LIFE_SEC="${MAX_LIFE_SEC:-0}"
+POLL_SEC="${WATCHDOG_POLL_SEC:-30}"
+START=$(date +%s)
+
+log() { echo "[lingua-watchdog $(date -u +%H:%M:%S)] $*"; }
+
+mkdir -p "$(dirname "$HEARTBEAT")" 2>/dev/null || true
+touch "$HEARTBEAT" 2>/dev/null || true
+log "armed: heartbeat=$HEARTBEAT idle=${MAX_IDLE_SEC}s life=${MAX_LIFE_SEC}s"
+
+# Any activity refreshes the clock: the job's own heartbeat, OR a request to the API. The
+# second is what makes this usable for a dev pod — you are "active" while you are working
+# with it, without having to remember to keep something alive.
+newest_activity() {
+    local newest=0 f mt
+    for f in "$HEARTBEAT" \
+             "${LINGUA_LOG_DIR:-/workspace/logs/local}/api.log" \
+             "${LINGUA_LOG_DIR:-/workspace/logs/local}/caddy.log"; do
+        [ -f "$f" ] || continue
+        mt=$(stat -c %Y "$f" 2>/dev/null || stat -f %m "$f" 2>/dev/null || echo 0)
+        [ "$mt" -gt "$newest" ] && newest=$mt
+    done
+    echo "$newest"
+}
+
+terminate() {
+    log "$1"
+    if [ -x /usr/local/bin/lingua-self-delete ]; then
+        /usr/local/bin/lingua-self-delete || log "self-delete failed — external janitor must collect this pod"
+    else
+        log "no self-delete available — external janitor must collect this pod"
+    fi
+    exit 0
+}
+
+while true; do
+    sleep "$POLL_SEC"
+    now=$(date +%s)
+
+    if [ "$MAX_LIFE_SEC" -gt 0 ]; then
+        age=$(( now - START ))
+        if [ "$age" -gt "$MAX_LIFE_SEC" ]; then
+            terminate "MAX_LIFE_SEC=${MAX_LIFE_SEC} exceeded (alive ${age}s)"
+        fi
+    fi
+
+    if [ "$MAX_IDLE_SEC" -gt 0 ]; then
+        last=$(newest_activity)
+        if [ "$last" -gt 0 ]; then
+            idle=$(( now - last ))
+            if [ "$idle" -gt "$MAX_IDLE_SEC" ]; then
+                terminate "idle ${idle}s with no heartbeat or API activity (limit ${MAX_IDLE_SEC}s)"
+            fi
+        fi
+    fi
+done

@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+# lingua-self-delete — best-effort pod termination from inside the pod.
+#
+# ## Treat this as unreliable, because it is
+#
+# The two plexus files disagree about whether this works at all. `trainer.Dockerfile`
+# claims runpod/base auto-configures a pod-scoped credential that is permitted to
+# self-delete; `runpod_cleanup.py` states flatly that RunPod returns HTTP 403 for any
+# user key called from inside the pod, that the pod-scoped key is "not actually
+# auto-configured in runpodctl 2.3.0", and that an external janitor is the only reliable
+# path. Both files carry the same mtime, so which finding is later is unknowable from the
+# source alone.
+#
+# Rather than pick a side, this script tries and reports honestly. Cost control does NOT
+# depend on it succeeding — the control plane destroys runners from outside, where no
+# permission question arises. If this works, it saves a minute of billing; if it does not,
+# nothing is lost but the log line.
+#
+# Exits 0 whether or not the pod actually died, so a watchdog calling it never wedges on
+# a non-zero status.
+set -u
+
+POD_ID="${RUNPOD_POD_ID:-}"
+if [ -z "$POD_ID" ]; then
+    echo "[lingua-self-delete] RUNPOD_POD_ID unset — nothing to delete (running locally?)"
+    exit 0
+fi
+
+if ! command -v runpodctl >/dev/null 2>&1; then
+    echo "[lingua-self-delete] runpodctl not installed — external janitor must collect $POD_ID"
+    exit 0
+fi
+
+echo "[lingua-self-delete] runpodctl remove pod $POD_ID"
+out=$(runpodctl remove pod "$POD_ID" 2>&1) || out="${out} (non-zero exit)"
+echo "[lingua-self-delete] $out"
+
+case "$out" in
+    *403*|*orbidden*|*nauthor*)
+        echo "[lingua-self-delete] REFUSED by RunPod — this confirms the runpod_cleanup.py"
+        echo "[lingua-self-delete] finding. External cleanup is required for this pod."
+        ;;
+esac
+exit 0

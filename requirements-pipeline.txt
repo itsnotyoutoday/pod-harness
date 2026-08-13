@@ -1,0 +1,14 @@
+# Build-zone dependencies. Mirrors linguabackend_pipeline/requirements-runpod.txt — keep
+# them in step when they merge.
+#
+# torch/torchaudio are NOT listed here: pipeline.Dockerfile installs them first from the
+# CPU-only index so speechbrain cannot pull the CUDA build in as a transitive dep.
+numpy>=1.26,<3
+scipy>=1.11
+librosa>=0.10.1        # ISC — spectral features, pYIN
+soundfile>=0.12.1      # libsndfile binding
+requests>=2.31
+pypdf>=4.0
+boto3>=1.34            # S3-compatible object storage
+speechbrain>=1.0       # ECAPA speaker embeddings
+scikit-learn>=1.3

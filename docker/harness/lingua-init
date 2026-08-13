@@ -1,0 +1,167 @@
+#!/bin/bash
+# lingua-init — container ENTRYPOINT. Everything in this file happens regardless of
+# what command the operator passes, so observability is a property of the IMAGE and not
+# something a launcher can forget to switch on.
+#
+# It does four things, in this order, and the order matters:
+#
+#   1. Mirror PID-1 stdout/stderr into console.log BEFORE the first echo, so this
+#      script's own output is captured too. This is the one file that holds the FULL
+#      container output — bash echoes, python prints, subprocess noise, crash traces —
+#      i.e. the same bytes RunPod's dashboard shows.
+#
+#   2. Seed the model symlinks. Baked weights live in /opt (see lingua-seed-models for
+#      why they cannot live under the volume mount). This wires them into the cache
+#      paths the pipeline actually looks in.
+#
+#   3. Start the sidecars — Caddy (static log serving) and the /v1 API — in the
+#      BACKGROUND and disowned, so they survive the workload crashing. That window
+#      between "workload died" and "container exits" is exactly when you most want to
+#      read the log, and it is the window plexus-init was built to keep open.
+#
+#   4. exec into the operator's command, so PID 1 becomes the workload and the pod
+#      stops billing the moment the work is done.
+#
+# ## Why the log goes on the volume
+#
+# RunPod mounts the network volume at /workspace, so a log written there survives pod
+# death AND is readable from S3 without the pod being alive. plexus wrote its console.log
+# to the same path but lost it when the pod went; putting it under the mount is a strict
+# improvement, and it is what lets the control plane answer /v1/jobs/{id}/log for a pod
+# that no longer exists.
+#
+# ## Why logs are namespaced by pod id
+#
+# plexus used a flat /workspace/console.log, which is correct for one-pod-at-a-time and
+# silently corrupting for a fleet — two pods sharing a volume interleave into one file.
+# LOG_DIR is per-pod so a fleet is safe by construction.
+
+set -e
+
+: "${LINGUA_LOG_ROOT:=/workspace/logs}"
+: "${RUNPOD_POD_ID:=local}"
+: "${LINGUA_SERVE_API:=1}"
+: "${LINGUA_API_PORT:=8010}"
+
+LOG_DIR="$LINGUA_LOG_ROOT/$RUNPOD_POD_ID"
+mkdir -p "$LOG_DIR"
+export LINGUA_LOG_DIR="$LOG_DIR"
+
+CONSOLE="$LOG_DIR/console.log"
+touch "$CONSOLE"
+
+# Must precede every echo below, or this script's own banner is missing from the file
+# that is supposed to hold everything.
+exec > >(tee -a "$CONSOLE") 2>&1
+
+echo "================================================================================"
+echo "  lingua-init  $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+echo "  pod:      ${RUNPOD_POD_ID}"
+echo "  log dir:  ${LOG_DIR}"
+echo "  pid:      $$"
+echo "================================================================================"
+
+# -- 2. baked models ------------------------------------------------------------------
+if [ -x /usr/local/bin/lingua-seed-models ]; then
+    /usr/local/bin/lingua-seed-models || echo "  ! model seeding failed (continuing)"
+fi
+
+# -- 2b. data view --------------------------------------------------------------------
+# The container is TOLD how its data arrives (LINGUA_MOUNT_KIND) and arranges it: a bind
+# mount or network volume needs only verifying, FUSE needs mounting before anything can
+# read a path, object mode defers to each job. Same image, three modes, chosen at start.
+#
+# A failure here is fatal on purpose. Continuing would run the job against an empty
+# directory, and a stage that processes zero files can still report success — the failure
+# mode this project's whole verification framework exists to prevent.
+if [ -x /usr/local/bin/lingua-mount ]; then
+    if ! /usr/local/bin/lingua-mount; then
+        echo "  ✗ data view could not be established — refusing to run."
+        echo "    Set LINGUA_MOUNT_KIND=object for the strategy that needs no capabilities."
+        exit 1
+    fi
+fi
+
+# -- 3. sidecars ----------------------------------------------------------------------
+# Caddy serves the static artefacts (console.log, status.json) and reverse-proxies /v1
+# to the API. One exposed port, one auth check, both kinds of traffic.
+if [ -x /usr/local/bin/caddy ] && [ -f /etc/caddy/Caddyfile ]; then
+    if [ -z "${LINGUA_API_TOKEN:-}" ]; then
+        echo "  ! LINGUA_API_TOKEN unset — Caddy will reject every request."
+        echo "    Set it in the pod env, or the log endpoint is unreachable."
+    fi
+    LINGUA_LOG_ROOT="$LINGUA_LOG_ROOT" \
+    /usr/local/bin/caddy run --config /etc/caddy/Caddyfile --adapter caddyfile \
+        > "$LOG_DIR/caddy.log" 2>&1 &
+    disown $! 2>/dev/null || true
+    echo "  caddy    :8000 → root=$LINGUA_LOG_ROOT, /v1 → 127.0.0.1:$LINGUA_API_PORT"
+else
+    echo "  caddy    not installed — HTTP log endpoint disabled"
+fi
+
+# The API is optional because a pure batch pod does not need it: it is handed one job
+# spec and exits. Long-lived dev and service pods set LINGUA_SERVE_API=1 (the default)
+# and get the control surface.
+if [ "$LINGUA_SERVE_API" = "1" ] && command -v uvicorn >/dev/null 2>&1; then
+    uvicorn serve.api:app --host 127.0.0.1 --port "$LINGUA_API_PORT" \
+        > "$LOG_DIR/api.log" 2>&1 &
+    disown $! 2>/dev/null || true
+    echo "  api      127.0.0.1:$LINGUA_API_PORT (uvicorn)"
+else
+    echo "  api      disabled (LINGUA_SERVE_API=$LINGUA_SERVE_API)"
+fi
+
+echo "  workload: $*"
+echo "================================================================================"
+
+# -- 4. hand off ----------------------------------------------------------------------
+# exec replaces this shell, so PID 1 becomes the workload and the pod stops billing the
+# moment the work is done.
+#
+# Three start modes, one image. An explicit command always wins; otherwise LINGUA_MODE
+# decides. This is what lets a batch pod, a dev pod and a long-lived service be the same
+# artifact configured differently, rather than three images that drift apart.
+#
+#   batch   run one job spec, exit. LINGUA_JOB_SPEC names it.
+#   serve   idle and serve /v1. The dev pod, and the shape the v1 backend grows into.
+#   shell   drop to bash, for interactive debugging.
+: "${LINGUA_MODE:=serve}"
+
+if [ "$#" -gt 0 ]; then
+    exec "$@"
+fi
+
+case "$LINGUA_MODE" in
+  batch)
+    : "${LINGUA_JOB_SPEC:=}"
+    if [ -z "$LINGUA_JOB_SPEC" ]; then
+        echo "  ✗ LINGUA_MODE=batch needs LINGUA_JOB_SPEC=/path/to/spec.json"
+        exit 1
+    fi
+    if [ ! -f "$LINGUA_JOB_SPEC" ]; then
+        echo "  ✗ job spec not found: $LINGUA_JOB_SPEC"
+        exit 1
+    fi
+    echo "  mode: batch — $LINGUA_JOB_SPEC"
+    [ -x /usr/local/bin/lingua-preflight ] && /usr/local/bin/lingua-preflight
+    exec python3 -u -m runners.execute_job --spec "$LINGUA_JOB_SPEC"
+    ;;
+
+  serve)
+    # Idle in the foreground. A pod is only "up" while its process runs: an image whose
+    # command returns immediately leaves a pod that bills, reports no runtime and opens no
+    # port — it looks broken in the console. See batch_pod.py on why this matters.
+    echo "  mode: serve — idling. Drive this container through the /v1 API."
+    exec tail -f /dev/null
+    ;;
+
+  shell)
+    echo "  mode: shell"
+    exec /bin/bash
+    ;;
+
+  *)
+    echo "  ✗ unknown LINGUA_MODE=$LINGUA_MODE (want batch|serve|shell)"
+    exit 1
+    ;;
+esac

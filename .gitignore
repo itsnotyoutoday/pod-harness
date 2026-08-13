@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+.env
+out/
+
+# API keys — NEVER commit or bake into an image
+*.key
+gemini.key
+anthropic.key
+deploy/*.env

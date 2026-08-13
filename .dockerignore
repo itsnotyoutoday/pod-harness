@@ -1,0 +1,8 @@
+.git/
+out/
+**/__pycache__/
+**/*.pyc
+.env
+*.key
+*.md
+!README.md

@@ -1,0 +1,205 @@
+"""The /v1 control surface — one API, two audiences.
+
+## The audiences want the same thing, with one asymmetry
+
+A webapp and an agent both want to submit work and watch it. The asymmetry is that a
+webapp can afford to receive a megabyte and render 2% of it; an agent pays for every byte
+it reads, forever, in a context window it cannot get back. So the rules below are written
+for the agent, and the webapp is fine under them:
+
+  * No endpoint returns an unbounded body. Log and event reads are capped and ALWAYS
+    report what was omitted (`total_bytes`, `truncated`), because a silently truncated
+    response is worse than a small one.
+  * `/summary` exists so the common question — "what happened to my job" — costs ~500
+    tokens instead of a log.
+  * `dry_run` is free and total. An agent can validate a spec before spending a pod-hour,
+    which is the difference between a typo costing nothing and costing real money.
+  * `GET /v1/` is self-describing. An agent that has lost its context can rediscover the
+    whole surface, including the live stage vocabulary, in one call.
+  * Errors carry a `hint` naming the next action, not just what failed.
+
+## Why the same paths exist on the pod and on the control plane
+
+The control plane proxies these paths for pods, and answers them from S3 for serverless
+workers and for pods that no longer exist. A client written against this surface keeps
+working as the compute moves underneath it — which is the whole point, given the compute
+is expected to move from pods to serverless.
+"""
+from __future__ import annotations
+
+import os
+import time
+from pathlib import Path
+
+from fastapi import Depends, FastAPI, Header, HTTPException, Query
+from fastapi.responses import JSONResponse
+
+from . import jobs as J
+from .events import EventLog, job_dir, log_root, read_tail
+
+API_VERSION = "1"
+MAX_TAIL = 262_144          # 256 KB ceiling on any single log read
+MAX_WAIT = 60.0             # longest a long-poll may block
+
+app = FastAPI(
+    title="lingua pod control API",
+    version=API_VERSION,
+    docs_url="/v1/docs",
+    openapi_url="/v1/openapi.json",   # generates the Node client and, later, an MCP shim
+)
+
+
+def auth(x_lingua_token: str | None = Header(default=None)) -> None:
+    """Shared-token auth, enforced here as well as at Caddy.
+
+    Defence in depth on purpose: a misconfigured proxy that forwards everything must not
+    also mean an open control surface. If no token is configured the API refuses rather
+    than defaulting open — a control plane that fails open is worse than one that fails.
+    """
+    want = os.environ.get("LINGUA_API_TOKEN", "")
+    if not want:
+        raise HTTPException(503, detail={
+            "error": "LINGUA_API_TOKEN is not set on this pod",
+            "hint": "set LINGUA_API_TOKEN in the pod env and restart; the API refuses to "
+                    "serve unauthenticated rather than defaulting open"})
+    if x_lingua_token != want:
+        raise HTTPException(401, detail={
+            "error": "bad or missing X-Lingua-Token header",
+            "hint": "send header X-Lingua-Token: <the pod's LINGUA_API_TOKEN>"})
+
+
+@app.get("/v1/health")
+def health() -> dict:
+    """Unauthenticated on purpose — a liveness probe that needs a secret is useless to a
+    launcher deciding whether the pod came up."""
+    return {"ok": True, "version": API_VERSION,
+            "pod_id": os.environ.get("RUNPOD_POD_ID", "local"),
+            "uptime_hint": "see /v1/ for the full surface (requires token)"}
+
+
+@app.get("/v1/", dependencies=[Depends(auth)])
+def discover() -> dict:
+    """Self-description. One call rebuilds everything a caller needs to know."""
+    return {
+        "version": API_VERSION,
+        "pod_id": os.environ.get("RUNPOD_POD_ID", "local"),
+        "log_root": str(log_root()),
+        "stages": J.available_stages(),
+        "endpoints": {
+            "GET  /v1/":                       "this document",
+            "GET  /v1/health":                 "liveness, no auth",
+            "POST /v1/jobs?dry_run=true":      "validate a spec, run nothing, free",
+            "POST /v1/jobs":                   "submit; idempotent on spec.job_id",
+            "GET  /v1/jobs":                   "list known jobs",
+            "GET  /v1/jobs/{id}":              "status snapshot (cheap poll target)",
+            "GET  /v1/jobs/{id}/summary":      "~500-token digest — start here",
+            "GET  /v1/jobs/{id}/log?tail=N":   "bounded log tail, reports total_bytes",
+            "GET  /v1/jobs/{id}/events":       "?since_seq=N&wait=S — long-poll",
+            "GET  /v1/jobs/{id}/artifacts":    "produced files",
+            "DEL  /v1/jobs/{id}":              "cancel",
+        },
+        "job_spec_schema": {
+            "job_id": "str — required, also the idempotency key",
+            "region": "str",
+            "mount": {"kind": "local|s3", "root": "corpus/"},
+            "sources": [{"id": "str", "path": "str relative to mount root",
+                         "limit": "int|null"}],
+            "stages": "list[str] — must all appear in .stages above",
+            "opts": "dict — stage-specific",
+        },
+        "conventions": {
+            "auth": "header X-Lingua-Token",
+            "bounded_reads": "log and event responses are capped; check `truncated`",
+            "cursor": "events carry monotonic `seq`; resume with since_seq",
+        },
+    }
+
+
+@app.post("/v1/jobs", dependencies=[Depends(auth)])
+def submit_job(spec: dict, dry_run: bool = Query(default=False)) -> JSONResponse:
+    if not isinstance(spec, dict) or "stages" not in spec:
+        raise HTTPException(422, detail={
+            "error": "body must be a job spec object with a 'stages' list",
+            "hint": "GET /v1/ returns job_spec_schema and the valid stage names"})
+
+    check = J.validate(spec)
+    if dry_run:
+        return JSONResponse(check, status_code=200 if check["ok"] else 422)
+    if not check["ok"]:
+        raise HTTPException(422, detail={
+            "error": "spec did not validate", "problems": check["problems"],
+            "hint": "POST the same body with ?dry_run=true to iterate for free"})
+
+    return JSONResponse(J.submit(spec), status_code=202)
+
+
+@app.get("/v1/jobs", dependencies=[Depends(auth)])
+def list_jobs() -> dict:
+    return {"jobs": J.list_jobs()}
+
+
+@app.get("/v1/jobs/{job_id}", dependencies=[Depends(auth)])
+def job_status(job_id: str) -> dict:
+    _require(job_id)
+    return EventLog(job_id).status()
+
+
+@app.get("/v1/jobs/{job_id}/summary", dependencies=[Depends(auth)])
+def job_summary(job_id: str, tail_lines: int = Query(default=20, ge=0, le=200)) -> dict:
+    _require(job_id)
+    return EventLog(job_id).summary(tail_lines=tail_lines)
+
+
+@app.get("/v1/jobs/{job_id}/log", dependencies=[Depends(auth)])
+def job_log(job_id: str, tail: int = Query(default=8192, ge=0, le=MAX_TAIL)) -> dict:
+    """Bounded by construction. `tail` cannot exceed MAX_TAIL even if asked."""
+    _require(job_id)
+    r = read_tail(job_dir(job_id) / "job.log", tail)
+    r["truncated"] = r["total_bytes"] > r["returned_bytes"]
+    r["hint"] = ("full file is served with Range support at "
+                 f"/jobs/{job_id}/job.log on the static root") if r["truncated"] else None
+    return r
+
+
+@app.get("/v1/jobs/{job_id}/events", dependencies=[Depends(auth)])
+def job_events(job_id: str,
+               since_seq: int = Query(default=0, ge=0),
+               wait: float = Query(default=0.0, ge=0.0, le=MAX_WAIT),
+               limit: int = Query(default=200, ge=1, le=1000)) -> dict:
+    """Poll, or long-poll with `wait`.
+
+    `wait` is the agent-native transport: one request that blocks until something changes
+    gives push-like latency with no connection state, and behaves identically whether it is
+    served by a pod, by a serverless worker, or replayed from S3 after the compute is gone.
+    """
+    _require(job_id)
+    log = EventLog(job_id)
+    evs = log.wait(since_seq, timeout=wait) if wait else log.since(since_seq, limit=limit)
+    evs = evs[:limit]
+    return {"job_id": job_id, "events": evs,
+            "next_seq": evs[-1]["seq"] if evs else since_seq,
+            "job_state": log.status().get("job_state")}
+
+
+@app.get("/v1/jobs/{job_id}/artifacts", dependencies=[Depends(auth)])
+def job_artifacts(job_id: str) -> dict:
+    _require(job_id)
+    d = job_dir(job_id)
+    files = []
+    for p in sorted(d.rglob("*")):
+        if p.is_file():
+            files.append({"path": str(p.relative_to(d)), "bytes": p.stat().st_size})
+    return {"job_id": job_id, "root": str(d), "files": files}
+
+
+@app.delete("/v1/jobs/{job_id}", dependencies=[Depends(auth)])
+def cancel_job(job_id: str) -> dict:
+    _require(job_id)
+    return J.cancel(job_id)
+
+
+def _require(job_id: str) -> None:
+    if not job_dir(job_id).exists():
+        raise HTTPException(404, detail={
+            "error": f"no such job: {job_id}",
+            "hint": "GET /v1/jobs lists what this pod knows about"})

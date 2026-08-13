@@ -1,0 +1,8 @@
+# The control surface. Deliberately tiny: this rides in every image, including the GPU
+# ones where every megabyte is cold-start latency.
+#
+# FastAPI rather than stdlib http.server because v1-architecture.md commits the backend to
+# "Python FastAPI on GPU" — starting here means /api/run and the eventual /score are the
+# same app growing up, not a rewrite.
+fastapi>=0.110
+uvicorn[standard]>=0.29

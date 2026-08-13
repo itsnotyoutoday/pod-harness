@@ -1,0 +1,54 @@
+# Caddy — the pod's single exposed port.
+#
+# Two kinds of traffic, one port, one auth check:
+#
+#   /v1/*     reverse-proxied to the FastAPI control app on 127.0.0.1:8010
+#   /*        static file serving out of the log root (console.log, status.json, events)
+#
+# ## Why static serving still matters when there is an API
+#
+# Caddy's file_server supports HTTP Range natively. That is the difference between
+# reading the last 8 KB of a 200 MB log and pulling the whole thing — which for an agent
+# is the difference between a cheap poll and a dead session. It also keeps working when
+# the API process has died, which is exactly when you want the log most: Caddy is started
+# backgrounded and disowned by lingua-init, so it outlives a crashed workload.
+#
+# ## Why one token rather than real auth
+#
+# The pod is reachable only at a random RunPod-assigned public port, and the only clients
+# are the control plane and an operator with a shell. A shared header token is
+# proportionate, and it is curl-able in one line, which matters because an agent driving
+# this by hand should not need an OAuth dance. The control plane in front of this is where
+# real per-user auth belongs.
+#
+# NOTE: this is bearer-equivalent — anyone with the token has full read of the log root.
+# Never put secrets in the log root, and rotate the token per pod.
+
+{
+	admin off
+}
+
+:8000 {
+	log {
+		output stdout
+		format console
+	}
+
+	@authorized header X-Lingua-Token "{$LINGUA_API_TOKEN}"
+
+	handle /v1/* {
+		# The API enforces the token itself too — belt and braces, because a
+		# misconfigured Caddy that let traffic through should not mean an open
+		# control surface.
+		reverse_proxy 127.0.0.1:8010
+	}
+
+	handle @authorized {
+		root * {$LINGUA_LOG_ROOT}
+		file_server browse
+	}
+
+	handle {
+		respond "unauthorized: set X-Lingua-Token" 401
+	}
+}

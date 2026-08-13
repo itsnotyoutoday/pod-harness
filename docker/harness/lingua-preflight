@@ -1,0 +1,96 @@
+#!/usr/bin/env bash
+# lingua-preflight — one block of diagnostic state at job start.
+#
+# Sits at the top of every job log so "why was this slow" and "did it get the right inputs"
+# are answerable without re-running anything. The expensive version of this question is a
+# second pod-hour; the cheap version is thirty lines of shell.
+#
+# Adapted from plexus-preflight, with the checks that matter for THIS pipeline:
+#   - ffmpeg/ffprobe, because every conversion and probe goes through them
+#   - mfa on PATH, because when it is missing AlignStage silently skips and every
+#     segmental rule reports UNTESTED — the exact failure Dockerfile.pod was written to fix
+#   - whether the baked models actually resolved, since a mount can shadow them
+#   - GPU, when present, so the same script serves the CPU and GPU images unchanged
+#
+# Prints no secrets. Values are truncated rather than omitted so the shape of a
+# misconfiguration is still visible.
+set -u
+
+echo "================================================================================"
+echo "  lingua preflight"
+echo "================================================================================"
+
+echo "[identity]"
+echo "  pod_id:      ${RUNPOD_POD_ID:-unset}"
+echo "  job_id:      ${LINGUA_JOB_ID:-unset}"
+echo "  image:       ${LINGUA_IMAGE:-$(cat /etc/hostname 2>/dev/null || echo unknown)}"
+echo "  runpodctl:   $(runpodctl version 2>/dev/null | head -1 || echo 'not installed')"
+
+echo
+echo "[clock]"
+echo "  utc:         $(date -u '+%Y-%m-%d %H:%M:%S %Z')"
+
+echo
+echo "[hardware]"
+echo "  cpus:        $(nproc 2>/dev/null || echo '?')"
+echo "  mem_total:   $(free -h 2>/dev/null | awk '/Mem:/ {print $2}' || echo '?')"
+echo "  mem_avail:   $(free -h 2>/dev/null | awk '/Mem:/ {print $7}' || echo '?')"
+echo "  disk /workspace: $(df -h /workspace 2>/dev/null | tail -1 | awk '{print $4" free of "$2}' || echo 'not mounted')"
+echo "  disk /:      $(df -h / 2>/dev/null | tail -1 | awk '{print $4" free of "$2}')"
+if command -v nvidia-smi >/dev/null 2>&1; then
+    echo "  gpu:         $(nvidia-smi --query-gpu=name,memory.total --format=csv,noheader 2>/dev/null | head -1 || echo 'nvidia-smi failed')"
+else
+    echo "  gpu:         none (CPU image)"
+fi
+
+echo
+echo "[audio toolchain]"
+echo "  ffmpeg:      $(ffmpeg -version 2>/dev/null | head -1 | cut -c1-60 || echo 'MISSING')"
+echo "  ffprobe:     $(command -v ffprobe >/dev/null 2>&1 && echo present || echo MISSING)"
+# MFA absent is not merely a missing feature: AlignStage skips, sibilants fall back to
+# wholefile_proxy, and every segmental rule reports UNTESTED. Say so loudly.
+if command -v mfa >/dev/null 2>&1; then
+    echo "  mfa:         $(mfa version 2>/dev/null || echo 'present, version unknown')"
+else
+    echo "  mfa:         MISSING — alignment will SKIP and segmental rules report UNTESTED"
+fi
+
+echo
+echo "[baked models]"
+for p in "${LINGUA_CACHE_ROOT:-/workspace/.cache}/speechbrain/ecapa" \
+         "${MFA_ROOT_DIR:-/workspace/.cache/mfa}/pretrained_models"; do
+    if [ -e "$p" ]; then
+        tgt=$(readlink -f "$p" 2>/dev/null || echo "$p")
+        echo "  ok    $p -> $tgt"
+    else
+        echo "  MISS  $p (downloads at first use)"
+    fi
+done
+
+echo
+echo "[python]"
+echo "  interpreter: $(command -v python3)"
+echo "  version:     $(python3 --version 2>&1)"
+python3 - <<'PY' 2>/dev/null || echo "  (package versions unavailable)"
+import importlib.metadata as md
+for pkg in ("numpy", "scipy", "librosa", "soundfile", "torch", "torchaudio",
+            "speechbrain", "scikit-learn", "boto3", "fastapi"):
+    try:
+        print(f"  {pkg+':':14} {md.version(pkg)}")
+    except Exception:
+        print(f"  {pkg+':':14} NOT INSTALLED")
+PY
+
+echo
+echo "[env]"
+for k in LINGUA_JOB_ID LINGUA_CORPUS_ROOT LINGUA_OUT_ROOT LINGUA_CACHE_ROOT \
+         LINGUA_LOG_ROOT LINGUA_MODEL_ROOT MFA_ROOT_DIR LINGUA_MANIFEST \
+         LINGUA_SERVE_API MAX_IDLE_SEC MAX_LIFE_SEC; do
+    echo "  $k=${!k:-(unset)}"
+done
+# Presence, never value.
+for k in LINGUA_API_TOKEN RUNPOD_API_KEY AWS_ACCESS_KEY_ID GEMINI_API_KEY; do
+    [ -n "${!k:-}" ] && echo "  $k=<set>" || echo "  $k=(unset)"
+done
+
+echo "================================================================================"

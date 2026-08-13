@@ -1,0 +1,100 @@
+#!/usr/bin/env bash
+# lingua-mount — establish the job's data view at container start, per instruction.
+#
+# ## Why this is a startup step and not a job step
+#
+# Two of the three strategies need work done BEFORE any job runs, and the work differs:
+#
+#   volume   nothing to do — Docker bound a host directory, or RunPod attached a network
+#            volume. Verify it is actually there, because the failure mode otherwise is a
+#            job that runs happily against an empty directory and reports success over
+#            zero files. That is the exact bug class runners/framework.py exists to catch,
+#            and catching it here is cheaper than catching it there.
+#   fuse     rclone has to mount before anything can read a path. Must happen once, at
+#            start, not per job.
+#   object   nothing at start — the job's own prepare() pulls its working set, because
+#            only the job knows which sources it needs.
+#
+# So the container is told which world it is in, and arranges it. Same image, three modes.
+#
+# ## Instructed by environment, deliberately
+#
+# A pod is configured by env at create time (RunPod's `env={...}`), a compose service by
+# `environment:`, a serverless worker by its endpoint config. Env is the one channel all
+# three share, so it is the one used here.
+#
+#   LINGUA_MOUNT_KIND   volume | fuse | object | auto   (default: auto)
+#   LINGUA_CORPUS_ROOT  where the pipeline will look for corpus data
+#
+# `auto` degrades volume -> fuse -> object, so an unconfigured container still does the
+# most capable thing its environment permits rather than failing.
+
+set -u
+
+: "${LINGUA_MOUNT_KIND:=auto}"
+: "${LINGUA_CORPUS_ROOT:=/workspace/corpus}"
+
+say() { echo "  mount: $*"; }
+
+resolve_auto() {
+    # Volume first: if something already attached data, use it — it is fastest and needs
+    # no credentials.
+    if [ -d "$LINGUA_CORPUS_ROOT" ] && [ -n "$(ls -A "$LINGUA_CORPUS_ROOT" 2>/dev/null)" ]; then
+        echo volume; return
+    fi
+    if [ -e /dev/fuse ] && command -v rclone >/dev/null 2>&1; then
+        echo fuse; return
+    fi
+    echo object
+}
+
+KIND="$LINGUA_MOUNT_KIND"
+[ "$KIND" = "auto" ] && KIND="$(resolve_auto)" && say "auto-detected -> $KIND"
+
+case "$KIND" in
+  volume)
+    mkdir -p "$LINGUA_CORPUS_ROOT" 2>/dev/null || true
+    if [ -d "$LINGUA_CORPUS_ROOT" ] && [ -n "$(ls -A "$LINGUA_CORPUS_ROOT" 2>/dev/null)" ]; then
+        n=$(find "$LINGUA_CORPUS_ROOT" -type f 2>/dev/null | head -10000 | wc -l | tr -d ' ')
+        say "volume at $LINGUA_CORPUS_ROOT — $n file(s) visible"
+    else
+        # Loud, but not fatal: an acquire-only job legitimately starts with nothing.
+        say "WARNING: $LINGUA_CORPUS_ROOT is empty or missing."
+        say "         If this job expects existing data, the bind mount or network volume"
+        say "         did not attach. A job that runs over zero files can still report"
+        say "         success — check before trusting the result."
+    fi
+    ;;
+
+  fuse)
+    if [ ! -e /dev/fuse ]; then
+        say "ERROR: /dev/fuse not present — this provider does not permit FUSE."
+        say "       Use LINGUA_MOUNT_KIND=object, which needs no capabilities."
+        exit 1
+    fi
+    say "mounting object store via rclone at $LINGUA_CORPUS_ROOT"
+    python3 - <<'PY'
+import json, os, sys
+sys.path.insert(0, "/app")
+from control.mount import FuseMount
+m = FuseMount(prefix=os.environ.get("LINGUA_S3_PREFIX", ""),
+              mountpoint=os.environ.get("LINGUA_CORPUS_ROOT", "/workspace/corpus"))
+r = m.prepare({"job_id": os.environ.get("LINGUA_JOB_ID", "startup")})
+print("  mount: " + json.dumps({k: r.get(k) for k in ("ready", "remote", "error", "hint")}))
+sys.exit(0 if r.get("ready") else 1)
+PY
+    [ $? -eq 0 ] || { say "fuse mount failed — see above"; exit 1; }
+    ;;
+
+  object)
+    say "object mode — no startup mount; each job pulls its own working set"
+    mkdir -p "$LINGUA_CORPUS_ROOT" 2>/dev/null || true
+    ;;
+
+  *)
+    say "ERROR: unknown LINGUA_MOUNT_KIND=$KIND (want volume|fuse|object|auto)"
+    exit 1
+    ;;
+esac
+
+export LINGUA_MOUNT_KIND="$KIND"

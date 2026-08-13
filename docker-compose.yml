@@ -1,0 +1,131 @@
+# Local execution — the "local" leg of the Provider abstraction.
+#
+# ## This file IS the local VolumeMount
+#
+# There is no separate "docker local" strategy. `VolumeMount` means "something attached
+# storage and the pipeline does plain file I/O"; on RunPod that something is the network
+# volume, and here it is the bind mounts below. The pipeline cannot tell the difference,
+# which is precisely what makes a local run a real rehearsal for a pod run rather than an
+# approximation of one.
+#
+# ## Why the service is named `pipeline`
+#
+# `runners/provider.py:LocalProvider` defaults to `service="pipeline"` and literally shells:
+#
+#     docker compose build pipeline
+#     docker compose run --rm --entrypoint python pipeline -m runners.execute_job --spec …
+#
+# so the name is an interface, not a preference. Renaming it breaks LocalProvider silently.
+#
+# ## Two ways to run, and they exercise different things
+#
+#   pipeline   one-shot batch, entrypoint overridden by LocalProvider. This BYPASSES
+#              lingua-init, so there is no Caddy and no console.log — you get stdout
+#              directly, which is what you want locally. status.json is still written,
+#              because reporting lives in runners/status.py inside the pipeline rather
+#              than in the harness. That separation is deliberate.
+#
+#   dev        long-lived, full harness, /v1 on :8000. The faithful rehearsal of a pod:
+#              same entrypoint, same sidecars, same API. Use this to test anything about
+#              the harness itself.
+#
+# ## Corpus data lives OUTSIDE this repo
+#
+# At ${CORPUS_DIR} (default ../corpus_data), exactly as linguabackend_pipeline has it, so
+# the two can share one corpus during the merge. Only ./out is written back into the tree.
+
+name: lingua
+
+x-paths: &paths
+  LINGUA_CORPUS_ROOT: /workspace/corpus
+  LINGUA_OUT_ROOT: /workspace/out
+  LINGUA_LOG_ROOT: /workspace/logs
+  LINGUA_CACHE_ROOT: /workspace/.cache
+  LINGUA_MANIFEST: /workspace/manifest/corpus_research.json
+
+x-mounts: &mounts
+  # The bind mounts ARE the local VolumeMount. Container paths deliberately mirror a pod's
+  # /workspace layout so nothing in the pipeline branches on where it is running.
+  - ${CORPUS_DIR:-../corpus_data}:/workspace/corpus
+  - ./out:/workspace/out
+  - ./logs:/workspace/logs
+  - ${MANIFEST_FILE:-../corpus_research.json}:/workspace/manifest/corpus_research.json:ro
+  # Job specs and rulesets are DATA: mounted, never baked, so editing one needs no rebuild.
+  - ./jobs:/workspace/jobs:ro
+  - ./corpora:/workspace/corpora:ro
+  # Credentials read-only from outside the image. The deps-only doctrine means a secret
+  # must never be in a layer — see README.
+  - ${RUNPOD_S3_KEY:-../runpods3.key}:/run/secrets/runpods3.key:ro
+
+services:
+
+  # One-shot batch. What LocalProvider drives.
+  #   docker compose run --rm pipeline -m runners.execute_job --spec /workspace/jobs/x.json
+  pipeline:
+    build:
+      context: .
+      dockerfile: docker/pipeline.Dockerfile
+    image: ghcr.io/${GHCR_OWNER:-itsnotyoutoday}/lingua-pipeline:${TAG:-latest}
+    container_name: lingua-pipeline
+    platform: linux/amd64      # MFA has no aarch64 build; emulated on Apple silicon
+    environment:
+      <<: *paths
+      LINGUA_SERVE_API: "0"    # batch needs no control surface
+      LINGUA_STATUS_S3: ${LINGUA_STATUS_S3:-0}
+      LINGUA_JOB_ID: ${JOB_ID:-}
+    volumes: *mounts
+    working_dir: /app
+    shm_size: "1gb"
+
+  # Long-lived dev pod, locally. The faithful rehearsal.
+  #   docker compose up -d dev
+  #   curl -H 'X-Lingua-Token: dev' localhost:8000/v1/ | jq
+  dev:
+    extends:
+      service: pipeline
+    container_name: lingua-dev
+    environment:
+      <<: *paths
+      LINGUA_SERVE_API: "1"
+      LINGUA_API_TOKEN: ${LINGUA_API_TOKEN:-dev}
+      LINGUA_STATUS_S3: ${LINGUA_STATUS_S3:-0}
+      MAX_IDLE_SEC: ${MAX_IDLE_SEC:-0}     # 0 = never self-terminate locally
+      MAX_LIFE_SEC: ${MAX_LIFE_SEC:-0}
+    ports:
+      - "${API_PORT:-8000}:8000"
+    command: []                # no workload: idle and serve, per lingua-init
+
+  # The lean harness image — same scripts, no conda layer, ~1 min build.
+  #   docker compose up -d harness
+  harness:
+    build:
+      context: .
+      dockerfile: docker/test.Dockerfile
+    image: lingua-harness-test
+    container_name: lingua-harness
+    environment:
+      LINGUA_API_TOKEN: ${LINGUA_API_TOKEN:-dev}
+      LINGUA_STATUS_S3: "0"
+      MAX_IDLE_SEC: "0"
+    ports:
+      - "${HARNESS_PORT:-8000}:8000"
+
+  # Local S3, so the object and fuse strategies can be exercised with no cloud account.
+  # Proves portability against a store that is neither RunPod nor Cloudflare.
+  #   docker compose --profile s3 up -d minio
+  minio:
+    profiles: ["s3"]
+    image: minio/minio
+    container_name: lingua-minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_USER:-lingua}
+      MINIO_ROOT_PASSWORD: ${MINIO_PASSWORD:-lingua123}
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio-data:/data
+
+volumes:
+  minio-data:
