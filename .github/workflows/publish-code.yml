@@ -1,0 +1,110 @@
+name: Publish workload code
+
+# Reusable workflow. A workload repo calls it in three lines and gets its code onto the
+# volume, addressed by commit, with a stage manifest beside it.
+#
+# ## Why CI publishes rather than the pod cloning
+#
+# Cloning from inside a pod would put a git credential on every pod and make GitHub a
+# runtime dependency of every launch — their outage or rate limit would block every pod
+# start. Here the credentials live in GitHub Actions, the pod reads mounted files, and a
+# pod never holds a secret.
+#
+# ## Why the SHA directory is immutable
+#
+# `code/<repo>/<sha>/` is written once and never rewritten. A push to a mutable directory
+# can change code under a RUNNING job, and Python's lazy imports mean a module loaded at
+# stage 4 could be a different version than the one loaded at stage 1 — non-deterministic
+# and unreproducible. `code/<repo>/dev/` is mutable on purpose, for iteration, and a job
+# that uses it records that it did.
+#
+# ## capabilities.json
+#
+# Generated here by introspecting the workload's stage registry. It is what lets the
+# control plane validate stage names and wiring WITHOUT importing a stack it does not have
+# — a laptop deciding whether to spend a pod-hour cannot import MFA and torch.
+#
+# Usage in a workload repo:
+#
+#   jobs:
+#     publish:
+#       uses: itsnotyoutoday/lingua-runner/.github/workflows/publish-code.yml@main
+#       with:
+#         stages_from: trainer.stages:STAGES
+#       secrets: inherit
+
+on:
+  workflow_call:
+    inputs:
+      code_dir:
+        description: directory to publish (its CONTENTS become the code root)
+        type: string
+        default: code
+      stages_from:
+        description: "module:ATTR of the stage registry; empty to skip the manifest"
+        type: string
+        default: ""
+      lingua_core_ref:
+        description: engine ref used to generate capabilities.json
+        type: string
+        default: main
+    secrets:
+      S3_ENDPOINT:     { required: true }
+      S3_BUCKET:       { required: true }
+      S3_ACCESS_KEY:   { required: true }
+      S3_SECRET_KEY:   { required: true }
+      S3_REGION:       { required: false }
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+
+      - name: Generate capabilities.json
+        if: inputs.stages_from != ''
+        run: |
+          set -euo pipefail
+          pip install -q "git+https://github.com/itsnotyoutoday/lingua-core.git@${{ inputs.lingua_core_ref }}"
+          # Run from the code root so the workload's own package is importable.
+          cd "${{ inputs.code_dir }}"
+          PYTHONPATH=. python -m lingua_core.capabilities "${{ inputs.stages_from }}" \
+            -o capabilities.json --rev "${GITHUB_SHA}"
+          cat capabilities.json
+
+      - name: Publish to object storage
+        env:
+          AWS_ACCESS_KEY_ID:     ${{ secrets.S3_ACCESS_KEY }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.S3_SECRET_KEY }}
+          AWS_DEFAULT_REGION:    ${{ secrets.S3_REGION || 'us-east-1' }}
+          ENDPOINT:              ${{ secrets.S3_ENDPOINT }}
+          BUCKET:                ${{ secrets.S3_BUCKET }}
+        run: |
+          set -euo pipefail
+          REPO="${GITHUB_REPOSITORY##*/}"
+          SHA="${GITHUB_SHA}"
+          DEST="s3://${BUCKET}/code/${REPO}/${SHA}/"
+
+          # --exclude guards against publishing anything that is not code. A key reaching
+          # the volume would undo the property that no pod ever holds a credential.
+          aws s3 sync "${{ inputs.code_dir }}/" "$DEST" \
+            --endpoint-url "$ENDPOINT" \
+            --delete \
+            --exclude '.git/*' --exclude '*.key' --exclude '.env' \
+            --exclude '__pycache__/*' --exclude '*.pyc' --exclude '.DS_Store'
+
+          # `latest` is a pointer, not a copy: a spec still names an immutable SHA, and this
+          # only records which one is newest.
+          echo -n "$SHA" | aws s3 cp - "s3://${BUCKET}/code/${REPO}/latest" \
+            --endpoint-url "$ENDPOINT"
+
+          echo "### published" >> $GITHUB_STEP_SUMMARY
+          echo "\`code/${REPO}/${SHA}/\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Use in a spec:" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`json" >> $GITHUB_STEP_SUMMARY
+          echo "\"code\": {\"root\": \"code/${REPO}/${SHA}\", \"rev\": \"${SHA}\"}" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
