@@ -106,7 +106,7 @@ def region_from_endpoint(endpoint_url: str, default: str = "us-east-1") -> str:
 def load_config(path: str | Path | None = None) -> S3Config | None:
     """Parse a key file of `name=value` lines. Returns None rather than raising."""
     candidates = [path] if path else []
-    candidates += [os.environ.get("LINGUA_S3_KEY_FILE")] + list(DEFAULT_KEY_FILES)
+    candidates += [os.environ.get("PODH_S3_KEY_FILE")] + list(DEFAULT_KEY_FILES)
     _up = _search_up("runpods3.key")
     if _up:
         candidates.append(str(_up))
@@ -159,13 +159,13 @@ def write_prefixes() -> tuple[str, ...]:
     layout, which is the thing that keeps going wrong.
     """
     import os
-    raw = os.environ.get("LINGUA_WRITE_PREFIXES", "").strip()
+    raw = os.environ.get("PODH_WRITE_PREFIXES", "").strip()
     if not raw:
-        run = os.environ.get("LINGUA_RUN_PREFIX", "").strip("/")
+        run = os.environ.get("PODH_RUN_PREFIX", "").strip("/")
         if run:
             return (run + "/",)
         raise PermissionError(
-            "LINGUA_WRITE_PREFIXES is not set, so this harness has no write grant.\n"
+            "PODH_WRITE_PREFIXES is not set, so this harness has no write grant.\n"
             "  The loader must state where a job may write. Refusing rather than "
             "defaulting: the default would be a second definition of the storage layout.")
     return tuple(p.strip().strip("/") + "/" for p in raw.split(",") if p.strip())
@@ -186,7 +186,7 @@ class Storage:
         if not self.cfg:
             raise RuntimeError(
                 "no S3 credentials. Provide runpods3.key with bucket_name, endpoint_url, "
-                "access and secret, or set LINGUA_S3_KEY_FILE.")
+                "access and secret, or set PODH_S3_KEY_FILE.")
         return self.cfg
 
     @property
@@ -230,7 +230,7 @@ class Storage:
             raise PermissionError(
                 f"{where or 'a write'} tried to write {key!r}, which is outside every "
                 f"prefix this harness was granted: {', '.join(allowed)}.\n"
-                f"  The loader grants prefixes via LINGUA_WRITE_PREFIXES. A harness that "
+                f"  The loader grants prefixes via PODH_WRITE_PREFIXES. A harness that "
                 f"could write anywhere could overwrite corpus/raw/, the one thing in this "
                 f"system that cannot be regenerated.")
         cfg = self.require()

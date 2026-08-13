@@ -38,20 +38,20 @@
 
 set -e
 
-: "${LINGUA_WORKSPACE:=/workspace}"
+: "${PODH_WORKSPACE:=/workspace}"
 : "${RUNPOD_POD_ID:=local}"
-: "${LINGUA_SERVE_API:=1}"
-: "${LINGUA_API_PORT:=8010}"
+: "${PODH_SERVE_API:=1}"
+: "${PODH_API_PORT:=8010}"
 
 # Everything a job produces lives under runs/<job_id>/ — see STRUCTURE.md. This used to be
 # logs/<pod_id>/, which scattered one job's output across logs/, out/ and status/ and is no
 # longer a legal root. Falling back to the pod id keeps a pod that was launched without a
 # job id (a shell, a probe) from writing outside the structure.
-: "${LINGUA_JOB_ID:=}"
-RUN_ID="${LINGUA_JOB_ID:-pod_$RUNPOD_POD_ID}"
-LOG_DIR="$LINGUA_WORKSPACE/runs/$RUN_ID"
+: "${PODH_JOB_ID:=}"
+RUN_ID="${PODH_JOB_ID:-pod_$RUNPOD_POD_ID}"
+LOG_DIR="$PODH_WORKSPACE/runs/$RUN_ID"
 mkdir -p "$LOG_DIR"
-export LINGUA_LOG_DIR="$LOG_DIR"
+export PODH_LOG_DIR="$LOG_DIR"
 
 CONSOLE="$LOG_DIR/console.log"
 touch "$CONSOLE"
@@ -73,7 +73,7 @@ if [ -x /usr/local/bin/lingua-seed-models ]; then
 fi
 
 # -- 2b. data view --------------------------------------------------------------------
-# The container is TOLD how its data arrives (LINGUA_MOUNT_KIND) and arranges it: a bind
+# The container is TOLD how its data arrives (PODH_MOUNT_KIND) and arranges it: a bind
 # mount or network volume needs only verifying, FUSE needs mounting before anything can
 # read a path, object mode defers to each job. Same image, three modes, chosen at start.
 #
@@ -83,7 +83,7 @@ fi
 if [ -x /usr/local/bin/lingua-mount ]; then
     if ! /usr/local/bin/lingua-mount; then
         echo "  ✗ data view could not be established — refusing to run."
-        echo "    Set LINGUA_MOUNT_KIND=object for the strategy that needs no capabilities."
+        echo "    Set PODH_MOUNT_KIND=object for the strategy that needs no capabilities."
         exit 1
     fi
 fi
@@ -92,29 +92,29 @@ fi
 # Caddy serves the static artefacts (console.log, status.json) and reverse-proxies /v1
 # to the API. One exposed port, one auth check, both kinds of traffic.
 if [ -x /usr/local/bin/caddy ] && [ -f /etc/caddy/Caddyfile ]; then
-    if [ -z "${LINGUA_API_TOKEN:-}" ]; then
-        echo "  ! LINGUA_API_TOKEN unset — Caddy will reject every request."
+    if [ -z "${PODH_API_TOKEN:-}" ]; then
+        echo "  ! PODH_API_TOKEN unset — Caddy will reject every request."
         echo "    Set it in the pod env, or the log endpoint is unreachable."
     fi
-    LINGUA_LOG_ROOT="$LINGUA_WORKSPACE/runs" \
+    PODH_LOG_ROOT="$PODH_WORKSPACE/runs" \
     /usr/local/bin/caddy run --config /etc/caddy/Caddyfile --adapter caddyfile \
         > "$LOG_DIR/caddy.log" 2>&1 &
     disown $! 2>/dev/null || true
-    echo "  caddy    :8000 → root=$LINGUA_WORKSPACE/runs, /v1 → 127.0.0.1:$LINGUA_API_PORT"
+    echo "  caddy    :8000 → root=$PODH_WORKSPACE/runs, /v1 → 127.0.0.1:$PODH_API_PORT"
 else
     echo "  caddy    not installed — HTTP log endpoint disabled"
 fi
 
 # The API is optional because a pure batch pod does not need it: it is handed one job
-# spec and exits. Long-lived dev and service pods set LINGUA_SERVE_API=1 (the default)
+# spec and exits. Long-lived dev and service pods set PODH_SERVE_API=1 (the default)
 # and get the control surface.
-if [ "$LINGUA_SERVE_API" = "1" ] && command -v uvicorn >/dev/null 2>&1; then
-    uvicorn serve.api:app --host 127.0.0.1 --port "$LINGUA_API_PORT" \
+if [ "$PODH_SERVE_API" = "1" ] && command -v uvicorn >/dev/null 2>&1; then
+    uvicorn serve.api:app --host 127.0.0.1 --port "$PODH_API_PORT" \
         > "$LOG_DIR/api.log" 2>&1 &
     disown $! 2>/dev/null || true
-    echo "  api      127.0.0.1:$LINGUA_API_PORT (uvicorn)"
+    echo "  api      127.0.0.1:$PODH_API_PORT (uvicorn)"
 else
-    echo "  api      disabled (LINGUA_SERVE_API=$LINGUA_SERVE_API)"
+    echo "  api      disabled (PODH_SERVE_API=$PODH_SERVE_API)"
 fi
 
 echo "  workload: $*"
@@ -124,38 +124,38 @@ echo "==========================================================================
 # exec replaces this shell, so PID 1 becomes the workload and the pod stops billing the
 # moment the work is done.
 #
-# Three start modes, one image. An explicit command always wins; otherwise LINGUA_MODE
+# Three start modes, one image. An explicit command always wins; otherwise PODH_MODE
 # decides. This is what lets a batch pod, a dev pod and a long-lived service be the same
 # artifact configured differently, rather than three images that drift apart.
 #
-#   batch   run one job spec, exit. LINGUA_JOB_SPEC names it.
+#   batch   run one job spec, exit. PODH_JOB_SPEC names it.
 #   serve   idle and serve /v1. The dev pod, and the shape the v1 backend grows into.
 #   shell   drop to bash, for interactive debugging.
-: "${LINGUA_MODE:=serve}"
+: "${PODH_MODE:=serve}"
 
 if [ "$#" -gt 0 ]; then
     exec "$@"
 fi
 
-case "$LINGUA_MODE" in
+case "$PODH_MODE" in
   batch)
-    : "${LINGUA_JOB_SPEC:=}"
-    if [ -z "$LINGUA_JOB_SPEC" ]; then
-        echo "  ✗ LINGUA_MODE=batch needs LINGUA_JOB_SPEC=/path/to/spec.json"
+    : "${PODH_JOB_SPEC:=}"
+    if [ -z "$PODH_JOB_SPEC" ]; then
+        echo "  ✗ PODH_MODE=batch needs PODH_JOB_SPEC=/path/to/spec.json"
         exit 1
     fi
-    if [ ! -f "$LINGUA_JOB_SPEC" ]; then
-        echo "  ✗ job spec not found: $LINGUA_JOB_SPEC"
+    if [ ! -f "$PODH_JOB_SPEC" ]; then
+        echo "  ✗ job spec not found: $PODH_JOB_SPEC"
         exit 1
     fi
-    echo "  mode: batch — $LINGUA_JOB_SPEC"
+    echo "  mode: batch — $PODH_JOB_SPEC"
     [ -x /usr/local/bin/lingua-preflight ] && /usr/local/bin/lingua-preflight
     # The GENERIC engine, not a workload's module. This said runners.execute_job until a
     # pod spent 13 minutes proving the module no longer exists — the third time today a
     # Python move left this shell script pointing at the old location. The Dockerfile now
     # asserts this exact module imports, so the mismatch fails the BUILD instead.
-    exec python3 -u -m "${LINGUA_ENTRY:-pod_harness.execute_job}" \
-        --spec "$LINGUA_JOB_SPEC"
+    exec python3 -u -m "${PODH_ENTRY:-pod_harness.execute_job}" \
+        --spec "$PODH_JOB_SPEC"
     ;;
 
   serve)
@@ -172,7 +172,7 @@ case "$LINGUA_MODE" in
     ;;
 
   *)
-    echo "  ✗ unknown LINGUA_MODE=$LINGUA_MODE (want batch|serve|shell)"
+    echo "  ✗ unknown PODH_MODE=$PODH_MODE (want batch|serve|shell)"
     exit 1
     ;;
 esac

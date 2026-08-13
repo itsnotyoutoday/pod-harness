@@ -111,7 +111,7 @@ class SqliteRegistry(Registry):
 
     def __init__(self, path: str | Path | None = None):
         self.path = Path(path or os.environ.get(
-            "LINGUA_REGISTRY", Path.home() / ".lingua" / "jobs.db"))
+            "PODH_REGISTRY", Path.home() / ".lingua" / "jobs.db"))
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
         self._init_schema()

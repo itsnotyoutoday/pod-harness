@@ -192,7 +192,7 @@ def submit(spec: dict, *, job_id: str) -> dict:
              code_rev=cr.rev, code_source=cr.source)
 
     env = dict(os.environ)
-    env["LINGUA_JOB_ID"] = job_id
+    env["PODH_JOB_ID"] = job_id
     env["PYTHONUNBUFFERED"] = "1"
     env["PYTHONPATH"] = code_mod.pythonpath(cr)
     logfile = (d / "job.log").open("ab")

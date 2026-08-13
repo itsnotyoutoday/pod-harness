@@ -72,7 +72,7 @@ is why `generated/` sits under `assets/` (we made it, same as `derived/`) while
 | **R2** | client-facing `generated/`, `releases/` | **RunPod's S3 API supports no presigned URLs** (also no ACLs, no versioning) — anything a client fetches by URL cannot come off the volume |
 | **R2, separate bucket** | `contributed/` | opt-in user recordings. Consent records, retention limits and deletion requests are bucket-level concerns |
 
-Selected by `LINGUA_S3_PROFILE` — configuration, not code. See `pod_loader/objectstore.py`.
+Selected by `PODH_S3_PROFILE` — configuration, not code. See `pod_loader/objectstore.py`.
 
 ### `contributed/` — what it is and why it is isolated
 

@@ -22,8 +22,8 @@ echo "==========================================================================
 
 echo "[identity]"
 echo "  pod_id:      ${RUNPOD_POD_ID:-unset}"
-echo "  job_id:      ${LINGUA_JOB_ID:-unset}"
-echo "  image:       ${LINGUA_IMAGE:-$(cat /etc/hostname 2>/dev/null || echo unknown)}"
+echo "  job_id:      ${PODH_JOB_ID:-unset}"
+echo "  image:       ${PODH_IMAGE:-$(cat /etc/hostname 2>/dev/null || echo unknown)}"
 echo "  runpodctl:   $(runpodctl version 2>/dev/null | head -1 || echo 'not installed')"
 
 echo
@@ -57,7 +57,7 @@ fi
 
 echo
 echo "[baked models]"
-for p in "${LINGUA_CACHE_ROOT:-/workspace/cache}/speechbrain/ecapa" \
+for p in "${PODH_CACHE_ROOT:-/workspace/cache}/speechbrain/ecapa" \
          "${MFA_ROOT_DIR:-/workspace/cache/mfa}/pretrained_models"; do
     if [ -e "$p" ]; then
         tgt=$(readlink -f "$p" 2>/dev/null || echo "$p")
@@ -106,13 +106,13 @@ PY
 
 echo
 echo "[env]"
-for k in LINGUA_JOB_ID LINGUA_CORPUS_ROOT LINGUA_OUT_ROOT LINGUA_CACHE_ROOT \
-         LINGUA_LOG_ROOT LINGUA_MODEL_ROOT MFA_ROOT_DIR LINGUA_MANIFEST \
-         LINGUA_SERVE_API MAX_IDLE_SEC MAX_LIFE_SEC; do
+for k in PODH_JOB_ID LINGUA_CORPUS_ROOT PODH_OUT_ROOT PODH_CACHE_ROOT \
+         PODH_LOG_ROOT PODH_MODEL_ROOT MFA_ROOT_DIR LINGUA_MANIFEST \
+         PODH_SERVE_API MAX_IDLE_SEC MAX_LIFE_SEC; do
     echo "  $k=${!k:-(unset)}"
 done
 # Presence, never value.
-for k in LINGUA_API_TOKEN RUNPOD_API_KEY AWS_ACCESS_KEY_ID GEMINI_API_KEY; do
+for k in PODH_API_TOKEN RUNPOD_API_KEY AWS_ACCESS_KEY_ID GEMINI_API_KEY; do
     [ -n "${!k:-}" ] && echo "  $k=<set>" || echo "  $k=(unset)"
 done
 

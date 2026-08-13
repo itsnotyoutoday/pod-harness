@@ -44,7 +44,7 @@ CURRENT_VERSION = 2
 # would make the v1 shim work for exactly one repo and fail confusingly for every other —
 # the engine would be generic in principle and trainer-specific in practice.
 DEFAULT_STAGES_FROM = os.environ.get(
-    "LINGUA_DEFAULT_STAGES_FROM", "trainer.stages:STAGES")
+    "PODH_DEFAULT_STAGES_FROM", "trainer.stages:STAGES")
 
 
 class SpecError(ValueError):
@@ -60,7 +60,7 @@ def normalize(raw: dict, *, default_stages_from: str | None = None) -> dict:
     when an older engine reads it.
     """
     default_stages_from = default_stages_from or os.environ.get(
-        "LINGUA_DEFAULT_STAGES_FROM", DEFAULT_STAGES_FROM)
+        "PODH_DEFAULT_STAGES_FROM", DEFAULT_STAGES_FROM)
 
     if raw.get("spec_version") == CURRENT_VERSION:
         return _validated(dict(raw))

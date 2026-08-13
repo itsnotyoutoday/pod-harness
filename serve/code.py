@@ -50,19 +50,19 @@ class CodeRoot:
 
 
 def workspace_root() -> Path:
-    return Path(os.environ.get("LINGUA_WORKSPACE", "/workspace"))
+    return Path(os.environ.get("PODH_WORKSPACE", "/workspace"))
 
 
 def resolve(spec: dict | None = None, *, env_root: str | None = None) -> CodeRoot:
     """Work out where the job's code lives.
 
-    Order: an explicit `spec.code.root` wins; then `LINGUA_CODE_ROOT`; then the baked `/app`.
+    Order: an explicit `spec.code.root` wins; then `PODH_CODE_ROOT`; then the baked `/app`.
     A relative root is taken against the workspace, so a spec can say
     `code/lingua-trainer/a1b2c3d` without knowing the mount point.
     """
     declared = ((spec or {}).get("code") or {}).get("root") or ""
     rev = ((spec or {}).get("code") or {}).get("rev") or ""
-    raw = declared or env_root or os.environ.get("LINGUA_CODE_ROOT", "")
+    raw = declared or env_root or os.environ.get("PODH_CODE_ROOT", "")
 
     if not raw:
         return CodeRoot(path=None, rev="", source="baked")

@@ -128,7 +128,7 @@ def reporter_for(job_id: str | None = None, *, registry: Any = None) -> NullRepo
     Returning NullReporter rather than None means callers never branch on whether reporting
     is configured — `reporter.stage_start(s)` is always a valid call.
     """
-    jid = job_id or os.environ.get("LINGUA_JOB_ID", "")
+    jid = job_id or os.environ.get("PODH_JOB_ID", "")
     if not jid:
         return NullReporter()
     return EventReporter(jid, registry=registry)

@@ -38,9 +38,9 @@ name: lingua
 
 x-paths: &paths
   LINGUA_CORPUS_ROOT: /workspace/corpus
-  LINGUA_OUT_ROOT: /workspace/out
-  LINGUA_LOG_ROOT: /workspace/logs
-  LINGUA_CACHE_ROOT: /workspace/.cache
+  PODH_OUT_ROOT: /workspace/out
+  PODH_LOG_ROOT: /workspace/logs
+  PODH_CACHE_ROOT: /workspace/.cache
   LINGUA_MANIFEST: /workspace/manifest/corpus_research.json
 
 x-mounts: &mounts
@@ -70,25 +70,25 @@ services:
     platform: linux/amd64      # MFA has no aarch64 build; emulated on Apple silicon
     environment:
       <<: *paths
-      LINGUA_SERVE_API: "0"    # batch needs no control surface
-      LINGUA_STATUS_S3: ${LINGUA_STATUS_S3:-0}
-      LINGUA_JOB_ID: ${JOB_ID:-}
+      PODH_SERVE_API: "0"    # batch needs no control surface
+      PODH_STATUS_S3: ${PODH_STATUS_S3:-0}
+      PODH_JOB_ID: ${JOB_ID:-}
     volumes: *mounts
     working_dir: /app
     shm_size: "1gb"
 
   # Long-lived dev pod, locally. The faithful rehearsal.
   #   docker compose up -d dev
-  #   curl -H 'X-Lingua-Token: dev' localhost:8000/v1/ | jq
+  #   curl -H 'X-Podh-Token: dev' localhost:8000/v1/ | jq
   dev:
     extends:
       service: pipeline
     container_name: lingua-dev
     environment:
       <<: *paths
-      LINGUA_SERVE_API: "1"
-      LINGUA_API_TOKEN: ${LINGUA_API_TOKEN:-dev}
-      LINGUA_STATUS_S3: ${LINGUA_STATUS_S3:-0}
+      PODH_SERVE_API: "1"
+      PODH_API_TOKEN: ${PODH_API_TOKEN:-dev}
+      PODH_STATUS_S3: ${PODH_STATUS_S3:-0}
       MAX_IDLE_SEC: ${MAX_IDLE_SEC:-0}     # 0 = never self-terminate locally
       MAX_LIFE_SEC: ${MAX_LIFE_SEC:-0}
     ports:
@@ -104,8 +104,8 @@ services:
     image: pod-harness-test
     container_name: pod-harness
     environment:
-      LINGUA_API_TOKEN: ${LINGUA_API_TOKEN:-dev}
-      LINGUA_STATUS_S3: "0"
+      PODH_API_TOKEN: ${PODH_API_TOKEN:-dev}
+      PODH_STATUS_S3: "0"
       MAX_IDLE_SEC: "0"
     ports:
       - "${HARNESS_PORT:-8000}:8000"

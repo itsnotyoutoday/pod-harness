@@ -17,23 +17,23 @@
   "env": {
     "_comment": "Supplied BY the loader, consumed BY the harness. The harness computes none of these; it refuses to start rather than defaulting, because every default is a second definition of something the loader owns.",
     "required_always": {
-      "LINGUA_WORKSPACE": "root of the mounted data view, e.g. /workspace",
-      "LINGUA_LOG_ROOT": "directory for run output. The harness used to derive this as $LINGUA_WORKSPACE/runs, which meant the layout was defined here AND in the loader; the copies drifted three times in one day.",
-      "LINGUA_MODE": "batch | serve | shell"
+      "PODH_WORKSPACE": "root of the mounted data view, e.g. /workspace",
+      "PODH_LOG_ROOT": "directory for run output. The harness used to derive this as $PODH_WORKSPACE/runs, which meant the layout was defined here AND in the loader; the copies drifted three times in one day.",
+      "PODH_MODE": "batch | serve | shell"
     },
     "required_for_batch": {
-      "LINGUA_JOB_ID": "the job this pod owns. Assigned at creation, never discovered \u2014 workers that scan for work can race, and object storage cannot arbitrate.",
-      "LINGUA_JOB_SPEC": "absolute path to the job spec, written BEFORE the pod is created",
-      "LINGUA_RUN_PREFIX": "object-key prefix where this job publishes status, e.g. runs/<job_id>",
-      "LINGUA_WRITE_PREFIXES": "comma-separated object-key prefixes this job may write to. The harness refuses any write outside them. A harness that could write anywhere could overwrite corpus/raw/, the one thing here that cannot be regenerated."
+      "PODH_JOB_ID": "the job this pod owns. Assigned at creation, never discovered \u2014 workers that scan for work can race, and object storage cannot arbitrate.",
+      "PODH_JOB_SPEC": "absolute path to the job spec, written BEFORE the pod is created",
+      "PODH_RUN_PREFIX": "object-key prefix where this job publishes status, e.g. runs/<job_id>",
+      "PODH_WRITE_PREFIXES": "comma-separated object-key prefixes this job may write to. The harness refuses any write outside them. A harness that could write anywhere could overwrite corpus/raw/, the one thing here that cannot be regenerated."
     },
     "optional": {
-      "LINGUA_CODE_ROOT": "path to the workload's code; prepended to PYTHONPATH. Absent means run the image's baked code, and the harness says which it used.",
-      "LINGUA_MOUNT_KIND": "volume | object  (default: volume)",
-      "LINGUA_API_TOKEN": "bearer token for /v1. Absent disables the API.",
-      "LINGUA_API_PORT": "default 8000",
-      "LINGUA_ENTRY": "override the batch entry module (default pod_harness.execute_job)",
-      "LINGUA_SERVE_API": "0 to skip the control surface",
+      "PODH_CODE_ROOT": "path to the workload's code; prepended to PYTHONPATH. Absent means run the image's baked code, and the harness says which it used.",
+      "PODH_MOUNT_KIND": "volume | object  (default: volume)",
+      "PODH_API_TOKEN": "bearer token for /v1. Absent disables the API.",
+      "PODH_API_PORT": "default 8000",
+      "PODH_ENTRY": "override the batch entry module (default pod_harness.execute_job)",
+      "PODH_SERVE_API": "0 to skip the control surface",
       "MAX_LIFE_SEC": "in-pod deadline. DETECTS but cannot terminate \u2014 runpodctl inside a pod returns Unauthorized, so cost control must be external.",
       "MAX_IDLE_SEC": "idle shutdown; 0 disables"
     },
@@ -139,10 +139,10 @@
   "events": {
     "_comment": "Written by the harness, read by the loader. Append-only JSON lines plus an atomically-replaced status.json snapshot.",
     "files": {
-      "$LINGUA_LOG_ROOT/$LINGUA_JOB_ID/events.jsonl": "append-only",
-      "$LINGUA_LOG_ROOT/$LINGUA_JOB_ID/status.json": "snapshot, atomic replace",
-      "$LINGUA_LOG_ROOT/$LINGUA_JOB_ID/job.log": "stdout and stderr",
-      "$LINGUA_RUN_PREFIX/status.json": "the same snapshot in object storage, so status survives the pod"
+      "$PODH_LOG_ROOT/$PODH_JOB_ID/events.jsonl": "append-only",
+      "$PODH_LOG_ROOT/$PODH_JOB_ID/status.json": "snapshot, atomic replace",
+      "$PODH_LOG_ROOT/$PODH_JOB_ID/job.log": "stdout and stderr",
+      "$PODH_RUN_PREFIX/status.json": "the same snapshot in object storage, so status survives the pod"
     },
     "event": {
       "type": "object",
@@ -246,7 +246,7 @@
   },
   "api": {
     "_comment": "Identical on a pod and on a control plane, so a client written against one works against the other. That is what lets compute move to serverless or another vendor without touching callers.",
-    "auth": "Bearer token or X-Lingua-Token header; /v1/health is unauthenticated",
+    "auth": "Bearer token or X-Podh-Token header; /v1/health is unauthenticated",
     "endpoints": [
       {
         "method": "GET",

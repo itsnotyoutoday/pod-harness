@@ -21,24 +21,24 @@ Storage changes; this only decides which S3Config to hand it.
 
 ## Profiles
 
-    LINGUA_S3_PROFILE=r2            which profile is active
+    PODH_S3_PROFILE=r2            which profile is active
 
-    LINGUA_S3_R2_ENDPOINT=https://<account>.r2.cloudflarestorage.com
-    LINGUA_S3_R2_BUCKET=lingua
-    LINGUA_S3_R2_ACCESS=…
-    LINGUA_S3_R2_SECRET=…
-    LINGUA_S3_R2_REGION=auto        optional; see the Cloudflare note below
+    PODH_S3_CLOUDFLARE_ENDPOINT=https://<account>.r2.cloudflarestorage.com
+    PODH_S3_CLOUDFLARE_BUCKET=lingua
+    PODH_S3_CLOUDFLARE_ACCESS=…
+    PODH_S3_CLOUDFLARE_SECRET=…
+    PODH_S3_CLOUDFLARE_REGION=auto        optional; see the Cloudflare note below
 
-    LINGUA_S3_RUNPOD_ENDPOINT=https://s3api-us-nc-1.runpod.io
-    LINGUA_S3_RUNPOD_BUCKET=…
+    RUNPOD_STORE_ENDPOINT=https://s3api-us-nc-1.runpod.io
+    RUNPOD_STORE_BUCKET=…
     …
 
-Unprefixed `LINGUA_S3_ENDPOINT` / `_BUCKET` / `_ACCESS` / `_SECRET` / `_REGION` work as the
+Unprefixed `PODH_S3_ENDPOINT` / `_BUCKET` / `_ACCESS` / `_SECRET` / `_REGION` work as the
 default profile, which is what a single-store deployment should use.
 
 ## The Cloudflare R2 trap
 
-`region_from_endpoint()` matches hosts shaped like `s3api-us-nc-1.runpod.io`. An R2 endpoint
+`region_from_endpoint()` matches hosts shaped like `s3api-us-nc-1.runpod.io`. An Cloudflare endpoint
 is `https://<account-id>.r2.cloudflarestorage.com` — no region segment at all — so the regex
 does not match and it falls back to `us-east-1`. R2 wants `auto`. Getting this wrong
 produces an opaque SigV4 AccessDenied that reads like a credentials problem and is not, so
@@ -58,16 +58,16 @@ _REGION_QUIRKS = {
 
 
 def active_profile() -> str:
-    return os.environ.get("LINGUA_S3_PROFILE", "").strip()
+    return os.environ.get("PODH_S3_PROFILE", "").strip()
 
 
 def _env(profile: str, field: str) -> str:
     """Profile-prefixed lookup with an unprefixed fallback."""
     if profile:
-        v = os.environ.get(f"LINGUA_S3_{profile.upper()}_{field}")
+        v = os.environ.get(f"PODH_S3_{profile.upper()}_{field}")
         if v:
             return v.strip()
-    return (os.environ.get(f"LINGUA_S3_{field}") or "").strip()
+    return (os.environ.get(f"PODH_S3_{field}") or "").strip()
 
 
 def signing_region(endpoint_url: str, explicit: str = "") -> str:
@@ -153,7 +153,7 @@ def resolve_config(profile: str | None = None) -> Any | None:
         return S3Config(
             bucket=bucket, endpoint_url=endpoint, access_key=access, secret_key=secret,
             region=signing_region(endpoint, _env(prof, "REGION")),
-            source_file=f"env:LINGUA_S3_{prof.upper() + '_' if prof else ''}*")
+            source_file=f"env:PODH_S3_{prof.upper() + '_' if prof else ''}*")
 
     # No env config — the key file remains a first-class way to configure this, and is
     # still the right one on a laptop.
@@ -176,7 +176,7 @@ def describe(profile: str | None = None) -> dict:
     if cfg is None:
         return {"configured": False,
                 "profile": profile if profile is not None else active_profile(),
-                "hint": "set LINGUA_S3_BUCKET/_ACCESS/_SECRET/_ENDPOINT, or provide a "
+                "hint": "set PODH_S3_BUCKET/_ACCESS/_SECRET/_ENDPOINT, or provide a "
                         "runpods3.key file"}
     d = cfg.describe()
     d.update({"configured": True,

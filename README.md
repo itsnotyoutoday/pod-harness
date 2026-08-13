@@ -65,9 +65,9 @@ Most jobs want the small one. It carries the harness, the API and boto3 — noth
 
 ```bash
 docker run -d -p 8000:8000 \
-  -e LINGUA_API_TOKEN=dev \
-  -e LINGUA_WORKSPACE=/workspace \
-  -e LINGUA_LOG_ROOT=/workspace/runs \
+  -e PODH_API_TOKEN=dev \
+  -e PODH_WORKSPACE=/workspace \
+  -e PODH_LOG_ROOT=/workspace/runs \
   -v "$PWD/work:/workspace" \
   ghcr.io/itsnotyoutoday/pod-harness:latest
 
@@ -78,7 +78,7 @@ curl -s localhost:8000/v1/health
 
 ```bash
 curl -X POST localhost:8000/v1/jobs \
-  -H 'X-Lingua-Token: dev' -H 'Content-Type: application/json' \
+  -H 'X-Podh-Token: dev' -H 'Content-Type: application/json' \
   -d '{
     "spec_version": 2,
     "pipeline": {"stages_from": "mywork.stages:STAGES",
@@ -151,7 +151,7 @@ registry from whatever code root it was given.
 
 ### Delivering your code
 
-Publish `code/` to object storage and point the pod at it with `LINGUA_CODE_ROOT`. The pod
+Publish `code/` to object storage and point the pod at it with `PODH_CODE_ROOT`. The pod
 then holds **no credentials and no git access** — it reads files that were already placed
 where it can see them.
 
@@ -178,16 +178,16 @@ Environment the harness requires (it refuses to start without them, rather than 
 a guess is a second definition of something the launcher owns):
 
 ```
-LINGUA_WORKSPACE        root of the mounted data view
-LINGUA_LOG_ROOT         where run output goes
-LINGUA_MODE             batch | serve | shell
-LINGUA_JOB_ID           what this pod owns — assigned, never discovered
-LINGUA_JOB_SPEC         path to the spec, written before the pod is created
-LINGUA_RUN_PREFIX       object-key prefix for published status
-LINGUA_WRITE_PREFIXES   the only prefixes this job may write to
+PODH_WORKSPACE        root of the mounted data view
+PODH_LOG_ROOT         where run output goes
+PODH_MODE             batch | serve | shell
+PODH_JOB_ID           what this pod owns — assigned, never discovered
+PODH_JOB_SPEC         path to the spec, written before the pod is created
+PODH_RUN_PREFIX       object-key prefix for published status
+PODH_WRITE_PREFIXES   the only prefixes this job may write to
 ```
 
-`LINGUA_WRITE_PREFIXES` is a grant, not a hint: a write outside it raises. A harness that
+`PODH_WRITE_PREFIXES` is a grant, not a hint: a write outside it raises. A harness that
 could write anywhere could overwrite the one dataset you cannot regenerate.
 
 [`pod-loader-rpc`](https://github.com/itsnotyoutoday/pod-loader-rpc) is a reference

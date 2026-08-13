@@ -23,7 +23,7 @@
 # `environment:`, a serverless worker by its endpoint config. Env is the one channel all
 # three share, so it is the one used here.
 #
-#   LINGUA_MOUNT_KIND   volume | fuse | object | auto   (default: auto)
+#   PODH_MOUNT_KIND   volume | fuse | object | auto   (default: auto)
 #   LINGUA_CORPUS_ROOT  where the pipeline will look for corpus data
 #
 # `auto` degrades volume -> fuse -> object, so an unconfigured container still does the
@@ -31,7 +31,7 @@
 
 set -u
 
-: "${LINGUA_MOUNT_KIND:=auto}"
+: "${PODH_MOUNT_KIND:=auto}"
 : "${LINGUA_CORPUS_ROOT:=/workspace/corpus}"
 
 say() { echo "  mount: $*"; }
@@ -48,7 +48,7 @@ resolve_auto() {
     echo object
 }
 
-KIND="$LINGUA_MOUNT_KIND"
+KIND="$PODH_MOUNT_KIND"
 [ "$KIND" = "auto" ] && KIND="$(resolve_auto)" && say "auto-detected -> $KIND"
 
 case "$KIND" in
@@ -69,7 +69,7 @@ case "$KIND" in
   fuse)
     if [ ! -e /dev/fuse ]; then
         say "ERROR: /dev/fuse not present — this provider does not permit FUSE."
-        say "       Use LINGUA_MOUNT_KIND=object, which needs no capabilities."
+        say "       Use PODH_MOUNT_KIND=object, which needs no capabilities."
         exit 1
     fi
     say "mounting object store via rclone at $LINGUA_CORPUS_ROOT"
@@ -77,9 +77,9 @@ case "$KIND" in
 import json, os, sys
 sys.path.insert(0, "/app")
 from pod_harness.mount import FuseMount
-m = FuseMount(prefix=os.environ.get("LINGUA_S3_PREFIX", ""),
+m = FuseMount(prefix=os.environ.get("PODH_S3_PREFIX", ""),
               mountpoint=os.environ.get("LINGUA_CORPUS_ROOT", "/workspace/corpus"))
-r = m.prepare({"job_id": os.environ.get("LINGUA_JOB_ID", "startup")})
+r = m.prepare({"job_id": os.environ.get("PODH_JOB_ID", "startup")})
 print("  mount: " + json.dumps({k: r.get(k) for k in ("ready", "remote", "error", "hint")}))
 sys.exit(0 if r.get("ready") else 1)
 PY
@@ -92,9 +92,9 @@ PY
     ;;
 
   *)
-    say "ERROR: unknown LINGUA_MOUNT_KIND=$KIND (want volume|fuse|object|auto)"
+    say "ERROR: unknown PODH_MOUNT_KIND=$KIND (want volume|fuse|object|auto)"
     exit 1
     ;;
 esac
 
-export LINGUA_MOUNT_KIND="$KIND"
+export PODH_MOUNT_KIND="$KIND"

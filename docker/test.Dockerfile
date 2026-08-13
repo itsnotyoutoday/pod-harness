@@ -19,7 +19,7 @@
 #
 # Build and run:
 #   docker build -f docker/test.Dockerfile -t pod-harness-test .
-#   docker run --rm -p 8000:8000 -e LINGUA_API_TOKEN=dev pod-harness-test
+#   docker run --rm -p 8000:8000 -e PODH_API_TOKEN=dev pod-harness-test
 
 FROM python:3.11-slim
 
@@ -73,19 +73,19 @@ COPY serve/ /app/serve/
 # exercises the real resolution path instead of a special case.
 COPY tests/fixture_workload/ /workspace/code/fixture/
 
-ENV LINGUA_CACHE_ROOT=/workspace/.cache \
-    LINGUA_LOG_ROOT=/workspace/logs \
-    LINGUA_MODEL_ROOT=/opt/models \
+ENV PODH_CACHE_ROOT=/workspace/.cache \
+    PODH_LOG_ROOT=/workspace/logs \
+    PODH_MODEL_ROOT=/opt/models \
     MFA_ROOT_DIR=/workspace/.cache/mfa \
-    LINGUA_API_PORT=8010 \
-    LINGUA_SERVE_API=1 \
-    LINGUA_STATUS_S3=0 \
+    PODH_API_PORT=8010 \
+    PODH_SERVE_API=1 \
+    PODH_STATUS_S3=0 \
     PYTHONPATH=/app
 
 RUN mkdir -p /workspace/logs /workspace/.cache
 
-ENV LINGUA_CODE_ROOT=/workspace/code/fixture \
-    LINGUA_DEFAULT_STAGES_FROM=fixture.stages:STAGES
+ENV PODH_CODE_ROOT=/workspace/code/fixture \
+    PODH_DEFAULT_STAGES_FROM=fixture.stages:STAGES
 # Every module lingua-init names must actually import. Added after a pod spent 13 minutes
 # failing because the shell script still referenced runners.execute_job, three Python moves
 # later. Catching it here costs 2 minutes; catching it on a pod cost real money.

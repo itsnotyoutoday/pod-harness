@@ -56,7 +56,7 @@ def load_registry(stages_from: str) -> dict[str, Any]:
         raise SystemExit(
             f"cannot import {module_path!r} named by pipeline.stages_from.\n"
             f"  {type(exc).__name__}: {exc}\n"
-            f"  LINGUA_CODE_ROOT={os.environ.get('LINGUA_CODE_ROOT', '(unset)')}\n"
+            f"  PODH_CODE_ROOT={os.environ.get('PODH_CODE_ROOT', '(unset)')}\n"
             f"  sys.path[:4]={sys.path[:4]}\n"
             f"  hint: the code package is probably not synced to the volume, or "
             f"code.root in the spec points at the wrong prefix") from None
@@ -125,7 +125,7 @@ def run(spec: dict, *, job_id: str = "", reporter: Any = None,
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--spec", required=True)
-    ap.add_argument("--job-id", default=os.environ.get("LINGUA_JOB_ID", ""))
+    ap.add_argument("--job-id", default=os.environ.get("PODH_JOB_ID", ""))
     ap.add_argument("--plan", action="store_true",
                     help="show what WOULD run and why, then exit. Runs nothing.")
     args = ap.parse_args()

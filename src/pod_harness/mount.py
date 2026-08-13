@@ -62,7 +62,7 @@ def mount_roots(spec: dict | None = None) -> dict[str, str]:
     A harness that names a workload's directories can only ever serve that workload. A
     harness that is told them serves any of them, which is the whole point.
 
-    Precedence: spec.mount.roots, then LINGUA_MOUNT_ROOTS as JSON, then a single generic
+    Precedence: spec.mount.roots, then PODH_MOUNT_ROOTS as JSON, then a single generic
     `data` root — a fallback that belongs to no domain, so a workload that forgets to
     declare its roots gets an obviously-wrong answer rather than a plausibly-wrong one.
     """
@@ -71,7 +71,7 @@ def mount_roots(spec: dict | None = None) -> dict[str, str]:
         r = (spec.get("mount") or {}).get("roots")
         if isinstance(r, dict) and r:
             return {k: str(v) for k, v in r.items()}
-    raw = os.environ.get("LINGUA_MOUNT_ROOTS", "").strip()
+    raw = os.environ.get("PODH_MOUNT_ROOTS", "").strip()
     if raw:
         try:
             r = _json.loads(raw)
@@ -79,7 +79,7 @@ def mount_roots(spec: dict | None = None) -> dict[str, str]:
                 return {k: str(v) for k, v in r.items()}
         except ValueError:
             raise ValueError(
-                f"LINGUA_MOUNT_ROOTS is not valid JSON: {raw[:80]!r}\n"
+                f"PODH_MOUNT_ROOTS is not valid JSON: {raw[:80]!r}\n"
                 f"  Expected e.g. {{\"corpus_root\": \"corpus\", \"out_root\": \"out\"}}")
     return {"data_root": "data"}
 
@@ -190,7 +190,7 @@ class ObjectMount(MountStrategy):
         except Exception as exc:
             return {"ready": False, "strategy": self.kind, "missing": [],
                     "error": f"{type(exc).__name__}: {exc}",
-                    "hint": "check LINGUA_S3_* env on the compute — ObjectMount needs "
+                    "hint": "check PODH_S3_* env on the compute — ObjectMount needs "
                             "credentials at launch, unlike VolumeMount"}
         return {**{k: str(v) for k, v in roots.items()},
                 "ready": True, "pulled": pulled, "strategy": self.kind}
@@ -218,13 +218,13 @@ class ObjectMount(MountStrategy):
         cfg = resolve_config(self.profile)
         env = {f"LINGUA_{k.upper()}": str(self.scratch / v)
                for k, v in mount_roots(spec).items()}
-        env["LINGUA_MOUNT_KIND"] = "object"
+        env["PODH_MOUNT_KIND"] = "object"
         if cfg is not None:
-            env.update({"LINGUA_S3_BUCKET": cfg.bucket,
-                        "LINGUA_S3_ENDPOINT": cfg.endpoint_url,
-                        "LINGUA_S3_ACCESS": cfg.access_key,
-                        "LINGUA_S3_SECRET": cfg.secret_key,
-                        "LINGUA_S3_REGION": cfg.region})
+            env.update({"PODH_S3_BUCKET": cfg.bucket,
+                        "PODH_S3_ENDPOINT": cfg.endpoint_url,
+                        "PODH_S3_ACCESS": cfg.access_key,
+                        "PODH_S3_SECRET": cfg.secret_key,
+                        "PODH_S3_REGION": cfg.region})
         return env
 
 
@@ -354,7 +354,7 @@ class FuseMount(MountStrategy):
         if cfg is None:
             return {"ready": False, "strategy": self.kind,
                     "error": "no object store configured",
-                    "hint": "set LINGUA_S3_* env, see control/objectstore.py"}
+                    "hint": "set PODH_S3_* env, see control/objectstore.py"}
 
         self.mountpoint.mkdir(parents=True, exist_ok=True)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
@@ -409,8 +409,8 @@ class FuseMount(MountStrategy):
 
     def launch_env(self, spec: dict) -> dict:
         env = {"LINGUA_CORPUS_ROOT": str(self.mountpoint),
-               "LINGUA_OUT_ROOT": str(self.mountpoint.parent / "out"),
-               "LINGUA_MOUNT_KIND": "fuse"}
+               "PODH_OUT_ROOT": str(self.mountpoint.parent / "out"),
+               "PODH_MOUNT_KIND": "fuse"}
         env.update(self._rclone_env())
         return env
 
@@ -427,7 +427,7 @@ STRATEGIES: dict[str, type[MountStrategy]] = {
 def for_spec(spec: dict) -> MountStrategy:
     """Resolve the strategy from the spec's existing `mount` field."""
     mount = spec.get("mount") or {}
-    kind = mount.get("kind", os.environ.get("LINGUA_MOUNT_KIND", "local"))
+    kind = mount.get("kind", os.environ.get("PODH_MOUNT_KIND", "local"))
     cls = STRATEGIES.get(kind)
     if cls is None:
         raise ValueError(f"unknown mount kind {kind!r}. Known: {sorted(STRATEGIES)}")
@@ -454,7 +454,7 @@ def best_available(spec: dict) -> MountStrategy:
     if mount.get("kind"):
         return for_spec(spec)
 
-    volume_root = Path(os.environ.get("LINGUA_VOLUME_ROOT", "/workspace"))
+    volume_root = Path(os.environ.get("PODH_VOLUME_ROOT", "/workspace"))
     if (volume_root / "corpus").exists():
         return VolumeMount(root=str(volume_root))
     if FuseMount.probe()["usable"]:

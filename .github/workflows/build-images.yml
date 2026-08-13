@@ -75,7 +75,7 @@ jobs:
       - name: Run harness
         run: |
           docker run -d --name lht -p 8000:8000 \
-            -e LINGUA_API_TOKEN=ci -e MAX_IDLE_SEC=0 pod-harness-test
+            -e PODH_API_TOKEN=ci -e MAX_IDLE_SEC=0 pod-harness-test
           for i in $(seq 1 30); do
             curl -sf http://localhost:8000/v1/health >/dev/null && break || sleep 1
           done
@@ -84,13 +84,13 @@ jobs:
         run: |
           test "$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8000/v1/)" = "401"
           test "$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8000/)" = "401"
-          curl -sf -H 'X-Lingua-Token: ci' http://localhost:8000/v1/ >/dev/null
+          curl -sf -H 'X-Podh-Token: ci' http://localhost:8000/v1/ >/dev/null
 
       - name: Dry-run rejects an unknown stage, and costs nothing
         run: |
           code=$(curl -s -o /tmp/dry.json -w '%{http_code}' \
             -X POST 'http://localhost:8000/v1/jobs?dry_run=true' \
-            -H 'X-Lingua-Token: ci' -H 'Content-Type: application/json' \
+            -H 'X-Podh-Token: ci' -H 'Content-Type: application/json' \
             -d '{"spec_version":2,"pipeline":{"stages_from":"fixture.stages:STAGES",
                  "stages":["acquire","bogus"]},"params":{}}')
           test "$code" = "422"
@@ -99,7 +99,7 @@ jobs:
       - name: Job lifecycle, minted ids, idempotency
         run: |
           set -euo pipefail
-          H='X-Lingua-Token: ci'
+          H='X-Podh-Token: ci'
           post() { curl -sf -X POST http://localhost:8000/v1/jobs -H "$H" \
                      -H 'Content-Type: application/json' -d "$1"; }
           jid()  { python3 -c 'import sys,json;print(json.load(sys.stdin)["job_id"])'; }
@@ -126,7 +126,7 @@ jobs:
         run: |
           set -euo pipefail
           ID=$(cat /tmp/ci_job_id)
-          curl -sf "http://localhost:8000/v1/jobs/$ID/stages" -H 'X-Lingua-Token: ci' > /tmp/st.json
+          curl -sf "http://localhost:8000/v1/jobs/$ID/stages" -H 'X-Podh-Token: ci' > /tmp/st.json
           cat /tmp/st.json
           python3 -c "
           import json
@@ -140,13 +140,13 @@ jobs:
       - name: A stage that produces nothing is CAUGHT
         run: |
           set -euo pipefail
-          curl -sf -X POST http://localhost:8000/v1/jobs -H 'X-Lingua-Token: ci' \
+          curl -sf -X POST http://localhost:8000/v1/jobs -H 'X-Podh-Token: ci' \
             -H 'Content-Type: application/json' \
             -d '{"spec_version":2,"pipeline":{"stages_from":"fixture.stages:STAGES",
                  "stages":["_liar"]},"params":{}}' > /tmp/liar.json
           ID=$(python3 -c "import json;print(json.load(open('/tmp/liar.json'))['job_id'])")
           sleep 5
-          curl -sf "http://localhost:8000/v1/jobs/$ID/summary" -H 'X-Lingua-Token: ci' > /tmp/lsum.json
+          curl -sf "http://localhost:8000/v1/jobs/$ID/summary" -H 'X-Podh-Token: ci' > /tmp/lsum.json
           python3 -c "
           import json
           d = json.load(open('/tmp/lsum.json'))
@@ -160,19 +160,19 @@ jobs:
       - name: v1 specs still run
         run: |
           set -euo pipefail
-          curl -sf -X POST http://localhost:8000/v1/jobs -H 'X-Lingua-Token: ci' \
+          curl -sf -X POST http://localhost:8000/v1/jobs -H 'X-Podh-Token: ci' \
             -H 'Content-Type: application/json' \
             -d '{"job_id":"legacy","region":"_x","stages":["acquire","normalize"],"opts":{}}' \
             > /tmp/v1.json
           ID=$(python3 -c "import json;print(json.load(open('/tmp/v1.json'))['job_id'])")
           sleep 5
-          curl -sf "http://localhost:8000/v1/jobs/$ID" -H 'X-Lingua-Token: ci' \
+          curl -sf "http://localhost:8000/v1/jobs/$ID" -H 'X-Podh-Token: ci' \
             | grep -q '"job_state": *"done"'
 
       - name: A missing code root refuses rather than running baked code
         run: |
           set -euo pipefail
-          curl -s -X POST http://localhost:8000/v1/jobs -H 'X-Lingua-Token: ci' \
+          curl -s -X POST http://localhost:8000/v1/jobs -H 'X-Podh-Token: ci' \
             -H 'Content-Type: application/json' \
             -d '{"spec_version":2,"code":{"root":"code/nope/abc"},
                  "pipeline":{"stages_from":"fixture.stages:STAGES","stages":["acquire"]},
@@ -182,11 +182,11 @@ jobs:
         run: |
           set -euo pipefail
           ID=$(cat /tmp/ci_job_id)
-          seq=$(curl -sf "http://localhost:8000/v1/jobs/$ID" -H 'X-Lingua-Token: ci' \
+          seq=$(curl -sf "http://localhost:8000/v1/jobs/$ID" -H 'X-Podh-Token: ci' \
                 | python3 -c 'import sys,json;print(json.load(sys.stdin)["seq"])')
           start=$(date +%s)
           curl -sf "http://localhost:8000/v1/jobs/$ID/events?since_seq=$seq&wait=15" \
-            -H 'X-Lingua-Token: ci' >/dev/null
+            -H 'X-Podh-Token: ci' >/dev/null
           took=$(( $(date +%s) - start ))
           echo "long-poll on terminal job took ${took}s"
           test "$took" -lt 5
@@ -194,15 +194,15 @@ jobs:
       - name: Cancel reports cancelled, not failed
         run: |
           set -euo pipefail
-          curl -sf -X POST http://localhost:8000/v1/jobs -H 'X-Lingua-Token: ci' \
+          curl -sf -X POST http://localhost:8000/v1/jobs -H 'X-Podh-Token: ci' \
             -H 'Content-Type: application/json' \
             -d '{"spec_version":2,"pipeline":{"stages_from":"fixture.stages:STAGES",
                  "stages":["_slow"]},"params":{}}' > /tmp/c.json
           ID=$(python3 -c "import json;print(json.load(open('/tmp/c.json'))['job_id'])")
           sleep 3
-          curl -sf -X DELETE "http://localhost:8000/v1/jobs/$ID" -H 'X-Lingua-Token: ci' >/dev/null
+          curl -sf -X DELETE "http://localhost:8000/v1/jobs/$ID" -H 'X-Podh-Token: ci' >/dev/null
           sleep 3
-          curl -sf "http://localhost:8000/v1/jobs/$ID" -H 'X-Lingua-Token: ci' \
+          curl -sf "http://localhost:8000/v1/jobs/$ID" -H 'X-Podh-Token: ci' \
             | grep -q '"job_state": *"cancelled"'
 
       - name: Container log on failure

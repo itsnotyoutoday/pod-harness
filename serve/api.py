@@ -66,23 +66,23 @@ app = FastAPI(
 )
 
 
-def auth(x_lingua_token: str | None = Header(default=None)) -> None:
+def auth(x_podh_token: str | None = Header(default=None)) -> None:
     """Shared-token auth, enforced here as well as at Caddy.
 
     Defence in depth on purpose: a misconfigured proxy that forwards everything must not
     also mean an open control surface. If no token is configured the API refuses rather
     than defaulting open — a control plane that fails open is worse than one that fails.
     """
-    want = os.environ.get("LINGUA_API_TOKEN", "")
+    want = os.environ.get("PODH_API_TOKEN", "")
     if not want:
         raise HTTPException(503, detail={
-            "error": "LINGUA_API_TOKEN is not set on this pod",
-            "hint": "set LINGUA_API_TOKEN in the pod env and restart; the API refuses to "
+            "error": "PODH_API_TOKEN is not set on this pod",
+            "hint": "set PODH_API_TOKEN in the pod env and restart; the API refuses to "
                     "serve unauthenticated rather than defaulting open"})
-    if x_lingua_token != want:
+    if x_podh_token != want:
         raise HTTPException(401, detail={
-            "error": "bad or missing X-Lingua-Token header",
-            "hint": "send header X-Lingua-Token: <the pod's LINGUA_API_TOKEN>"})
+            "error": "bad or missing X-Podh-Token header",
+            "hint": "send header X-Podh-Token: <the pod's PODH_API_TOKEN>"})
 
 
 @app.get("/v1/health")
@@ -152,7 +152,7 @@ def discover() -> dict:
             "params": "dict — opaque to the engine, meaningful to your stages",
         },
         "conventions": {
-            "auth": "header X-Lingua-Token",
+            "auth": "header X-Podh-Token",
             "job_ids": "server-minted ULIDs; use idempotency_key to de-duplicate",
             "dry_run_depth": "shallow (capabilities.json, no code) vs deep (Runner.plan)",
             "bounded_reads": "log and event responses are capped; check `truncated`",

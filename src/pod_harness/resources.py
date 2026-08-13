@@ -180,9 +180,9 @@ def plan_workers(*, per_worker_gb: float = 1.2, reserve_cores: int = 1,
     if effective_cap:
         n = min(n, effective_cap)
 
-    env = os.environ.get("LINGUA_WORKERS")
+    env = os.environ.get("PODH_WORKERS")
     if env and env.isdigit():
-        return int(env), f"LINGUA_WORKERS={env} (override)"
+        return int(env), f"PODH_WORKERS={env} (override)"
 
     if effective_cap and n == effective_cap and effective_cap < min(by_core, by_ram):
         limit = f"I/O cap ({effective_cap}) — {by_core} cores would fit but the volume"

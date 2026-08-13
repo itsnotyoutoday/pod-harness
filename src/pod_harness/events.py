@@ -74,11 +74,11 @@ def log_root() -> Path:
     under `runs/<job_id>/`, which is also what makes pruning a prefix range. See
     STRUCTURE.md.
     """
-    d = os.environ.get("LINGUA_LOG_DIR") or os.environ.get("LINGUA_LOG_ROOT")
+    d = os.environ.get("PODH_LOG_DIR") or os.environ.get("PODH_LOG_ROOT")
     if d:
         return Path(d)
     raise HarnessNotConfigured(
-        "LINGUA_LOG_ROOT is not set, so this harness does not know where to write.\n"
+        "PODH_LOG_ROOT is not set, so this harness does not know where to write.\n"
         "  The loader supplies every root; the harness computes none of them. That is "
         "deliberate: this used to fall back to a layout library, which meant the storage "
         "structure was defined in two places and drifted three times in one day "
@@ -201,7 +201,7 @@ class EventLog:
         never die because object storage hiccuped, and the local file remains the source
         of truth for anything that can reach the pod.
         """
-        if os.environ.get("LINGUA_STATUS_S3", "1") != "1":
+        if os.environ.get("PODH_STATUS_S3", "1") != "1":
             return
         try:
             from .objectstore import get_storage
@@ -212,10 +212,10 @@ class EventLog:
             # tells the harness where this job publishes; the harness only appends the
             # filename it is responsible for. When the layout changes — and it changed
             # today — nothing in here changes.
-            prefix = os.environ.get("LINGUA_RUN_PREFIX", "").strip("/")
+            prefix = os.environ.get("PODH_RUN_PREFIX", "").strip("/")
             if not prefix:
                 raise HarnessNotConfigured(
-                    "LINGUA_RUN_PREFIX is not set, so the harness cannot publish status "
+                    "PODH_RUN_PREFIX is not set, so the harness cannot publish status "
                     "without inventing an object key")
             st.put(f"{prefix}/status.json", self.status_path.read_bytes(),
                    where="events.EventLog._mirror")

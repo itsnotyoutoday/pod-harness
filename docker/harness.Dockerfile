@@ -53,9 +53,9 @@ ARG CADDY_VERSION=2.8.4
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1 \
-    LINGUA_WORKSPACE=/workspace \
-    LINGUA_MODEL_ROOT=/opt/models \
-    LINGUA_IMAGE_KIND=runner \
+    PODH_WORKSPACE=/workspace \
+    PODH_MODEL_ROOT=/opt/models \
+    PODH_IMAGE_KIND=runner \
     PYTHONPATH=/app
 
 # One layer: system packages, Caddy, python deps, and the cleanup that only helps if it

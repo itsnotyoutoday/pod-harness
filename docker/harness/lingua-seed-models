@@ -6,7 +6,7 @@
 # RunPod mounts the network volume at /workspace. A mount SHADOWS whatever the image had
 # at that path. So `Dockerfile.pod`'s `MFA_ROOT_DIR=/workspace/cache/mfa` means any model
 # baked there at build time is invisible the instant the pod starts — the download happens
-# anyway, and the bake bought nothing. Same trap for LINGUA_CACHE_ROOT, whose default
+# anyway, and the bake bought nothing. Same trap for PODH_CACHE_ROOT, whose default
 # (/corpus/.cache) is also a mount point on a real pod.
 #
 # So baked weights live in /opt, which is never a mount point, and this script links them
@@ -31,8 +31,8 @@
 
 set -u
 
-: "${LINGUA_CACHE_ROOT:=/workspace/cache}"
-: "${LINGUA_MODEL_ROOT:=/opt/models}"
+: "${PODH_CACHE_ROOT:=/workspace/cache}"
+: "${PODH_MODEL_ROOT:=/opt/models}"
 : "${MFA_ROOT_DIR:=/workspace/cache/mfa}"
 : "${LINGUA_BAKED_MFA:=/opt/mfa}"
 
@@ -50,17 +50,17 @@ link() {
 }
 
 echo "  seeding baked models"
-mkdir -p "$LINGUA_CACHE_ROOT" "$MFA_ROOT_DIR"
+mkdir -p "$PODH_CACHE_ROOT" "$MFA_ROOT_DIR"
 
 # SpeechBrain ECAPA — pipeline/speech/diarize.py:129, runners/batch.py:201
-link "$LINGUA_MODEL_ROOT/speechbrain/ecapa" "$LINGUA_CACHE_ROOT/speechbrain/ecapa"
+link "$PODH_MODEL_ROOT/speechbrain/ecapa" "$PODH_CACHE_ROOT/speechbrain/ecapa"
 
 # MFA acoustic model + dictionary. MFA writes temp state under MFA_ROOT_DIR, so that root
 # must stay writable on the volume; only pretrained_models/ is baked and linked.
 link "$LINGUA_BAKED_MFA/pretrained_models" "$MFA_ROOT_DIR/pretrained_models"
 
 # Report what actually resolved, so preflight and the log show truth rather than intent.
-for p in "$LINGUA_CACHE_ROOT/speechbrain/ecapa" "$MFA_ROOT_DIR/pretrained_models"; do
+for p in "$PODH_CACHE_ROOT/speechbrain/ecapa" "$MFA_ROOT_DIR/pretrained_models"; do
     if [ -e "$p" ]; then
         echo "    ok    $p"
     else
