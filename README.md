@@ -298,7 +298,7 @@ while the pod keeps billing. That settles the contradiction between plexus's
 So termination is external, and automatic:
 
 ```python
-from control.reaper import pod
+from lingua_core.reaper import pod
 with pod(create_kwargs, budget_min=15) as p:
     ...                       # pod CANNOT outlive the budget
 ```
@@ -318,9 +318,9 @@ while the main thread slept for 10 minutes was killed at 2 minutes.
 Anything a `kill -9`'d process left behind is collected by the janitor:
 
 ```bash
-python control/reaper.py list                  # what's billing right now
-python control/reaper.py sweep --dry-run       # what would be collected
-python control/reaper.py sweep                 # collect it
+python -m lingua_core.reaper list              # what's billing right now
+python -m lingua_core.reaper sweep --dry-run   # what would be collected
+python -m lingua_core.reaper sweep             # collect it
 ```
 
 ### Ephemeral pods are named differently from real work — deliberately
