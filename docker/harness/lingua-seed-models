@@ -4,7 +4,7 @@
 # ## The bug this exists to prevent
 #
 # RunPod mounts the network volume at /workspace. A mount SHADOWS whatever the image had
-# at that path. So `Dockerfile.pod`'s `MFA_ROOT_DIR=/workspace/.cache/mfa` means any model
+# at that path. So `Dockerfile.pod`'s `MFA_ROOT_DIR=/workspace/cache/mfa` means any model
 # baked there at build time is invisible the instant the pod starts — the download happens
 # anyway, and the bake bought nothing. Same trap for LINGUA_CACHE_ROOT, whose default
 # (/corpus/.cache) is also a mount point on a real pod.
@@ -31,9 +31,9 @@
 
 set -u
 
-: "${LINGUA_CACHE_ROOT:=/workspace/.cache}"
+: "${LINGUA_CACHE_ROOT:=/workspace/cache}"
 : "${LINGUA_MODEL_ROOT:=/opt/models}"
-: "${MFA_ROOT_DIR:=/workspace/.cache/mfa}"
+: "${MFA_ROOT_DIR:=/workspace/cache/mfa}"
 : "${LINGUA_BAKED_MFA:=/opt/mfa}"
 
 link() {

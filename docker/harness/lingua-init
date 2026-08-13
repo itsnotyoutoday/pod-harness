@@ -38,12 +38,18 @@
 
 set -e
 
-: "${LINGUA_LOG_ROOT:=/workspace/logs}"
+: "${LINGUA_WORKSPACE:=/workspace}"
 : "${RUNPOD_POD_ID:=local}"
 : "${LINGUA_SERVE_API:=1}"
 : "${LINGUA_API_PORT:=8010}"
 
-LOG_DIR="$LINGUA_LOG_ROOT/$RUNPOD_POD_ID"
+# Everything a job produces lives under runs/<job_id>/ — see STRUCTURE.md. This used to be
+# logs/<pod_id>/, which scattered one job's output across logs/, out/ and status/ and is no
+# longer a legal root. Falling back to the pod id keeps a pod that was launched without a
+# job id (a shell, a probe) from writing outside the structure.
+: "${LINGUA_JOB_ID:=}"
+RUN_ID="${LINGUA_JOB_ID:-pod_$RUNPOD_POD_ID}"
+LOG_DIR="$LINGUA_WORKSPACE/runs/$RUN_ID"
 mkdir -p "$LOG_DIR"
 export LINGUA_LOG_DIR="$LOG_DIR"
 
@@ -90,11 +96,11 @@ if [ -x /usr/local/bin/caddy ] && [ -f /etc/caddy/Caddyfile ]; then
         echo "  ! LINGUA_API_TOKEN unset — Caddy will reject every request."
         echo "    Set it in the pod env, or the log endpoint is unreachable."
     fi
-    LINGUA_LOG_ROOT="$LINGUA_LOG_ROOT" \
+    LINGUA_LOG_ROOT="$LINGUA_WORKSPACE/runs" \
     /usr/local/bin/caddy run --config /etc/caddy/Caddyfile --adapter caddyfile \
         > "$LOG_DIR/caddy.log" 2>&1 &
     disown $! 2>/dev/null || true
-    echo "  caddy    :8000 → root=$LINGUA_LOG_ROOT, /v1 → 127.0.0.1:$LINGUA_API_PORT"
+    echo "  caddy    :8000 → root=$LINGUA_WORKSPACE/runs, /v1 → 127.0.0.1:$LINGUA_API_PORT"
 else
     echo "  caddy    not installed — HTTP log endpoint disabled"
 fi

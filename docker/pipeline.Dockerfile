@@ -185,17 +185,17 @@ COPY serve/ /app/serve/
 # runners/framework.py exists to catch.
 ENV LINGUA_CORPUS_ROOT=/workspace/corpus \
     LINGUA_OUT_ROOT=/workspace/out \
-    LINGUA_CACHE_ROOT=/workspace/.cache \
-    LINGUA_LOG_ROOT=/workspace/logs \
+    LINGUA_CACHE_ROOT=/workspace/cache \
+    LINGUA_LOG_ROOT=/workspace/runs \
     LINGUA_MANIFEST=/workspace/manifest/corpus_research.json \
-    MFA_ROOT_DIR=/workspace/.cache/mfa \
+    MFA_ROOT_DIR=/workspace/cache/mfa \
     LINGUA_API_PORT=8010 \
     LINGUA_SERVE_API=1 \
     PYTHONPATH=/workspace/code:/app \
     HF_HOME=/opt/models/hf \
     PATH=/env/bin:$PATH
 
-RUN mkdir -p /workspace/corpus /workspace/out /workspace/logs /workspace/manifest
+RUN mkdir -p /workspace/corpus /workspace/runs /workspace/cache
 
 # --- 7. build-time sanity check ---------------------------------------------------------
 # Fails the image, and therefore the GHA run, the moment a dependency is broken or landed

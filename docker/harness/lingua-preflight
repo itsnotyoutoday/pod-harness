@@ -57,8 +57,8 @@ fi
 
 echo
 echo "[baked models]"
-for p in "${LINGUA_CACHE_ROOT:-/workspace/.cache}/speechbrain/ecapa" \
-         "${MFA_ROOT_DIR:-/workspace/.cache/mfa}/pretrained_models"; do
+for p in "${LINGUA_CACHE_ROOT:-/workspace/cache}/speechbrain/ecapa" \
+         "${MFA_ROOT_DIR:-/workspace/cache/mfa}/pretrained_models"; do
     if [ -e "$p" ]; then
         tgt=$(readlink -f "$p" 2>/dev/null || echo "$p")
         echo "  ok    $p -> $tgt"

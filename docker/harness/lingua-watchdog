@@ -34,7 +34,7 @@
 # Set either to 0 to disable it.
 set -u
 
-HEARTBEAT="${HEARTBEAT:-${LINGUA_LOG_DIR:-/workspace/logs/local}/heartbeat}"
+HEARTBEAT="${HEARTBEAT:-${LINGUA_LOG_DIR:-/workspace/runs/local}/heartbeat}"
 MAX_IDLE_SEC="${MAX_IDLE_SEC:-1800}"
 MAX_LIFE_SEC="${MAX_LIFE_SEC:-0}"
 POLL_SEC="${WATCHDOG_POLL_SEC:-30}"
@@ -52,8 +52,8 @@ log "armed: heartbeat=$HEARTBEAT idle=${MAX_IDLE_SEC}s life=${MAX_LIFE_SEC}s"
 newest_activity() {
     local newest=0 f mt
     for f in "$HEARTBEAT" \
-             "${LINGUA_LOG_DIR:-/workspace/logs/local}/api.log" \
-             "${LINGUA_LOG_DIR:-/workspace/logs/local}/caddy.log"; do
+             "${LINGUA_LOG_DIR:-/workspace/runs/local}/api.log" \
+             "${LINGUA_LOG_DIR:-/workspace/runs/local}/caddy.log"; do
         [ -f "$f" ] || continue
         mt=$(stat -c %Y "$f" 2>/dev/null || stat -f %m "$f" 2>/dev/null || echo 0)
         [ "$mt" -gt "$newest" ] && newest=$mt
