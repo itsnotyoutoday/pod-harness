@@ -35,10 +35,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Contract and independence
-        run: |
-          PYTHONPATH=src python3 docker/assert_contract.py
-          PYTHONPATH=src python3 docker/assert_independence.py
+      # The contract and independence checks run in test.yml, and again inside the
+      # image build itself via assert_independence.py — so a broken image cannot be
+      # published even if a workflow forgets to check.
 
       # A 6 GB image plus a conda environment plus build cache is tight against the
       # runner's ~14 GB. Reclaiming the preinstalled toolchains costs seconds and avoids a

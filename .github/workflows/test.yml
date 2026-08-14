@@ -1,0 +1,261 @@
+name: Harness tests
+
+# The API suite that gates both images. It was folded into the old combined workflow and
+# was briefly lost when that was split per image — which would have removed the only check
+# that a stage reporting success actually produced something, the failure mode this whole
+# framework exists to catch.
+#
+# Its own workflow now, so neither image build can quietly drop it again.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'serve/**'
+      - 'docker/**'
+      - 'tests/**'
+      - 'contract.json'
+      - '.github/workflows/test.yml'
+  pull_request:
+    paths:
+      - 'src/**'
+      - 'serve/**'
+      - 'docker/**'
+      - 'tests/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  harness-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Contract and independence
+        run: |
+          PYTHONPATH=src python3 docker/assert_contract.py
+          PYTHONPATH=src python3 docker/assert_independence.py
+
+      - name: Build harness test image
+        run: docker build -f docker/test.Dockerfile -t pod-harness-test .
+
+      - name: Run harness
+        run: |
+          docker run -d --name lht -p 8000:8000 \
+            -e PODH_API_TOKEN=ci -e MAX_IDLE_SEC=0 pod-harness-test
+          for i in $(seq 1 30); do
+            curl -sf http://localhost:8000/v1/health >/dev/null && break || sleep 1
+          done
+
+      - name: Auth is enforced
+        run: |
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8000/v1/)" = "401"
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8000/)" = "401"
+          curl -sf -H 'X-Podh-Token: ci' http://localhost:8000/v1/ >/dev/null
+
+      - name: Dry-run rejects an unknown stage, and costs nothing
+        run: |
+          code=$(curl -s -o /tmp/dry.json -w '%{http_code}' \
+            -X POST 'http://localhost:8000/v1/jobs?dry_run=true' \
+            -H 'X-Podh-Token: ci' -H 'Content-Type: application/json' \
+            -d '{"spec_version":2,"pipeline":{"stages_from":"fixture.stages:STAGES",
+                 "stages":["acquire","bogus"]},"params":{}}')
+          test "$code" = "422"
+          grep -q 'unknown stage' /tmp/dry.json
+
+      - name: Job lifecycle, minted ids, idempotency
+        run: |
+          set -euo pipefail
+          H='X-Podh-Token: ci'
+          post() { curl -sf -X POST http://localhost:8000/v1/jobs -H "$H" \
+                     -H 'Content-Type: application/json' -d "$1"; }
+          jid()  { python3 -c 'import sys,json;print(json.load(sys.stdin)["job_id"])'; }
+
+          # The id is MINTED here. A client-supplied job_id must be ignored, because a
+          # client-chosen id collides undetectably once two callers pick the same string.
+          ID=$(post '{"spec_version":2,"idempotency_key":"ci-1","job_id":"CLIENT-SET",
+                      "pipeline":{"stages_from":"fixture.stages:STAGES",
+                                  "stages":["acquire","normalize","embed"]},"params":{}}' | jid)
+          echo "minted: $ID"
+          case "$ID" in CLIENT-SET) echo "client id honoured — must not be"; exit 1;; esac
+          case "$ID" in job_*) ;; *) echo "not a ULID: $ID"; exit 1;; esac
+          sleep 6
+
+          # Same idempotency_key must return the SAME job, never a second pod-hour.
+          ID2=$(post '{"spec_version":2,"idempotency_key":"ci-1",
+                       "pipeline":{"stages_from":"fixture.stages:STAGES",
+                                   "stages":["acquire","normalize","embed"]},"params":{}}' | jid)
+          test "$ID" = "$ID2"
+          curl -sf "http://localhost:8000/v1/jobs/$ID/summary" -H "$H" | grep -q '"job_state": *"done"'
+          echo "$ID" > /tmp/ci_job_id
+
+      - name: Stage insight survives a generic framework
+        run: |
+          set -euo pipefail
+          ID=$(cat /tmp/ci_job_id)
+          curl -sf "http://localhost:8000/v1/jobs/$ID/stages" -H 'X-Podh-Token: ci' > /tmp/st.json
+          cat /tmp/st.json
+          python3 -c "
+          import json
+          d = json.load(open('/tmp/st.json'))
+          names = [s['stage'] for s in d['stages']]
+          assert names == ['acquire','normalize','embed'], names
+          assert all(s['state']=='ok' for s in d['stages']), d
+          assert all((s.get('verification') or {}).get('ok') for s in d['stages']), d
+          print('per-stage state + verification present:', names)"
+
+      - name: A stage that produces nothing is CAUGHT
+        run: |
+          set -euo pipefail
+          curl -sf -X POST http://localhost:8000/v1/jobs -H 'X-Podh-Token: ci' \
+            -H 'Content-Type: application/json' \
+            -d '{"spec_version":2,"pipeline":{"stages_from":"fixture.stages:STAGES",
+                 "stages":["_liar"]},"params":{}}' > /tmp/liar.json
+          ID=$(python3 -c "import json;print(json.load(open('/tmp/liar.json'))['job_id'])")
+          sleep 5
+          curl -sf "http://localhost:8000/v1/jobs/$ID/summary" -H 'X-Podh-Token: ci' > /tmp/lsum.json
+          python3 -c "
+          import json
+          d = json.load(open('/tmp/lsum.json'))
+          assert d['job_state']=='failed', d
+          f = d['failures'][0]
+          assert f['stage']=='_liar' and f['state']=='failed', f
+          why = ' '.join((f.get('verification') or {}).get('failures', []))
+          assert 'without producing it' in why, f
+          print('caught:', why[:72])"
+
+      - name: v1 specs still run
+        run: |
+          set -euo pipefail
+          curl -sf -X POST http://localhost:8000/v1/jobs -H 'X-Podh-Token: ci' \
+            -H 'Content-Type: application/json' \
+            -d '{"job_id":"legacy","region":"_x","stages":["acquire","normalize"],"opts":{}}' \
+            > /tmp/v1.json
+          ID=$(python3 -c "import json;print(json.load(open('/tmp/v1.json'))['job_id'])")
+          sleep 5
+          curl -sf "http://localhost:8000/v1/jobs/$ID" -H 'X-Podh-Token: ci' \
+            | grep -q '"job_state": *"done"'
+
+      - name: A missing code root refuses rather than running baked code
+        run: |
+          set -euo pipefail
+          curl -s -X POST http://localhost:8000/v1/jobs -H 'X-Podh-Token: ci' \
+            -H 'Content-Type: application/json' \
+            -d '{"spec_version":2,"code":{"root":"code/nope/abc"},
+                 "pipeline":{"stages_from":"fixture.stages:STAGES","stages":["acquire"]},
+                 "params":{}}' | grep -q "does not exist"
+
+      - name: Long-poll returns immediately on a terminal job
+        run: |
+          set -euo pipefail
+          ID=$(cat /tmp/ci_job_id)
+          seq=$(curl -sf "http://localhost:8000/v1/jobs/$ID" -H 'X-Podh-Token: ci' \
+                | python3 -c 'import sys,json;print(json.load(sys.stdin)["seq"])')
+          start=$(date +%s)
+          curl -sf "http://localhost:8000/v1/jobs/$ID/events?since_seq=$seq&wait=15" \
+            -H 'X-Podh-Token: ci' >/dev/null
+          took=$(( $(date +%s) - start ))
+          echo "long-poll on terminal job took ${took}s"
+          test "$took" -lt 5
+
+      - name: Cancel reports cancelled, not failed
+        run: |
+          set -euo pipefail
+          curl -sf -X POST http://localhost:8000/v1/jobs -H 'X-Podh-Token: ci' \
+            -H 'Content-Type: application/json' \
+            -d '{"spec_version":2,"pipeline":{"stages_from":"fixture.stages:STAGES",
+                 "stages":["_slow"]},"params":{}}' > /tmp/c.json
+          ID=$(python3 -c "import json;print(json.load(open('/tmp/c.json'))['job_id'])")
+          sleep 3
+          curl -sf -X DELETE "http://localhost:8000/v1/jobs/$ID" -H 'X-Podh-Token: ci' >/dev/null
+          sleep 3
+          curl -sf "http://localhost:8000/v1/jobs/$ID" -H 'X-Podh-Token: ci' \
+            | grep -q '"job_state": *"cancelled"'
+
+      - name: Container log on failure
+        if: failure()
+        run: docker logs lht
+
+  build-and-push:
+    needs: harness-test
+    runs-on: ubuntu-latest
+    # Never push from a PR: a fork could otherwise publish to our registry.
+    if: github.event_name != 'pull_request'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Each image declares what it is built FROM, so a change to one does not
+          # rebuild the others. `shared` is the engine and harness every image embeds —
+          # touching that legitimately rebuilds everything, because every image contains
+          # a copy of it.
+          - dockerfile: docker/harness.Dockerfile
+            image: pod-harness
+            watch: docker/harness.Dockerfile
+          - dockerfile: docker/pipeline.Dockerfile
+            image: lingua-pipeline
+            watch: docker/pipeline.Dockerfile requirements-pipeline.txt
+          # Adding a capability is one entry here plus one Dockerfile:
+          # - dockerfile: docker/recognize.Dockerfile
+          #   image: lingua-recognize
+          # - dockerfile: docker/generate.Dockerfile
+          #   image: lingua-generate
+    steps:
+      - uses: actions/checkout@v4
+
+      # A 5 GB image plus build cache plus a conda env is tight against the runner's
+      # ~14 GB. Reclaiming the preinstalled toolchains costs seconds and avoids a
+      # no-space-left failure 30 minutes into the build.
+      - name: Free disk space
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /usr/local/share/boost "$AGENT_TOOLSDIRECTORY" || true
+          df -h /
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute tags
+        id: meta
+        run: |
+          echo "sha_short=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+          # GHCR rejects uppercase paths, and GitHub owners may contain capitals.
+          echo "owner=$(echo '${{ github.repository_owner }}' | tr A-Z a-z)" >> $GITHUB_OUTPUT
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build and push ${{ matrix.image }}
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          platforms: linux/amd64        # RunPod is x86; an arm64 image fails opaquely there
+          push: true
+          tags: |
+            ghcr.io/${{ steps.meta.outputs.owner }}/${{ matrix.image }}:latest
+            ghcr.io/${{ steps.meta.outputs.owner }}/${{ matrix.image }}:${{ steps.meta.outputs.sha_short }}
+          # REGISTRY cache, not GHA cache.
+          #
+          # GitHub's Actions cache is capped at 10 GB per REPOSITORY. The MFA image is 6 GB
+          # on its own, so the two images evicted each other constantly and every build
+          # started cold — which is why editing a shell script rebuilt a conda environment.
+          # The layering was never the problem: scripts are copied last, so a script change
+          # touches about five tiny layers, PROVIDED the layers beneath are still cached.
+          #
+          # Registry cache has no such cap and lives beside the image it belongs to.
+          cache-from: type=registry,ref=ghcr.io/${{ steps.meta.outputs.owner }}/${{ matrix.image }}:buildcache
+          cache-to: type=registry,ref=ghcr.io/${{ steps.meta.outputs.owner }}/${{ matrix.image }}:buildcache,mode=max
+
+      - name: Summary
+        run: |
+          echo "### ${{ matrix.image }}" >> $GITHUB_STEP_SUMMARY
+          echo "\`ghcr.io/${{ steps.meta.outputs.owner }}/${{ matrix.image }}:latest\`" \
+            >> $GITHUB_STEP_SUMMARY
+          echo "pinned: \`${{ steps.meta.outputs.sha_short }}\`" >> $GITHUB_STEP_SUMMARY
