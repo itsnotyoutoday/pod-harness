@@ -155,6 +155,39 @@ def probe() -> Hardware:
 NETWORK_FS_WORKER_CAP = 24
 
 
+def free_disk(path: str = "/") -> tuple[int, int]:
+    """(free, total) bytes on the filesystem holding `path`.
+
+    Measured, never assumed. A chunk size hardcoded for a 20 GB pod either wastes a 200 GB
+    one or overruns a 10 GB one, and overrunning means a half-written working set that
+    looks complete — the failure this project keeps meeting in other costumes.
+    """
+    import shutil
+    u = shutil.disk_usage(path)
+    return u.free, u.total
+
+
+def plan_chunk_bytes(path: str = "/", *, fill: float = 0.5,
+                     floor_gb: float = 1.0, ceiling_gb: float = 64.0) -> tuple[int, str]:
+    """How many bytes of working set to hold locally at once.
+
+    Half of free space by default, not all of it: the stage writes outputs beside its
+    inputs, MFA writes TextGrids and its own scratch, and a disk that fills mid-align
+    fails in a way that is tedious to diagnose and expensive to repeat.
+    """
+    free, total = free_disk(path)
+    want = int(free * fill)
+    lo, hi = int(floor_gb * 1e9), int(ceiling_gb * 1e9)
+    n = max(lo, min(want, hi))
+    why = (f"{n/1e9:.1f} GB working set — {free/1e9:.1f} GB free of {total/1e9:.1f} GB, "
+           f"holding {fill:.0%}")
+    if n == lo:
+        why += f"; raised to the {floor_gb:.0f} GB floor"
+    elif n == hi:
+        why += f"; capped at the {ceiling_gb:.0f} GB ceiling"
+    return n, why
+
+
 def plan_workers(*, per_worker_gb: float = 1.2, reserve_cores: int = 1,
                  reserve_gb: float = 2.0, cap: int | None = None,
                  hw: Hardware | None = None) -> tuple[int, str]:

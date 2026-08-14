@@ -194,6 +194,33 @@ print('  fetched', key)
     # told to look, and the job died with "No module named 'maintenance'" against a
     # sys.path of ['/app', '/app']. The hint in that error even said the code was probably
     # not synced. It was synced. Nothing read it.
+    # Without a volume the CODE is an object too, exactly like the spec. Only the spec
+    # was being fetched, so a volume-less pod got as far as knowing what to run and then
+    # could not find the code to run it — and idled, correctly, having achieved nothing.
+    if [ -n "${PODH_CODE_ROOT:-}" ] && [ ! -d "$PODH_CODE_ROOT" ] \
+       && [ -n "${PODH_CODE_ROOT_KEY:-}" ]; then
+        echo "  code not on disk — fetching ${PODH_CODE_ROOT_KEY}/ from the store"
+        python3 -c "
+import os, pathlib
+from pod_harness.objectstore import get_storage
+st = get_storage(); cfg = st.require()
+prefix = os.environ['PODH_CODE_ROOT_KEY'].rstrip('/') + '/'
+dest = pathlib.Path(os.environ['PODH_CODE_ROOT'])
+n = 0
+for page in st.client.get_paginator('list_objects_v2').paginate(
+        Bucket=cfg.bucket, Prefix=prefix):
+    for o in page.get('Contents', []):
+        rel = o['Key'][len(prefix):]
+        if not rel:
+            continue
+        f = dest / rel
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_bytes(st.client.get_object(Bucket=cfg.bucket, Key=o['Key'])['Body'].read())
+        n += 1
+print(f'  fetched {n} file(s) to {dest}')
+" || echo "  ✗ could not fetch code from ${PODH_CODE_ROOT_KEY}"
+    fi
+
     if [ -n "${PODH_CODE_ROOT:-}" ]; then
         if [ -d "$PODH_CODE_ROOT" ]; then
             export PYTHONPATH="$PODH_CODE_ROOT${PYTHONPATH:+:$PYTHONPATH}"
