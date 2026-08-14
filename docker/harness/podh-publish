@@ -31,6 +31,7 @@ to move bytes, which is why this is a step rather than a property of the mount.
 """
 import json
 import os
+import pathlib
 import sys
 
 sys.path.insert(0, "/app")
@@ -72,7 +73,19 @@ def main() -> int:
     # Each tree keeps its own key prefix because they have different retention: a run's
     # output is prunable by age, a derived artifact is expensive and reusable, a promoted
     # profile is pointed at by `current` and kept.
-    ws = os.environ.get("PODH_WORKSPACE", "/workspace").rstrip("/")
+    # The MOUNT root, not the workspace. With mount kind object the workload lives under
+    # <workspace>/scratch/, so publishing <workspace>/assets would look at a directory the
+    # job never wrote to — which is exactly how assets/derived stayed empty while the
+    # stages were filling it in a sibling tree.
+    #
+    # corpus/ and assets/ and out/ are siblings under the mount root, so any one of them
+    # locates the others.
+    corpus_root = os.environ.get("PODH_CORPUS_ROOT") or os.environ.get("LINGUA_CORPUS_ROOT")
+    if corpus_root:
+        ws = str(pathlib.Path(corpus_root).parent)
+    else:
+        ws = str(pathlib.Path(out_root).parent) if out_root else \
+             os.environ.get("PODH_WORKSPACE", "/workspace").rstrip("/")
     # (local, key_prefix, skip_existing)
     #
     # corpus/raw is skip_existing because acquire DOWNLOADS into it, and without publishing
@@ -83,7 +96,7 @@ def main() -> int:
         (out_root, f"runs/{job}/out", False),
         (f"{ws}/assets/derived", "assets/derived", False),
         (f"{ws}/assets/profiles", "assets/profiles", False),
-        (f"{ws}/corpus/raw", "corpus/raw", True),
+        (corpus_root and f"{corpus_root}/raw" or f"{ws}/corpus/raw", "corpus/raw", True),
     ]
 
     m = for_spec(spec)
