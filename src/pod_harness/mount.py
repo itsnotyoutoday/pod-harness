@@ -194,8 +194,19 @@ class ObjectMount(MountStrategy):
             from .chunks import Item, plan
             from .parallel import pmap
 
+            # params.sources is where a v2 spec puts them; the bare top level is v1.
+            #
+            # Reading only the top level meant prepare fetched NOTHING for every v2 spec —
+            # and reported ready, because it had no way to know it was looking in the wrong
+            # place. acquire then found an empty corpus root and fell back to downloading
+            # 11 GB from the original hosts at 0.05 MB/s, data that was already sitting in
+            # our own bucket. The pod would have hit its 8-hour budget on the first file.
+            srcs = (spec.get("params") or {}).get("sources") or spec.get("sources") or []
+
             items = []
-            for src in spec.get("sources", []):
+            for src in srcs:
+                if not isinstance(src, dict):
+                    src = {"id": src}
                 rel = src.get("path") or f"raw/{src['id']}"
                 key = f"{self.prefix}/{rel}".strip("/")
                 pulled.append(key)
