@@ -62,32 +62,56 @@ def main() -> int:
         scratch = os.environ.get("PODH_SCRATCH", "/workspace/scratch")
         out_root = rel if rel.startswith("/") else f"{scratch.rstrip('/')}/{rel}"
 
-    if not os.path.isdir(out_root):
-        print(f"  ✗ publish: {out_root} does not exist — the stages wrote nothing")
-        return 1
-
-    files = sum(len(f) for _, _, f in os.walk(out_root))
-    size = sum(os.path.getsize(os.path.join(r, f))
-               for r, _, fs in os.walk(out_root) for f in fs)
-    print(f"  publish: {files} file(s), {size/1e6:.1f} MB from {out_root}")
-
-    allow_empty = bool((spec.get("mount") or {}).get("allow_empty_output"))
-    if files == 0 and not allow_empty:
-        print("  ✗ publish: the job completed and produced NO output files.")
-        print("    Every stage reported ok over an empty output directory, which is the")
-        print("    failure this framework exists to catch. If this job is genuinely not")
-        print("    meant to produce anything, set mount.allow_empty_output=true.")
-        return 1
+    # Every tree the layout defines, not just the run's out/.
+    #
+    # This published out_root alone, so assets/derived/ and assets/profiles/ were computed
+    # on the pod and destroyed with it. That is why half the documented structure has
+    # always been empty, and why every run recomputed normalize and align over inputs whose
+    # results already existed.
+    #
+    # Each tree keeps its own key prefix because they have different retention: a run's
+    # output is prunable by age, a derived artifact is expensive and reusable, a promoted
+    # profile is pointed at by `current` and kept.
+    ws = os.environ.get("PODH_WORKSPACE", "/workspace").rstrip("/")
+    trees = [
+        (out_root, f"runs/{job}/out"),
+        (f"{ws}/assets/derived", "assets/derived"),
+        (f"{ws}/assets/profiles", "assets/profiles"),
+    ]
 
     m = for_spec(spec)
-    r = m.publish(spec, out_root)
-    if not r.get("published"):
-        print(f"  ✗ publish: {r.get('error', 'failed')}")
+    published = skipped = 0
+    total_files = total_bytes = 0
+    failures = []
+    for local, prefix in trees:
+        r = m.publish_tree(local, prefix)
+        if r.get("published"):
+            published += 1
+            total_files += r.get("files", 0)
+            total_bytes += r.get("bytes", 0)
+            print(f"  publish: {r['files']:>5} file(s) {r['bytes']/1e6:>8.1f} MB  "
+                  f"{local} → {prefix}")
+        elif r.get("skipped"):
+            skipped += 1
+            print(f"  publish: {r['skipped']:<7} {local}")
+        else:
+            failures.append(f"{local}: {r.get('error', 'failed')}")
+
+    if failures:
+        for f in failures:
+            print(f"  ✗ publish: {f}")
         return 1
 
-    d = r.get("detail") or {}
-    print(f"  publish: → {r.get('prefix')}  "
-          f"{d.get('uploaded', d.get('files', files))} object(s)")
+    allow_empty = bool((spec.get("mount") or {}).get("allow_empty_output"))
+    if total_files == 0 and not allow_empty:
+        print("  ✗ publish: the job completed and produced NO output files anywhere.")
+        print("    Every stage reported ok over empty output trees, which is the failure")
+        print("    this framework exists to catch. If this job is genuinely not meant to")
+        print("    produce anything, set mount.allow_empty_output=true.")
+        return 1
+
+    print(f"  publish: {total_files} file(s), {total_bytes/1e6:.1f} MB across "
+          f"{published} tree(s)")
     return 0
 
 

@@ -51,8 +51,10 @@ runs/<job_id>/                what happened — prunable by age
 
 releases/<version>/           shippable, immutable, pinned by app builds
 cache/                        trivially recreatable — HF, MFA, joblib
-code/<repo>/<sha>/            scripts only, immutable, CI-published
-code/<repo>/dev/              scripts, mutable, for the edit-run loop
+code/<workload>/              content-addressed; see the code store below
+  _packs/<tree>.tgz           every file of one tree, in ONE object
+  _trees/<tree>.json          manifest: {"files": {path: sha}, "exec": [path, …]}
+  jobs/<job_id>               which tree that job ran, plus git rev and dirtiness
 ```
 
 ### Adding a root
@@ -203,3 +205,29 @@ require reference audio to be human-reviewed before shipping, so an approved can
 | `build/`, `_probe/` | delete | images come from GHCR now |
 
 `corpus/raw/` does not move.
+
+
+## The code store
+
+`code/<repo>/<sha>/` and `code/<repo>/dev/` are gone. Both were addressing schemes, and
+both are replaced by addressing content directly.
+
+A tree is named by the sha256 of its canonical manifest, and that name addresses both the
+manifest and one packed object holding every file. Publishing unchanged code writes only
+the ~200 byte job pointer; a job pins a tree, so what ran is exact.
+
+`dev` existed to avoid minting a new immutable name on every edit. Content addressing makes
+that free — the tree sha changes when and only when content changes — so the concept has
+nothing left to do. The git rev survives as metadata inside the job pointer, alongside a
+`git_dirty` flag, because a sha alone cannot tell you whether the working tree was clean.
+
+Measured against R2 on a 54-file tree: one pack is 0.22s and 142 KB against 0.47s and
+572 KB for the loose objects it replaced, and the gap is structural — loose costs a
+round-trip wave per 32 files, a pack costs one request whatever the file count.
+
+## Pointers, on a store with no symlinks
+
+`assets/profiles/<region>/current` holds a run id. It is an ordinary small object, not a
+link: S3 has neither symlinks nor atomic rename, but a single-object PUT replaces wholly or
+not at all, which is the only property a pointer needs. It is written LAST, after the
+directory it names is complete, so `current` can never point at a half-written profile.

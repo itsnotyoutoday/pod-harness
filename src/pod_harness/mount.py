@@ -331,6 +331,32 @@ class ObjectMount(MountStrategy):
             return {"published": False, "strategy": self.kind,
                     "error": f"{type(exc).__name__}: {exc}"}
 
+    def publish_tree(self, local_dir, key_prefix: str) -> dict:
+        """Upload one local directory to one key prefix. The generic half of publish().
+
+        Separate from publish() because a run produces more than one KIND of output, and
+        they belong in different places with different retention:
+
+            runs/<job_id>/out/     what this run produced       prunable by age
+            assets/derived/        expensive, reusable          delete only to reclaim
+            assets/profiles/       promoted outputs             kept, pointed at by `current`
+
+        Publishing only the first of those is why assets/ has always been empty: the
+        normalized audio and the alignment work were computed, written to
+        assets/derived/, and destroyed with the pod — so every run recomputed 67s of
+        normalize and 166s of align that already existed.
+        """
+        local_dir = Path(local_dir)
+        if not local_dir.is_dir():
+            return {"published": False, "skipped": "absent", "local": str(local_dir)}
+        files = [f for f in local_dir.rglob("*") if f.is_file()]
+        if not files:
+            return {"published": False, "skipped": "empty", "local": str(local_dir)}
+        st = self._storage()
+        r = st.upload_dir(local_dir, key_prefix.strip("/"))
+        return {"published": True, "prefix": key_prefix, "files": len(files),
+                "bytes": sum(f.stat().st_size for f in files), "detail": r}
+
     def launch_env(self, spec: dict) -> dict:
         """Credentials go here, at launch, never into the image.
 
