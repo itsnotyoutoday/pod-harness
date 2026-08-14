@@ -33,6 +33,7 @@ import argparse
 import importlib
 import json
 import os
+import pathlib
 import sys
 from pathlib import Path
 from typing import Any
@@ -150,20 +151,73 @@ def attach_chunks(spec: dict, ctx: Context) -> None:
             print(f"  ! chunk {key}: {type(exc).__name__}: {exc}", flush=True)
 
     def leave(key):
-        # Publish BEFORE evicting. Reversing these loses the outputs, and once the inputs
-        # are gone too there is nothing left to recompute them from.
+        """Publish this chunk's work, then remove it from disk.
+
+        Both halves are required. Without the publish the chunk's outputs die with the pod;
+        without the EVICT the disk accumulates every chunk and the bound is fictional —
+        which is the entire reason chunking exists. The first version of this did only the
+        publish, which would have failed on chunk three with the same out-of-space it was
+        written to prevent.
+
+        Order is publish-then-evict and is not interchangeable: evicting first destroys the
+        outputs, and once the inputs are gone too there is nothing left to recompute from.
+        """
         if m is None:
             return
-        try:
-            m.publish(spec, ctx.params.get("out_root") or "")
-        except Exception as exc:
-            print(f"  ! chunk {key} publish: {type(exc).__name__}: {exc}", flush=True)
+        import shutil
+
+        ws = os.environ.get("PODH_CORPUS_ROOT") or os.environ.get("LINGUA_CORPUS_ROOT") or ""
+        root = pathlib.Path(ws).parent if ws else None
+
+        published = 0
+        for local, prefix, skip in _chunk_trees(root, ws, key):
+            try:
+                r = m.publish_tree(local, prefix, skip_existing=skip)
+                if r.get("published"):
+                    published += r.get("files", 0)
+                    print(f"  chunk {key}: published {r['files']} file(s) → {prefix}",
+                          flush=True)
+            except Exception as exc:
+                # Do NOT evict on a publish failure: the local copy is now the only copy.
+                print(f"  ✗ chunk {key} publish {prefix}: {type(exc).__name__}: {exc}",
+                      flush=True)
+                return
+
+        if root is None:
+            return
+        freed = 0
+        for d in (root / "corpus" / "raw" / key,
+                  root / "assets" / "derived" / "normalized" / key,
+                  root / "assets" / "derived" / "work" / key):
+            if d.is_dir():
+                freed += sum(f.stat().st_size for f in d.rglob("*") if f.is_file())
+                shutil.rmtree(d, ignore_errors=True)
+        if freed:
+            print(f"  chunk {key}: evicted {freed/1e9:.2f} GB — published {published} "
+                  f"file(s) first", flush=True)
 
     ctx.chunks = tuple(keys)
     ctx.enter_chunk = enter
     ctx.exit_chunk = leave
     print(f"  chunked: {len(keys)} chunk(s), one source at a time — {', '.join(keys)}",
           flush=True)
+
+
+def _chunk_trees(root, corpus_root, key):
+    """What one chunk publishes: its raw source and its derived artifacts.
+
+    Not the run's out/ — that accumulates across chunks and is published once at the end by
+    podh-publish. Publishing it per chunk would upload the same growing files N times.
+    """
+    if root is None:
+        return []
+    return [
+        (f"{corpus_root}/raw/{key}", f"corpus/raw/{key}", True),
+        (root / "assets" / "derived" / "normalized" / key,
+         f"assets/derived/normalized/{key}", False),
+        (root / "assets" / "derived" / "work" / key,
+         f"assets/derived/work/{key}", False),
+    ]
 
 
 def run(spec: dict, *, job_id: str = "", reporter: Any = None,

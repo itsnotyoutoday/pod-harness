@@ -238,3 +238,59 @@ def test_exit_chunk_runs_even_when_a_stage_fails():
     ctx.exit_chunk = lambda k: left.append(k)
     Runner("t", [Boom()]).run(ctx)
     assert "a" in left, "publish/evict was skipped when a stage raised"
+
+
+def test_chunk_exit_publishes_then_evicts():
+    """Without the evict, chunking bounds nothing — the disk fills on chunk three.
+
+    Also pins the ORDER: a publish failure must leave the local copy alone, because at that
+    moment it is the only copy.
+    """
+    from pod_harness import execute_job as EJ
+
+    d = pathlib.Path(tempfile.mkdtemp())
+    corpus = d / "corpus"
+    raw = corpus / "raw" / "srcA"
+    raw.mkdir(parents=True)
+    (raw / "a.wav").write_bytes(b"x" * 1000)
+    norm = d / "assets" / "derived" / "normalized" / "srcA"
+    norm.mkdir(parents=True)
+    (norm / "a.wav").write_bytes(b"y" * 1000)
+
+    os.environ["PODH_CORPUS_ROOT"] = str(corpus)
+    spec = {"mount": {"kind": "object", "chunk_by": "source"},
+            "params": {"sources": [{"id": "srcA"}, {"id": "srcB"}]}}
+
+    published, fail = [], {"boom": False}
+
+    class M:
+        def prepare(self, spec):
+            return {"ready": True}
+
+        def publish_tree(self, local, prefix, skip_existing=False):
+            if fail["boom"]:
+                raise RuntimeError("store unavailable")
+            published.append(prefix)
+            return {"published": True, "files": 1, "prefix": prefix}
+
+    EJ_for_spec = EJ.__dict__.get("for_spec")
+    import pod_harness.mount as MM
+    MM.for_spec = lambda spec: M()
+
+    from pod_harness.framework import Context
+    ctx = Context(region="r", params=spec["params"])
+    EJ.attach_chunks(spec, ctx)
+
+    # a publish failure must NOT evict
+    fail["boom"] = True
+    ctx.exit_chunk("srcA")
+    assert raw.exists() and norm.exists(), "evicted despite a failed publish"
+
+    # a successful publish evicts, and publishes raw + derived for that chunk only
+    fail["boom"] = False
+    ctx.exit_chunk("srcA")
+    assert not raw.exists() and not norm.exists(), "chunk was not evicted"
+    assert "corpus/raw/srcA" in published
+    assert "assets/derived/normalized/srcA" in published
+    assert not any(p.startswith("runs/") for p in published), \
+        "the run's out/ was published per chunk — it accumulates and is published once"
