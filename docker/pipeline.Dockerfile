@@ -122,6 +122,7 @@ COPY contract.json /app/contract.json
 RUN echo "=== ABI check ===" \
  && $PY -c "\
 import numpy, scipy, scipy.spatial, sklearn, librosa, soundfile, torch, torchaudio, speechbrain, sys; \
+import pyarrow, pyarrow.parquet; \
 import pod_harness, pod_harness.framework, pod_harness.execute_job; \
 print('compiled stack imports OK on', sys.version.split()[0]); \
 print('numpy', numpy.__version__, '| scipy', scipy.__version__, \

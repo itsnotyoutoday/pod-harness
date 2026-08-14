@@ -141,6 +141,27 @@ def main() -> int:
             Bucket=cfg.bucket, Key=f"{PREFIX}/{cur[0]}")["Body"].read().decode().strip()
         check("`current` names this run", body == job, f"points at {body!r}, wanted {job!r}")
 
+    # THE REDUCE SAW EVERY CHUNK.
+    #
+    # Chunk-scoped stages run once per source; job-scoped stages run once and are handed
+    # whatever accumulated. If a chunk stage REPLACES that accumulator instead of adding to
+    # it, the reduce silently fits the last chunk alone — and reports ok, because from
+    # inside it there is nothing to notice. Every layout check above still passes: the
+    # objects are all in the right places, and one of them is simply wrong.
+    #
+    # That is not hypothetical. A three-source neutro run wrote a confident profile from
+    # one source, produced no second variety, left the intersection with nothing to
+    # intersect, and promoted the result over a good one. The fixture happened to
+    # accumulate correctly, so this suite passed 12/12 across the whole defect.
+    prof_key = [k for k in profiles if k.endswith(f"/{job}/profile.json")]
+    check("the reduce stage ran over EVERY chunk, not just the last", bool(prof_key))
+    if prof_key:
+        body = json.loads(st.client.get_object(
+            Bucket=cfg.bucket, Key=f"{PREFIX}/{prof_key[0]}")["Body"].read())
+        saw = sorted(body.get("sources") or [])
+        check("the profile names every source", saw == sorted(sources),
+              f"profile fitted {saw}, corpus had {sorted(sources)}")
+
     # corpus/ is external input. Derived output inside it collapses two retention policies.
     check("nothing was written under corpus/out", not listing("corpus/out/"))
     raw = listing("corpus/raw/")
