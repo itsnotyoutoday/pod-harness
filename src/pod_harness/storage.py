@@ -302,18 +302,39 @@ class Storage:
                 for o in page.get("Contents", []):
                     have[o["Key"][len(base):]] = o["Size"]
 
-        sent = skipped = 0
+        todo = []
+        skipped = 0
         for p in files:
             rel = p.relative_to(local).as_posix()
             if skip_existing and have.get(rel) == p.stat().st_size:
                 skipped += 1
                 continue
-            key = f"{prefix.rstrip('/')}/{p.relative_to(local).as_posix()}"
-            with p.open("rb") as fh:
+            todo.append((p, f"{prefix.rstrip('/')}/{rel}"))
+
+        # Concurrent, for the same reason the fetch path is: an object costs ~30 ms of
+        # round trip and almost no bandwidth, so a sequential loop measures the latency,
+        # not the link. Publishing 15,921 files one at a time was observed taking minutes
+        # while the same store fetches 32-way at ~125 MB/s.
+        #
+        # Threads rather than processes: this is entirely network wait, and boto3 clients
+        # are documented as thread-safe for distinct calls.
+        def _put(item):
+            f, key = item
+            with f.open("rb") as fh:
                 self.client.put_object(Bucket=cfg.bucket, Key=key, Body=fh)
-            sent += 1
-            if sent % 50 == 0:
-                print(f"    uploaded {sent}/{len(files)}", flush=True)
+            return 1
+
+        sent = 0
+        if todo:
+            from concurrent.futures import ThreadPoolExecutor
+            done = 0
+            with ThreadPoolExecutor(max_workers=32) as ex:
+                for r in ex.map(_put, todo):
+                    sent += r
+                    done += 1
+                    if done % 500 == 0:
+                        print(f"    uploaded {done}/{len(todo)}", flush=True)
+
         return {"ok": True, "files": sent, "skipped": skipped, "bytes": total,
                 "megabytes": round(total / 1e6, 2), "prefix": prefix}
 
