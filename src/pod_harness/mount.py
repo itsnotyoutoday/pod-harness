@@ -310,7 +310,18 @@ class ObjectMount(MountStrategy):
     def publish(self, spec: dict, out_root: Path) -> dict:
         try:
             st = self._storage()
-            prefix = f"{self.prefix}/out/{spec.get('job_id', 'unknown')}".strip("/")
+            # runs/<job_id>/out/ — STRUCTURE.md: "what THIS run produced".
+            #
+            # This was "{mount.root}/out/{job_id}", which with root=corpus/ wrote 16.5 MB
+            # of derived output into corpus/ — the one tree the layout marks as external
+            # input that is never deleted. Outputs are reproducible and prunable; putting
+            # them there mixes the two retention policies the top level exists to separate.
+            #
+            # spec.job_id was also never populated, so every run published under the
+            # literal "unknown" and a second run would have silently overwritten the first.
+            job = (spec.get("job_id") or os.environ.get("PODH_JOB_ID")
+                   or spec.get("idempotency_key") or "unknown")
+            prefix = f"runs/{job}/out"
             r = st.upload_dir(Path(out_root), prefix)
             return {"published": True, "strategy": self.kind, "prefix": prefix,
                     "detail": r}
