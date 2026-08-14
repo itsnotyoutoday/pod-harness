@@ -73,24 +73,32 @@ def main() -> int:
     # output is prunable by age, a derived artifact is expensive and reusable, a promoted
     # profile is pointed at by `current` and kept.
     ws = os.environ.get("PODH_WORKSPACE", "/workspace").rstrip("/")
+    # (local, key_prefix, skip_existing)
+    #
+    # corpus/raw is skip_existing because acquire DOWNLOADS into it, and without publishing
+    # that back the download dies with the pod — one 2,142 MB source was measured arriving
+    # at 0.05 MB/s from its origin. But the tree already holds 11 GB, so re-uploading it
+    # every run would cost far more than it saves. Only what the store lacks is sent.
     trees = [
-        (out_root, f"runs/{job}/out"),
-        (f"{ws}/assets/derived", "assets/derived"),
-        (f"{ws}/assets/profiles", "assets/profiles"),
+        (out_root, f"runs/{job}/out", False),
+        (f"{ws}/assets/derived", "assets/derived", False),
+        (f"{ws}/assets/profiles", "assets/profiles", False),
+        (f"{ws}/corpus/raw", "corpus/raw", True),
     ]
 
     m = for_spec(spec)
     published = skipped = 0
     total_files = total_bytes = 0
     failures = []
-    for local, prefix in trees:
-        r = m.publish_tree(local, prefix)
+    for local, prefix, skip in trees:
+        r = m.publish_tree(local, prefix, skip_existing=skip)
         if r.get("published"):
             published += 1
             total_files += r.get("files", 0)
             total_bytes += r.get("bytes", 0)
+            extra = f"  ({r['skipped']} already present)" if r.get("skipped") else ""
             print(f"  publish: {r['files']:>5} file(s) {r['bytes']/1e6:>8.1f} MB  "
-                  f"{local} → {prefix}")
+                  f"{local} → {prefix}{extra}")
         elif r.get("skipped"):
             skipped += 1
             print(f"  publish: {r['skipped']:<7} {local}")

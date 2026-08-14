@@ -260,7 +260,23 @@ class Storage:
         return any(pat in s for pat in SKIP_PATTERNS)
 
     def upload_dir(self, local: Path, prefix: str, *, dry_run: bool = False,
-                   max_files: int | None = None) -> dict:
+                   max_files: int | None = None, skip_existing: bool = False) -> dict:
+        """Upload a tree. With skip_existing, send only what the store does not already have.
+
+        skip_existing exists for corpus/raw/, which is 11 GB and grows: acquire downloads a
+        source into it, and without publishing that back the download dies with the pod and
+        the next run fetches it from the origin again — which for one 2,142 MB file was
+        measured crawling at 0.05 MB/s. Re-uploading the whole tree every run to save that
+        would be worse than the problem.
+
+        The check is ONE paginated listing compared against local names, not a HEAD per
+        file: at 19,000 objects that is ~19 requests instead of 19,000, and it gets
+        relatively cheaper as the tree grows.
+
+        Deliberately name-and-size only. Hashing every object to decide whether to skip
+        costs more than the upload it avoids, and these objects are immutable by policy —
+        corpus/raw is "exactly as downloaded, never modified".
+        """
         local = Path(local)
         if not local.exists():
             return {"ok": False, "error": f"not found: {local}"}
@@ -277,15 +293,28 @@ class Storage:
                     "sample": [str(p.relative_to(local)) for p in files[:5]]}
 
         cfg = self.require()
-        sent = 0
+
+        have: dict = {}
+        if skip_existing:
+            base = prefix.rstrip("/") + "/"
+            for page in self.client.get_paginator("list_objects_v2").paginate(
+                    Bucket=cfg.bucket, Prefix=base):
+                for o in page.get("Contents", []):
+                    have[o["Key"][len(base):]] = o["Size"]
+
+        sent = skipped = 0
         for p in files:
+            rel = p.relative_to(local).as_posix()
+            if skip_existing and have.get(rel) == p.stat().st_size:
+                skipped += 1
+                continue
             key = f"{prefix.rstrip('/')}/{p.relative_to(local).as_posix()}"
             with p.open("rb") as fh:
                 self.client.put_object(Bucket=cfg.bucket, Key=key, Body=fh)
             sent += 1
             if sent % 50 == 0:
                 print(f"    uploaded {sent}/{len(files)}", flush=True)
-        return {"ok": True, "files": sent, "bytes": total,
+        return {"ok": True, "files": sent, "skipped": skipped, "bytes": total,
                 "megabytes": round(total / 1e6, 2), "prefix": prefix}
 
     def download_prefix(self, prefix: str, local: Path, *,

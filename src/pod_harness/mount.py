@@ -331,7 +331,8 @@ class ObjectMount(MountStrategy):
             return {"published": False, "strategy": self.kind,
                     "error": f"{type(exc).__name__}: {exc}"}
 
-    def publish_tree(self, local_dir, key_prefix: str) -> dict:
+    def publish_tree(self, local_dir, key_prefix: str, *,
+                     skip_existing: bool = False) -> dict:
         """Upload one local directory to one key prefix. The generic half of publish().
 
         Separate from publish() because a run produces more than one KIND of output, and
@@ -353,8 +354,10 @@ class ObjectMount(MountStrategy):
         if not files:
             return {"published": False, "skipped": "empty", "local": str(local_dir)}
         st = self._storage()
-        r = st.upload_dir(local_dir, key_prefix.strip("/"))
-        return {"published": True, "prefix": key_prefix, "files": len(files),
+        r = st.upload_dir(local_dir, key_prefix.strip("/"),
+                          skip_existing=skip_existing)
+        return {"published": True, "prefix": key_prefix,
+                "files": r.get("files", len(files)), "skipped": r.get("skipped", 0),
                 "bytes": sum(f.stat().st_size for f in files), "detail": r}
 
     def launch_env(self, spec: dict) -> dict:

@@ -347,14 +347,15 @@ print('  fetched', key)
     # the poll would catch it within a minute. It would not have: see below.
     set +e
     dmsg=$(python3 -c "
+import sys
 from pod_harness import heartbeat
-r = heartbeat.done()
+r = heartbeat.done(int(sys.argv[1]))
 if r:
     print('terminate requested')
 else:
     e = heartbeat.last_error()
     print('NOT SENT — ' + (e if e else 'no control url or pod id configured'))
-" 2>&1)
+" "$rc" 2>&1)
     drc=$?
     set -e
     if [ "$drc" -eq 0 ]; then

@@ -136,12 +136,18 @@ def alive(deadline_ts: float | None = None) -> dict | None:
     return _post("/v1/alive", body)
 
 
-def done() -> dict | None:
-    """Ask to be terminated now. Called when the job finishes, however it finishes."""
+def done(rc: int = 0) -> dict | None:
+    """Ask to be terminated now. Called when the job finishes, however it finishes.
+
+    The exit code travels with the request because the control plane otherwise has no way
+    to record HOW the job ended. It used to terminate the pod and leave the job row saying
+    "running", so the next sweep saw a job whose pod had vanished and marked it failed —
+    a successful run recorded as a failure by the very mechanism that reaped it correctly.
+    """
     url, _, pod_id = _cfg()
     if not url or not pod_id:
         return None
-    return _post("/v1/done", {"pod_id": pod_id, "provider": "runpod",
+    return _post("/v1/done", {"pod_id": pod_id, "provider": "runpod", "rc": int(rc),
                               "job_id": os.environ.get("PODH_CONTROL_JOB_ID")
                                         or os.environ.get("PODH_JOB_ID", "")})
 
