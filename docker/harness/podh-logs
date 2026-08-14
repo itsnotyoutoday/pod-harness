@@ -1,0 +1,61 @@
+"""Upload the pod's own logs to runs/<job_id>/, unconditionally.
+
+STRUCTURE.md lists console.log and job.log under runs/<job_id>/ and they have never been
+there. Caddy serves them while the pod is alive, which is enough right up to the moment it
+is not — and the moment you most want the log is after the pod is gone.
+
+Tonight that cost a whole run: seven stages passed, publishing failed, the container was
+reaped for reporting done, and the reason lived only in a console.log that no longer
+existed. The next step was to relaunch purely to read an error message.
+
+## Why it runs even when publishing failed
+
+Especially when publishing failed. This is the step that explains the other steps, so it
+must not be conditional on them succeeding — a diagnostic that is only kept when things go
+well is not a diagnostic.
+
+It is best-effort by the same logic: a failure to upload the log must never change the
+job's own outcome, so this always exits 0 and says what it could not do.
+"""
+import os
+import sys
+from pathlib import Path
+
+sys.path.insert(0, "/app")
+
+
+def main() -> int:
+    log_dir = Path(os.environ.get("PODH_LOG_DIR", ""))
+    job = os.environ.get("PODH_JOB_ID", "") or os.environ.get("RUNPOD_POD_ID", "pod")
+    if not log_dir.is_dir():
+        print(f"  logs: nothing at {log_dir or '<unset>'}")
+        return 0
+
+    try:
+        from pod_harness.objectstore import get_storage
+        st = get_storage()
+        cfg = st.require()
+    except Exception as e:
+        print(f"  logs: no object store ({type(e).__name__}) — logs stay on the pod only")
+        return 0
+
+    sent = 0
+    for f in sorted(log_dir.glob("*.log")):
+        try:
+            # Read at the moment of upload: console.log is append-only and still being
+            # written, so this captures everything up to now and misses only the handful of
+            # lines this script itself will emit afterwards.
+            body = f.read_bytes()
+            st.client.put_object(Bucket=cfg.bucket, Key=f"runs/{job}/{f.name}", Body=body)
+            print(f"  logs: {f.name} ({len(body)/1e3:.1f} KB) → runs/{job}/{f.name}")
+            sent += 1
+        except Exception as e:
+            print(f"  ! logs: {f.name} — {type(e).__name__}: {str(e)[:120]}")
+
+    if not sent:
+        print("  logs: nothing uploaded")
+    return 0          # never changes the job's outcome
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

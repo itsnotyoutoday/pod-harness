@@ -51,7 +51,10 @@ fatal() {
     echo "  ✗ $*"
     echo "    Idling rather than exiting — an exiting container is restarted by the"
     echo "    provider and fails identically, forever, while billing."
-    python3 -c "from pod_harness import heartbeat; heartbeat.done()" 2>/dev/null || true
+    # Upload the log first: a fatal error is exactly when the console is the only record,
+    # and this function then idles forever, so nothing else will ever send it.
+    [ -x /usr/local/bin/podh-logs ] && python3 /usr/local/bin/podh-logs || true
+    python3 -c "from pod_harness import heartbeat; heartbeat.done(1)" 2>/dev/null || true
     while true; do sleep 300; done
 }
 set -e
@@ -337,6 +340,18 @@ print('  fetched', key)
             rc=$prc
             echo "  ✗ job stages passed but publishing failed — treating the run as failed"
         fi
+    fi
+
+    # Upload the pod's own logs BEFORE asking to be terminated.
+    #
+    # console.log has never survived a pod, despite STRUCTURE.md listing it under
+    # runs/<job_id>/. Tonight that cost a run: seven stages passed, publishing failed, the
+    # pod was correctly reaped, and the reason existed only in a file that went with it —
+    # so the next step was to relaunch in order to read an error message.
+    #
+    # Unconditional, and last: this is the step that explains the other steps.
+    if [ -x /usr/local/bin/podh-logs ]; then
+        python3 /usr/local/bin/podh-logs || true
     fi
 
     # Ask to be terminated, and SAY whether it worked.
