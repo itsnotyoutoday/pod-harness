@@ -13,8 +13,9 @@
 # never opens an audio file — the trainer already turned sound into numbers — so every
 # dependency here is numerical and none is acoustic.
 #
-# Target ~450 MB: thirteen times smaller than the pipeline image, and the difference is
-# entirely torch, MFA, librosa and the Japanese and Thai dictionaries the MFA base drags in.
+# Target ~550 MB: eleven times smaller than the pipeline image. The difference is torch,
+# MFA and the Japanese and Thai dictionaries the MFA base drags in — not the audio I/O,
+# which is soundfile plus ffmpeg and costs under a hundred megabytes.
 #
 # ## What the extra packages actually buy
 #
@@ -37,12 +38,30 @@
 #             calibration, so `confident` means a probability rather than a margin
 #             clearing a hardcoded threshold.
 #
-# ## What is deliberately absent
+# ## It DOES open audio files — an earlier version of this file claimed otherwise
 #
-# No librosa, no torch, no MFA, no ffmpeg. If a stage here ever needs to open a wav, it
-# belongs in the trainer instead: measurement is the trainer's job and judgement is this
-# one's, and the whole reason lingua-detect is a separate repo is that a detector able to
-# re-measure is a detector able to grade its own homework.
+# The first draft argued that "a detector able to re-measure is a detector able to grade its
+# own homework", and excluded audio entirely. That conflated two different things:
+#
+#   FITTING     building the distributions a sample is judged against.  Stays out.
+#   MEASURING   turning a waveform into numbers.  Deterministic. Belongs here.
+#
+# Independence means not being able to move the goalposts — not being able to re-FIT a
+# profile. Measurement moves nothing; the same file yields the same numbers whoever runs it.
+# Excluding it did not buy independence, it made the detector unable to do the one thing it
+# is for: take a voice and say where the speaker is from.
+#
+# soundfile + ffmpeg, so a caller can hand it what they actually have — wav, mp3, m4a, flac,
+# ogg, or the audio track of an mp4/mkv. ffmpeg normalises to 16 kHz mono with the SAME
+# arguments the trainer uses, because a sample measured at another rate is not comparable
+# to distributions fitted at 16 kHz. Video demuxing comes free in the same package.
+#
+# ## What IS absent, and asserted
+#
+# torch, speechbrain and MFA. Those are the FITTING and ALIGNMENT stack — six gigabytes for
+# work that belongs upstream. Alignment would add per-environment sibilant measurement and
+# the S1-S9 segmental rules; until the accent target contains a segmental feature (it does
+# not — it is five prosodic ones) nothing here is lost by their absence.
 
 FROM --platform=linux/amd64 python:3.12-slim-bookworm
 
@@ -66,14 +85,14 @@ ENV PYTHONUNBUFFERED=1 \
 RUN set -eux; \
     apt-get update; \
     apt-get install -y --no-install-recommends \
-        ca-certificates curl tar tini; \
+        ca-certificates curl tar tini ffmpeg libsndfile1; \
     curl -sL "https://github.com/caddyserver/caddy/releases/download/v${CADDY_VERSION}/caddy_${CADDY_VERSION}_linux_amd64.tar.gz" \
         | tar -xz -C /usr/local/bin caddy; \
     chmod +x /usr/local/bin/caddy; \
     pip install --no-cache-dir \
         "boto3>=1.34" "botocore>=1.34" \
         "fastapi>=0.110" "uvicorn[standard]>=0.29" \
-        "numpy>=2.0" "scipy>=1.13" "scikit-learn>=1.5"; \
+        "numpy>=2.0" "scipy>=1.13" "scikit-learn>=1.5" "soundfile>=0.12"; \
     apt-get clean; \
     rm -rf /var/lib/apt/lists/* /root/.cache; \
     mkdir -p /workspace /opt/models /app
@@ -91,7 +110,7 @@ COPY contract.json /app/contract.json
 # a job on a billed pod, which reads like a code bug and sends you debugging the wrong file.
 RUN echo "=== ABI check ===" \
  && python -c "\
-import numpy, scipy, scipy.stats, scipy.linalg, sklearn, sklearn.ensemble, sys; \
+import numpy, scipy, scipy.stats, scipy.linalg, sklearn, sklearn.ensemble, soundfile, sys; \
 import pod_harness, pod_harness.framework, pod_harness.execute_job, pod_harness.stage_manifest; \
 print('numerical stack imports OK on', sys.version.split()[0]); \
 print('numpy', numpy.__version__, '| scipy', scipy.__version__, \
@@ -102,17 +121,20 @@ print('numpy', numpy.__version__, '| scipy', scipy.__version__, \
 COPY docker/assert_independence.py /tmp/assert_independence.py
 RUN python /tmp/assert_independence.py && rm /tmp/assert_independence.py
 
-# Prove the absence, do not merely intend it. This image is defined as much by what it does
-# NOT carry as by what it does, and an audio dependency arriving as a transitive of some
-# future package would silently turn a 450 MB image into a large one.
+# Prove both halves, do not merely intend them: the decode path must WORK, and the fitting
+# stack must be ABSENT. A torch arriving as a transitive dependency would silently turn a
+# half-gigabyte image into a seven-gigabyte one.
 RUN set -eux; \
-    for m in torch librosa soundfile speechbrain montreal_forced_aligner; do \
+    python -c "import soundfile, subprocess; \
+print('soundfile', soundfile.__version__); \
+print(subprocess.run(['ffmpeg','-version'],capture_output=True,text=True).stdout.split(chr(10))[0])"; \
+    for m in torch speechbrain montreal_forced_aligner; do \
         if python -c "import $m" 2>/dev/null; then \
-            echo "FAIL: $m is present — this is the analysis image; measurement belongs in the trainer"; \
+            echo "FAIL: $m present — fitting and alignment belong in the trainer image"; \
             exit 1; \
         fi; \
     done; \
-    echo "confirmed: no audio stack"
+    echo "confirmed: decodes audio, cannot fit or align"
 
 WORKDIR /workspace
 ENTRYPOINT ["/usr/bin/tini", "--"]
