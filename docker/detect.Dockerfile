@@ -63,7 +63,7 @@
 # the S1-S9 segmental rules; until the accent target contains a segmental feature (it does
 # not — it is five prosodic ones) nothing here is lost by their absence.
 
-FROM --platform=linux/amd64 python:3.12-slim-bookworm
+FROM --platform=linux/amd64 python:3.13-slim-bookworm
 
 ARG CADDY_VERSION=2.8.4
 
@@ -92,7 +92,8 @@ RUN set -eux; \
     pip install --no-cache-dir \
         "boto3>=1.34" "botocore>=1.34" \
         "fastapi>=0.110" "uvicorn[standard]>=0.29" \
-        "numpy>=2.0" "scipy>=1.13" "scikit-learn>=1.5" "soundfile>=0.12"; \
+        "numpy>=2.0" "scipy>=1.13" "scikit-learn>=1.5" "soundfile>=0.12" \
+        "librosa>=0.10"; \
     apt-get clean; \
     rm -rf /var/lib/apt/lists/* /root/.cache; \
     mkdir -p /workspace /opt/models /app
@@ -110,11 +111,11 @@ COPY contract.json /app/contract.json
 # a job on a billed pod, which reads like a code bug and sends you debugging the wrong file.
 RUN echo "=== ABI check ===" \
  && python -c "\
-import numpy, scipy, scipy.stats, scipy.linalg, sklearn, sklearn.ensemble, soundfile, sys; \
+import numpy, scipy, scipy.stats, scipy.linalg, sklearn, sklearn.ensemble, soundfile, librosa, sys; \
 import pod_harness, pod_harness.framework, pod_harness.execute_job, pod_harness.stage_manifest; \
 print('numerical stack imports OK on', sys.version.split()[0]); \
 print('numpy', numpy.__version__, '| scipy', scipy.__version__, \
-      '| sklearn', sklearn.__version__)"
+      '| sklearn', sklearn.__version__, '| librosa', librosa.__version__)"
 
 # The same independence guard the other images carry: no loader module may appear here. A
 # pod cannot launch a pod because the code is not present, not because it was asked not to.

@@ -46,7 +46,7 @@
 #
 # Target: ~250 MB against several GB, and a pull measured in seconds.
 
-FROM --platform=linux/amd64 python:3.12-slim-bookworm
+FROM --platform=linux/amd64 python:3.13-slim-bookworm
 
 ARG CADDY_VERSION=2.8.4
 

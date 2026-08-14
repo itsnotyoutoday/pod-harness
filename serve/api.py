@@ -35,6 +35,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from fastapi.responses import JSONResponse
 
 from . import code as code_mod
+from . import extensions as ext_mod
 from . import jobs as J
 from pod_harness.events import EventLog, job_dir, log_root, read_tail
 
@@ -64,6 +65,12 @@ app = FastAPI(
     docs_url="/v1/docs",
     openapi_url="/v1/openapi.json",   # generates the Node client and, later, an MCP shim
 )
+
+
+# Workload endpoints, mounted under /v1/x. Done at import so they exist before the first
+# request, and non-fatal: a pod whose workload API failed to load is exactly the pod you
+# need the core endpoints on to find out why.
+ext_mod.mount(app)
 
 
 def auth(x_podh_token: str | None = Header(default=None)) -> None:
@@ -125,6 +132,10 @@ def discover() -> dict:
         # import. Empty means no code is loaded here — honest rather than misleading.
         "stages": J.available_stages(),
         "code": code_mod.resolve().as_dict(),
+        # Extensions this pod is serving because of the workload loaded on it. Reported
+        # even when loading FAILED — a silently absent endpoint is the failure mode this
+        # codebase keeps getting bitten by.
+        "extensions": ext_mod.describe(),
         "endpoints": {
             "GET  /v1/":                       "this document",
             "GET  /v1/health":                 "liveness, no auth",
