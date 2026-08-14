@@ -146,19 +146,14 @@ if [ -x /usr/local/bin/podh-mount ]; then
     fi
 fi
 
-# Apply the roots the mount resolved from the spec.
+# Roots are resolved further down, AFTER the spec is on disk — see `apply_roots`.
 #
-# podh-mount runs as a CHILD process and a child cannot set its parent's environment, so
-# it writes them here instead. Without this line the roots were computed correctly, printed
-# correctly, and then discarded — the workload kept the image's baked defaults and looked
-# for the manifest at a path from the previous storage layout. The log said the right
-# answer while the job used the wrong one, which is the hardest kind of bug to see.
-if [ -f /tmp/podh-roots.env ]; then
-    set -a
-    . /tmp/podh-roots.env
-    set +a
-    echo "  roots:   applied $(grep -c '^export' /tmp/podh-roots.env) from the job spec"
-fi
+# They were resolved here at first, and it silently could not work: with mount kind
+# "object" the spec is an object, fetched during batch dispatch, which is later than this.
+# So mount_roots() saw no spec, fell back to its default, and the fallback SUCCEEDED —
+# reporting "applied 2 from the job spec" over a spec it had never read, while the job kept
+# the image's baked paths. A fallback that cannot be distinguished from a real answer is
+# worse than no fallback.
 
 echo "  workload: $*"
 echo "================================================================================"
@@ -213,6 +208,48 @@ print('  fetched', key)
         fatal "job spec not found: $PODH_JOB_SPEC (and PODH_JOB_SPEC_KEY=${PODH_JOB_SPEC_KEY:-unset} did not yield one)"
     fi
     echo "  mode: batch — $PODH_JOB_SPEC"
+
+    # Resolve the roots the spec declares, now that the spec is genuinely readable.
+    #
+    # This is the earliest correct point: the mount runs before the spec is fetched, so
+    # resolving there read nothing and quietly returned defaults. Doing it here means the
+    # workload's paths come from the job that is actually running.
+    #
+    # Sourced in THIS shell rather than exported by a child, because a child cannot set its
+    # parent's environment — the reason the values were previously computed, printed and
+    # then thrown away.
+    if [ -x /usr/local/bin/podh-roots ]; then
+        if python3 /usr/local/bin/podh-roots > /tmp/podh-roots.env 2>/tmp/podh-roots.err; then
+            set -a
+            . /tmp/podh-roots.env
+            set +a
+            echo "  roots:   $(grep -c '^export .*=' /tmp/podh-roots.env) export(s) from the spec"
+            sed 's/^export /    /' /tmp/podh-roots.env
+        else
+            # Loud, not fatal. The workload may not need declared roots at all, but a
+            # resolver that failed while the job expects paths is worth seeing in the log
+            # rather than inferring later from a FileNotFoundError.
+            echo "  ! roots could not be resolved — the workload will use baked defaults:"
+            sed 's/^/    /' /tmp/podh-roots.err 2>/dev/null | tail -5
+        fi
+    fi
+
+    # Materialise the working set for mount kinds that cannot do it at boot.
+    #
+    # Object mode has no mount, and what to pull is described by the spec — which in object
+    # mode is itself an object, fetched moments ago. So podh-mount could not do this, and
+    # nothing else did: ObjectMount.prepare() existed, was correct, and was called by
+    # nothing. The manifest never landed. Three runs read that as a path bug, because a
+    # correct path over a missing file and a wrong path raise the identical error.
+    if [ -x /usr/local/bin/podh-prepare ]; then
+        set +e
+        python3 /usr/local/bin/podh-prepare
+        prc=$?
+        set -e
+        if [ "$prc" -ne 0 ]; then
+            fatal "could not materialise the job's working set (see prepare output above). Running anyway would start stages against absent inputs, and a stage that processes zero files can still report success."
+        fi
+    fi
 
     # Put the workload's code on the path BEFORE exec'ing the engine.
     #

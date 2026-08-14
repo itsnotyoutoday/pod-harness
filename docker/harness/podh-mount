@@ -88,21 +88,10 @@ PY
 
   object)
     say "object mode — no startup mount; each job pulls its own working set"
-    # Resolve the roots the SPEC declared and export them, because nothing else does.
-    #
-    # The image bakes LINGUA_* defaults pointing at the old volume layout, and the spec's
-    # mount.roots were only ever used to decide what to FETCH — never to tell the workload
-    # where any of it landed. acquire therefore looked for the manifest at a baked-in path
-    # that exists only under the previous layout, and died before reading a byte.
-    #
-    # Written to a file rather than exported here: this runs as a child process, and a
-    # child cannot set its parent's environment. podh-init sources it.
-    python3 /usr/local/bin/podh-roots > /tmp/podh-roots.env 2>/dev/null || true
-    if [ -s /tmp/podh-roots.env ]; then
-        . /tmp/podh-roots.env
-        say "roots from the spec:"
-        sed 's/^export /    /' /tmp/podh-roots.env | grep PODH_ || true
-    fi
+    # Roots are NOT resolved here. The spec is fetched during batch dispatch, which is
+    # later than this, so anything read here would be read from a file that does not exist
+    # yet — and mount_roots() answers an empty spec with a plausible default rather than an
+    # error. podh-init resolves them once the spec is genuinely on disk.
     mkdir -p "${PODH_CORPUS_ROOT:-${LINGUA_CORPUS_ROOT:-/workspace/corpus}}" 2>/dev/null || true
     ;;
 

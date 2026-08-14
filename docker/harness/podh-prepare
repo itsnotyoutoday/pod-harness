@@ -1,0 +1,72 @@
+"""Materialise the job's working set, for mount kinds that do not do it at boot.
+
+## Why this exists as a separate step
+
+The engine's docstring is explicit: `execute_job` "is handed a spec and a mount that
+already exists". It never asks where it is running, which is what lets the same stage code
+run on a volume, a FUSE mount, a laptop, or object storage. Establishing the data view is
+therefore the harness's job, not the engine's.
+
+For volume and FUSE that happens at boot, in podh-mount, because the data view is a
+property of the pod. For **object** mode it cannot: there is no mount, and what to pull is
+described by the spec — which, in object mode, is itself an object that gets fetched during
+batch dispatch, well after podh-mount has run.
+
+So object mode had no step that fetched anything. `ObjectMount.prepare()` was written,
+correct, and called by nothing. The manifest never landed, the paths were right, and
+acquire died on a missing file — the failure looked like a path bug for three runs because
+a correct path over an absent file and a wrong path are the same FileNotFoundError.
+
+## What it does
+
+Calls `prepare(spec)` on the strategy the spec names, and reports what landed. Sources are
+pulled 32-way inside a measured disk budget; a declared root naming a FILE (the manifest, a
+ruleset) is pulled as a single object.
+
+Directory roots that stages consume in bounded batches are NOT pulled here — that is what
+chunks.py is for, and pulling the whole corpus would defeat the disk budget it enforces.
+"""
+import json
+import os
+import sys
+
+sys.path.insert(0, "/app")
+
+from pod_harness.mount import for_spec
+
+
+def main() -> int:
+    path = os.environ.get("PODH_JOB_SPEC", "")
+    if not path or not os.path.exists(path):
+        print(f"  ! prepare skipped — no readable spec at {path or '<unset>'}")
+        return 0
+
+    spec = json.load(open(path))
+    kind = (spec.get("mount") or {}).get("kind") or os.environ.get("PODH_MOUNT_KIND", "")
+    if kind != "object":
+        # volume and fuse established their view at boot; re-preparing would be a second
+        # definition of something podh-mount already owns.
+        print(f"  prepare: nothing to do for mount kind {kind!r}")
+        return 0
+
+    m = for_spec(spec)
+    r = m.prepare(spec)
+
+    ready = r.get("ready", True)
+    fetched = r.get("fetched") or r.get("pulled") or []
+    print(f"  prepare: kind=object ready={ready} "
+          f"objects={r.get('objects', len(fetched) if fetched else '?')}")
+    for k in ("corpus_root", "out_root", "manifest"):
+        if r.get(k):
+            exists = os.path.exists(str(r[k]))
+            print(f"    {k}: {r[k]}  {'✓' if exists else '✗ MISSING'}")
+    if r.get("error"):
+        print(f"    error: {r['error']}")
+
+    # Non-zero on failure so podh-init can say so rather than letting the first stage
+    # discover it as a FileNotFoundError with no context about why.
+    return 0 if ready else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

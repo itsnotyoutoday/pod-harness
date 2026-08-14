@@ -149,6 +149,16 @@ def resolve_config(profile: str | None = None) -> Any | None:
     access = _env(prof, "ACCESS") or _env(prof, "ACCESS_KEY_ID")
     secret = _env(prof, "SECRET") or _env(prof, "SECRET_ACCESS_KEY")
 
+    # Cloudflare's dashboard shows the S3 API URL with the bucket already on the end, so
+    # that is what gets pasted into a credential file. boto3 then signs requests against
+    # <endpoint>/<bucket>/<key> — i.e. .../lingua/lingua/corpus/... — and every single one
+    # returns 404. The symptom is "the object does not exist", which sends you looking for
+    # a missing file instead of a malformed endpoint; a listing of the whole bucket comes
+    # back NoSuchKey, which is not a phrase that suggests "your URL has an extra path
+    # segment". Strip it once, here, where every caller passes through.
+    if endpoint and bucket and endpoint.rstrip("/").endswith("/" + bucket):
+        endpoint = endpoint.rstrip("/")[: -(len(bucket) + 1)]
+
     if bucket and access and secret:
         return S3Config(
             bucket=bucket, endpoint_url=endpoint, access_key=access, secret_key=secret,

@@ -15,13 +15,21 @@ import sys
 sys.path.insert(0, "/app")
 from pod_harness.mount import mount_roots
 
-spec = {}
+# Refuse to guess. mount_roots() falls back to a default when handed an empty spec, and
+# that fallback is indistinguishable from a real answer in the output — which is exactly
+# how this ran once against a spec it had never opened, printed a confident line, and left
+# the job on baked paths. If a spec was named, it must be readable.
 path = os.environ.get("PODH_JOB_SPEC", "")
-if path and os.path.exists(path):
-    try:
-        spec = json.load(open(path))
-    except Exception:
-        spec = {}
+if not path:
+    sys.exit("PODH_JOB_SPEC is unset; nothing to resolve roots from")
+if not os.path.exists(path):
+    sys.exit(f"PODH_JOB_SPEC={path} does not exist yet. Roots must be resolved AFTER the "
+             f"spec is fetched — with mount kind 'object' the spec is an object, not a "
+             f"file present at boot.")
+try:
+    spec = json.load(open(path))
+except Exception as e:
+    sys.exit(f"PODH_JOB_SPEC={path} is not readable JSON: {e}")
 
 # Must agree with ObjectMount.scratch, or the workload is told a path nothing was
 # fetched to — a wrong answer that looks like a right one.
