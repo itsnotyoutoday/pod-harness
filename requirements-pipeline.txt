@@ -20,6 +20,18 @@ requests>=2.31
 pypdf>=4.0
 boto3>=1.34            # S3-compatible object storage
 
+# CIEMPIESS Light ships its audio and metadata PARQUET-PACKED, so acquire cannot unpack it
+# without this — pipeline/acquire/ingest.py imports pyarrow.parquet at the top of the
+# CIEMPIESS reader. Its absence is not a build failure, it is a RUNTIME one, and it cost a
+# full three-source run: chunk 2 died with ModuleNotFoundError after chunk 1 had already
+# spent its pod-minutes, and the reduce stages then fitted a "neutro" profile from the one
+# source that survived.
+#
+# Compiled, and the file's rule is that compiled packages are the risky ones — so the ABI
+# check in pipeline.Dockerfile imports pyarrow.parquet explicitly. If a wheel disagrees
+# with the base's libstdc++, that check fails the BUILD, which is the whole point of it.
+pyarrow>=15.0
+
 # ECAPA speaker embeddings. The >=1.1 floor is NOT cosmetic.
 #
 # speechbrain 1.0.3 — which `>=1.0` resolved to, and which plexus verified against an

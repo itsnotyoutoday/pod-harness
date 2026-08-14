@@ -342,6 +342,7 @@ class Runner:
         reporter.job_start(len(chunked) * len(keys) + len(rest))
         results = []
 
+        aborted: str | None = None
         for i, key in enumerate(keys, 1):
             print(f"\n{'#'*74}\n  CHUNK {i}/{len(keys)} · {key}\n{'#'*74}", flush=True)
             enter = getattr(ctx, "enter_chunk", None)
@@ -355,6 +356,7 @@ class Runner:
                     results.append(res_d)
                     if res.status not in ("ok", "skipped") and stop_on_failure \
                             and not s.optional:
+                        aborted = f"{s.name} failed on chunk {key}"
                         break
             finally:
                 # Publish-then-evict happens in exit_chunk, and it runs even when a stage
@@ -363,6 +365,32 @@ class Runner:
                 leave = getattr(ctx, "exit_chunk", None)
                 if callable(leave):
                     leave(key)
+            if aborted:
+                break
+
+        # A chunk that failed means the job-scoped stages would REDUCE OVER A HOLE. They
+        # cannot see the hole — they read an accumulated artifact and fit whatever is in
+        # it — so they produce a confident answer about a fraction of the corpus and
+        # report ok. That is exactly what happened when one source failed to normalise:
+        # comply, intersect and profile all ran green over a third of the data, and the
+        # result was promoted over a good one.
+        #
+        # The completed chunks are still published; nothing is discarded. What stops is
+        # drawing conclusions from an incomplete set.
+        if aborted:
+            print(f"\n  ✗ {aborted} — skipping {len(rest)} job-scoped stage(s): reducing "
+                  f"over an incomplete corpus produces a confident wrong answer.",
+                  flush=True)
+            for s in rest:
+                results.append({"stage": s.name, "status": "skipped",
+                                "detail": {"why": f"not run — {aborted}"}})
+            ok = False
+            reporter.job_done(ok)
+            return {"runner": self.name, "ok": ok, "chunks": len(keys),
+                    "aborted": aborted,
+                    "elapsed_minutes": round((time.time() - started) / 60, 2),
+                    "stages": results,
+                    "artifacts": sorted(k for k in ctx.artifacts if ctx.has(k))}
 
         for s in rest:
             res = self._one(s, ctx, verify=verify, reporter=reporter)
