@@ -1,0 +1,95 @@
+"""Push the job's outputs to durable storage, for mount kinds that do not do it implicitly.
+
+## Why this exists
+
+`ObjectMount.publish()` was written, correct, and called by nothing — the exact symmetry of
+`prepare()`, which was also written, correct, and called by nothing until a run spent three
+attempts failing on a manifest it had never fetched.
+
+The consequence here is worse. A run completed all seven stages, reported `ok` for every
+one, exited 0, and published **zero objects**. Every output sat in a scratch directory on
+the container disk and was destroyed with the pod. Six minutes of successful compute
+produced nothing that outlived the machine, and the status said `done`.
+
+That is precisely the failure this project's verification framework exists to catch —
+reported success over absent output — arriving through the one path that had no check.
+
+## Why it is fatal when it publishes nothing
+
+A job that ran stages and produced no outputs is either broken or pointless, and either way
+the operator must be told at the time. Exiting quietly leaves a `done` job whose product
+does not exist, which is discovered later — usually by someone looking for the results.
+
+`allow_empty` exists for jobs that genuinely produce nothing durable (a probe, a
+benchmark), and it has to be stated in the spec rather than inferred, because "produced
+nothing" and "intended to produce nothing" look identical from here.
+
+## Volume and FUSE
+
+Nothing to do: the volume IS the durable store and outlives the pod. Only object mode has
+to move bytes, which is why this is a step rather than a property of the mount.
+"""
+import json
+import os
+import sys
+
+sys.path.insert(0, "/app")
+
+from pod_harness.mount import for_spec, mount_roots
+
+
+def main() -> int:
+    path = os.environ.get("PODH_JOB_SPEC", "")
+    if not path or not os.path.exists(path):
+        print(f"  ! publish skipped — no readable spec at {path or '<unset>'}")
+        return 0
+
+    spec = json.load(open(path))
+    kind = (spec.get("mount") or {}).get("kind") or os.environ.get("PODH_MOUNT_KIND", "")
+    if kind != "object":
+        print(f"  publish: nothing to do for mount kind {kind!r} — the mount is durable")
+        return 0
+
+    # Where the workload was TOLD to write, resolved the same way podh-roots resolved it,
+    # so this cannot drift from what the job actually used.
+    out_root = os.environ.get("PODH_OUT_ROOT") or os.environ.get("LINGUA_OUT_ROOT") or ""
+    if not out_root:
+        roots = mount_roots(spec)
+        rel = roots.get("out_root")
+        if not rel:
+            print("  publish: the spec declares no out_root — nothing to publish")
+            return 0
+        scratch = os.environ.get("PODH_SCRATCH", "/workspace/scratch")
+        out_root = rel if rel.startswith("/") else f"{scratch.rstrip('/')}/{rel}"
+
+    if not os.path.isdir(out_root):
+        print(f"  ✗ publish: {out_root} does not exist — the stages wrote nothing")
+        return 1
+
+    files = sum(len(f) for _, _, f in os.walk(out_root))
+    size = sum(os.path.getsize(os.path.join(r, f))
+               for r, _, fs in os.walk(out_root) for f in fs)
+    print(f"  publish: {files} file(s), {size/1e6:.1f} MB from {out_root}")
+
+    allow_empty = bool((spec.get("mount") or {}).get("allow_empty_output"))
+    if files == 0 and not allow_empty:
+        print("  ✗ publish: the job completed and produced NO output files.")
+        print("    Every stage reported ok over an empty output directory, which is the")
+        print("    failure this framework exists to catch. If this job is genuinely not")
+        print("    meant to produce anything, set mount.allow_empty_output=true.")
+        return 1
+
+    m = for_spec(spec)
+    r = m.publish(spec, out_root)
+    if not r.get("published"):
+        print(f"  ✗ publish: {r.get('error', 'failed')}")
+        return 1
+
+    d = r.get("detail") or {}
+    print(f"  publish: → {r.get('prefix')}  "
+          f"{d.get('uploaded', d.get('files', files))} object(s)")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

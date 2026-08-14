@@ -316,6 +316,29 @@ print('  fetched', key)
     set -e
     echo "  job finished (exit $rc)"
 
+    # Make the outputs durable BEFORE reporting done.
+    #
+    # ObjectMount.publish() existed and was called by nothing — the same omission as
+    # prepare(), with a worse consequence: a run completed all seven stages, reported ok
+    # for each, exited 0, and published zero objects. Every output sat on the container
+    # disk and died with the pod. Six minutes of successful compute, nothing that outlived
+    # the machine, and a status that said done.
+    #
+    # Before the heartbeat, deliberately: done() asks the control plane to terminate this
+    # pod, and terminating before the outputs are pushed destroys them.
+    if [ -x /usr/local/bin/podh-publish ]; then
+        set +e
+        python3 /usr/local/bin/podh-publish
+        prc=$?
+        set -e
+        if [ "$prc" -ne 0 ] && [ "$rc" -eq 0 ]; then
+            # The job succeeded but its product did not survive. That is a FAILED run, and
+            # calling it anything else is how a green status comes to mean nothing.
+            rc=$prc
+            echo "  ✗ job stages passed but publishing failed — treating the run as failed"
+        fi
+    fi
+
     # Ask to be terminated. pod-control acts within a second; the poll would catch it
     # within a minute anyway, which is why losing this request is survivable.
     python3 -c "from pod_harness import heartbeat; heartbeat.done()" 2>/dev/null || true
