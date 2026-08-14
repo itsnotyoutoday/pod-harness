@@ -182,11 +182,59 @@ class ObjectMount(MountStrategy):
         pulled = []
         try:
             st = self._storage()
+            # Fetch concurrently and within a disk budget measured from the pod, not
+            # assumed. A remote object costs ~30ms, so pulling 40,000 of them one at a
+            # time measures ~8 MB/s and looks like broken storage; 32-way it measures
+            # ~125 MB/s. The budget matters because the image itself already occupies the
+            # container disk — 6 GB for the MFA image against a 20 GB cap — so "how much
+            # can I hold" is a question only the running pod can answer.
+            from .chunks import Item, plan
+            from .parallel import pmap
+
+            items = []
             for src in spec.get("sources", []):
                 rel = src.get("path") or f"raw/{src['id']}"
                 key = f"{self.prefix}/{rel}".strip("/")
-                st.download_prefix(key, landing / rel)
                 pulled.append(key)
+                cfg = st.require()
+                for page in st.client.get_paginator("list_objects_v2").paginate(
+                        Bucket=cfg.bucket, Prefix=key.rstrip("/") + "/"):
+                    for o in page.get("Contents", []):
+                        r = o["Key"][len(self.prefix.rstrip("/")) + 1:] if self.prefix \
+                            else o["Key"]
+                        items.append(Item(key=o["Key"], rel=r, size=o["Size"],
+                                          # group by source: a stage that reads one source
+                                          # must see all of it, never half.
+                                          group=src.get("id") or rel))
+
+            chunks, why = plan(items, path=str(self.scratch))
+            print(f"    mount: {why}", flush=True)
+            if len(chunks) > 1:
+                print(f"    mount: the working set does not fit at once — the job must "
+                      f"process it in {len(chunks)} passes, or run on more disk",
+                      flush=True)
+
+            cfg = st.require()
+
+            def _get(it):
+                dest = landing / it.rel
+                if dest.exists() and it.size and dest.stat().st_size == it.size:
+                    return 0
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                import shutil as _sh
+                with open(dest, "wb") as f:
+                    _sh.copyfileobj(
+                        st.client.get_object(Bucket=cfg.bucket, Key=it.key)["Body"], f)
+                return 1
+
+            res = pmap(_get, chunks[0].items if chunks else [], workers=32,
+                       label="fetch", use_threads=True)
+            if res.errors:
+                raise RuntimeError(
+                    f"{len(res.errors)} object(s) failed to fetch; first: "
+                    f"{res.errors[0][2][:140]}\n"
+                    f"  Refusing to start with an incomplete working set — a partial "
+                    f"corpus produces partial results that look whole.")
         except Exception as exc:
             return {"ready": False, "strategy": self.kind, "missing": [],
                     "error": f"{type(exc).__name__}: {exc}",
