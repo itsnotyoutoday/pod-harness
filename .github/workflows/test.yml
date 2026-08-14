@@ -39,6 +39,14 @@ jobs:
           PYTHONPATH=src python3 docker/assert_independence.py
           PYTHONPATH=src python3 docker/assert_env.py
 
+      # The harness scripts, EXECUTED rather than parsed. A NameError only raises when the
+      # line runs, so ast.parse and the import guards all passed while podh-publish crashed
+      # on a pod and lost a finished run's entire output.
+      - name: Harness scripts run
+        run: |
+          python3 -m pip install --quiet pytest boto3
+          PYTHONPATH=src python3 -m pytest tests/ -q
+
       - name: Build harness test image
         run: docker build -f docker/test.Dockerfile -t pod-harness-test .
 

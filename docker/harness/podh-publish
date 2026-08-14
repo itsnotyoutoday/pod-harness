@@ -73,6 +73,12 @@ def main() -> int:
     # Each tree keeps its own key prefix because they have different retention: a run's
     # output is prunable by age, a derived artifact is expensive and reusable, a promoted
     # profile is pointed at by `current` and kept.
+    # The job id names the run's output prefix. This was used and never defined — a
+    # NameError that crashed publish before it uploaded anything, so a run whose seven
+    # stages all passed lost its entire product and reported rc=1 with no visible reason.
+    job = (spec.get("job_id") or os.environ.get("PODH_JOB_ID")
+           or spec.get("idempotency_key") or "unknown")
+
     # The MOUNT root, not the workspace. With mount kind object the workload lives under
     # <workspace>/scratch/, so publishing <workspace>/assets would look at a directory the
     # job never wrote to — which is exactly how assets/derived stayed empty while the
