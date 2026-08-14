@@ -98,11 +98,21 @@ def main() -> int:
     # that back the download dies with the pod — one 2,142 MB source was measured arriving
     # at 0.05 MB/s from its origin. But the tree already holds 11 GB, so re-uploading it
     # every run would cost far more than it saves. Only what the store lacks is sent.
+    # Ordered by VALUE PER BYTE, smallest and least replaceable first.
+    #
+    # This ran derived-before-profiles, and a run was interrupted while pushing 110 MB of
+    # normalized audio — so the 20 KB profile, the thing the whole pipeline exists to
+    # produce, was still queued behind it and was lost. The audio is reproducible from
+    # inputs we still hold; the profile is the answer.
+    #
+    # A publish can always be cut short — a reap, a spot eviction, a network fault — so the
+    # order is a policy about what survives a partial publish, not a preference.
     trees = [
-        (out_root, f"runs/{job}/out", False),
-        (f"{ws}/assets/derived", "assets/derived", False),
-        (f"{ws}/assets/profiles", "assets/profiles", False),
-        (corpus_root and f"{corpus_root}/raw" or f"{ws}/corpus/raw", "corpus/raw", True),
+        (f"{ws}/assets/profiles", "assets/profiles", False),          # ~20 KB, the answer
+        (out_root, f"runs/{job}/out", False),                         # ~16 MB, this run
+        (f"{ws}/assets/derived", "assets/derived", False),            # ~110 MB, reproducible
+        (corpus_root and f"{corpus_root}/raw" or f"{ws}/corpus/raw",  # inputs, mostly present
+         "corpus/raw", True),
     ]
 
     m = for_spec(spec)

@@ -94,6 +94,15 @@ def test_publish_runs_and_covers_every_tree():
     assert by_prefix["corpus/raw"][2] is True, "corpus/raw lost skip_existing"
     assert by_prefix["runs/job_TEST/out"][2] is False
 
+    # Order is a policy about what survives a PARTIAL publish, not a preference. A run was
+    # cut short while pushing 110 MB of reproducible audio, and the 20 KB profile — the
+    # thing the pipeline exists to produce — was still queued behind it and was lost.
+    order = [c[1] for c in fake.calls]
+    assert order.index("assets/profiles") < order.index("assets/derived"), \
+        "the irreplaceable profile must publish before the reproducible audio"
+    assert order.index("runs/job_TEST/out") < order.index("assets/derived"), \
+        "this run's results must publish before the reproducible audio"
+
 
 def test_publish_fails_when_nothing_was_produced():
     """Seven green stages over an empty output tree must NOT be a successful run."""
