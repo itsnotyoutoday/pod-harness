@@ -219,6 +219,23 @@ class EventLog:
                     "without inventing an object key")
             st.put(f"{prefix}/status.json", self.status_path.read_bytes(),
                    where="events.EventLog._mirror")
+
+            # The console and the event stream too, not only the snapshot.
+            #
+            # With a mounted volume these files ARE objects already, so mirroring them
+            # looked redundant. Without one they live on the pod and die with it — and the
+            # first full pipeline run failed with a one-line error that was readable only
+            # in status.json by luck. "You cannot see what it is doing" is the problem
+            # this harness exists to solve; leaving the log on a disposable machine
+            # reintroduces it.
+            for name, path in (("events.jsonl", self.events_path),
+                               ("console.log", self.dir / "console.log")):
+                try:
+                    if path and path.exists():
+                        st.put(f"{prefix}/{name}", path.read_bytes(),
+                               where="events.EventLog._mirror")
+                except Exception:
+                    pass          # the snapshot is the one that must not be lost
             self._mirror_error = None
         except Exception as exc:
             # Non-fatal, but NOT invisible. Swallowing this silently is how a mirror stays
