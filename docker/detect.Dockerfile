@@ -92,7 +92,7 @@ COPY contract.json /app/contract.json
 RUN echo "=== ABI check ===" \
  && python -c "\
 import numpy, scipy, scipy.stats, scipy.linalg, sklearn, sklearn.ensemble, sys; \
-import pod_harness, pod_harness.framework, pod_harness.execute_job, pod_harness.capabilities; \
+import pod_harness, pod_harness.framework, pod_harness.execute_job, pod_harness.stage_manifest; \
 print('numerical stack imports OK on', sys.version.split()[0]); \
 print('numpy', numpy.__version__, '| scipy', scipy.__version__, \
       '| sklearn', sklearn.__version__)"

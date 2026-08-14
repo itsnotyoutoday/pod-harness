@@ -71,7 +71,7 @@ jobs:
           pip install -q "git+https://github.com/itsnotyoutoday/pod-harness.git@${{ inputs.pod_harness_ref }}"
           # Run from the code root so the workload's own package is importable.
           cd "${{ inputs.code_dir }}"
-          PYTHONPATH=. python -m pod_harness.capabilities "${{ inputs.stages_from }}" \
+          PYTHONPATH=. python -m pod_harness.stage_manifest "${{ inputs.stages_from }}" \
             -o capabilities.json --rev "${GITHUB_SHA}"
           cat capabilities.json
 

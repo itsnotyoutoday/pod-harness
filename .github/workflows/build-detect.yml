@@ -91,5 +91,5 @@ jobs:
           # rebuilt a conda environment. Layering was never the problem: scripts are
           # copied last, so a script change touches a handful of tiny layers PROVIDED the
           # layers beneath them survive.
-          cache-from: type=registry,ref=ghcr.io/${{ steps.meta.outputs.owner }}/lingua-detect:buildcache
+          cache-from: type=registry,ref=ghcr.io/${{ steps.meta.outputs.owner }}/lingua-detect:buildcache,ignore-error=true
           cache-to: type=registry,ref=ghcr.io/${{ steps.meta.outputs.owner }}/lingua-detect:buildcache,mode=max

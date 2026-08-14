@@ -13,17 +13,24 @@ That file is what makes three things possible off-pod:
     shallow dry-run     rejects a typo'd stage name on a laptop, for free, before any spend
     wiring validation   catches a pipeline whose stages cannot satisfy each other's inputs
 
+## The name
+
+`stage_manifest`, not `capabilities`: `pod_loader.capabilities` already means what the
+PROVIDER can do (RunPod is not true S3, batch delete takes 307s). This is what a WORKLOAD's
+stages are. The independence guard flagged the collision before the ambiguity could cost
+anyone an afternoon. The emitted file keeps the name `capabilities.json`, which is what the
+control plane and the plan both call it.
+
 ## Why it was missing
 
-`publish-code.yml` has called `python -m pod_harness.capabilities` since it was written, and
-this module did not exist — so every workload's publish job failed at that step. lingua-
+`publish-code.yml` has called this since it was written and it did not exist — so every workload's publish job failed at that step. lingua-
 trainer and lingua-detect both. The reusable workflow documented a contract that nothing
 implemented, which is the same shape as the other defects this system has had: a step that
 looks wired, reports nothing, and is believed.
 
 ## Usage
 
-    python -m pod_harness.capabilities trainer.stages:STAGES -o capabilities.json --rev SHA
+    python -m pod_harness.stage_manifest trainer.stages:STAGES -o capabilities.json --rev SHA
 """
 from __future__ import annotations
 
