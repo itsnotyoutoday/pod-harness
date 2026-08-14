@@ -32,6 +32,16 @@ class Acquire(Stage):
         corpus, _, _ = _roots()
         sid = (ctx.params.get("sources") or [{}])[0].get("id", "src")
         found = sorted(p.name for p in (corpus / "raw" / sid).glob("*.wav"))
+        # Synthesise when there is no corpus on disk.
+        #
+        # This fixture serves two masters: the API tests drive it through /v1 with an empty
+        # params and no files anywhere, while the layout end-to-end seeds a real corpus and
+        # checks what lands in the store. Making it filesystem-dependent broke the first —
+        # acquire found nothing, produced an empty `sources`, and verification correctly
+        # rejected it. A fixture that only works when a corpus exists cannot test the case
+        # where one does not.
+        if not found:
+            found = [f"f{i}.wav" for i in range(4)]
         ctx.artifacts.setdefault("sources", []).extend(found)
         return {"source": sid, "n": len(found)}
 
@@ -46,7 +56,8 @@ class Normalize(Stage):
         sid = (ctx.params.get("sources") or [{}])[0].get("id", "src")
         out = derived / "normalized" / sid
         out.mkdir(parents=True, exist_ok=True)
-        srcs = sorted(p.name for p in (corpus / "raw" / sid).glob("*.wav"))
+        srcs = sorted(p.name for p in (corpus / "raw" / sid).glob("*.wav")) \
+            or list(ctx.get("sources") or [])
         for i, s in enumerate(srcs):
             ctx.progress(i + 1, len(srcs), note=s)
             (out / s).write_bytes(b"NORM" + bytes(200))
