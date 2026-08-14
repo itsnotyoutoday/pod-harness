@@ -272,11 +272,17 @@ jobs:
           tags: |
             ghcr.io/${{ steps.meta.outputs.owner }}/${{ matrix.image }}:latest
             ghcr.io/${{ steps.meta.outputs.owner }}/${{ matrix.image }}:${{ steps.meta.outputs.sha_short }}
-          # Per-image cache scope so matrix jobs do not evict each other. NOTE: the GHA
-          # cache is capped at 10 GB per repo — once a second heavy image lands here,
-          # switch to registry cache (type=registry,ref=...:buildcache) which has no cap.
-          cache-from: type=gha,scope=${{ matrix.image }}
-          cache-to: type=gha,mode=max,scope=${{ matrix.image }}
+          # REGISTRY cache, not GHA cache.
+          #
+          # GitHub's Actions cache is capped at 10 GB per REPOSITORY. The MFA image is 6 GB
+          # on its own, so the two images evicted each other constantly and every build
+          # started cold — which is why editing a shell script rebuilt a conda environment.
+          # The layering was never the problem: scripts are copied last, so a script change
+          # touches about five tiny layers, PROVIDED the layers beneath are still cached.
+          #
+          # Registry cache has no such cap and lives beside the image it belongs to.
+          cache-from: type=registry,ref=ghcr.io/${{ steps.meta.outputs.owner }}/${{ matrix.image }}:buildcache
+          cache-to: type=registry,ref=ghcr.io/${{ steps.meta.outputs.owner }}/${{ matrix.image }}:buildcache,mode=max
 
       - name: Summary
         run: |
