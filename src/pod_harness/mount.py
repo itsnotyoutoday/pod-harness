@@ -144,8 +144,11 @@ class VolumeMount(MountStrategy):
     def launch_env(self, spec: dict) -> dict:
         """Export each declared root as LINGUA_<NAME>, derived from the name the loader
         chose rather than from a list this harness carries."""
-        return {f"LINGUA_{k.upper()}": str(self.root / v)
-                for k, v in mount_roots(spec).items()}
+        env = {}
+        for k, v in mount_roots(spec).items():
+            env[f"PODH_{k.upper()}"] = str(self.root / v)
+            env[f"LINGUA_{k.upper()}"] = str(self.root / v)
+        return env
 
 
 class ObjectMount(MountStrategy):
@@ -207,6 +210,16 @@ class ObjectMount(MountStrategy):
                                           # must see all of it, never half.
                                           group=src.get("id") or rel))
 
+            # A declared root that names a FILE is a single object the workload needs —
+            # the source manifest, a dictionary, a ruleset. sources/ covers directories;
+            # nothing covered these, so acquire started with no manifest and died looking
+            # for a path that only ever existed on the old volume layout.
+            for name, relpath in rel_roots.items():
+                if not Path(relpath).suffix:
+                    continue
+                key = f"{self.prefix}/{relpath}".strip("/") if self.prefix else relpath
+                items.append(Item(key=key, rel=relpath, size=0, group=f"_file_{name}"))
+
             chunks, why = plan(items, path=str(self.scratch))
             print(f"    mount: {why}", flush=True)
             if len(chunks) > 1:
@@ -264,8 +277,14 @@ class ObjectMount(MountStrategy):
         """
         from .objectstore import resolve_config
         cfg = resolve_config(self.profile)
-        env = {f"LINGUA_{k.upper()}": str(self.scratch / v)
-               for k, v in mount_roots(spec).items()}
+        # Both prefixes, deliberately. The framework's own variables are PODH_*, but a
+        # workload reads whatever it has always read — the trainer looks for
+        # LINGUA_MANIFEST — and a harness that silently renames a workload's variables
+        # breaks it for no benefit at all.
+        env = {}
+        for k, v in mount_roots(spec).items():
+            env[f"PODH_{k.upper()}"] = str(self.scratch / v)
+            env[f"LINGUA_{k.upper()}"] = str(self.scratch / v)
         env["PODH_MOUNT_KIND"] = "object"
         if cfg is not None:
             env.update({"PODH_S3_BUCKET": cfg.bucket,
