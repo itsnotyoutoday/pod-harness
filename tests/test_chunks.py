@@ -59,4 +59,15 @@ check("nothing left on disk afterwards", not any(root.glob("chunk*")))
 shutil.rmtree(root, ignore_errors=True)
 
 print(f"\n  {sum(ok)}/{len(ok)} passed")
-sys.exit(0 if all(ok) else 1)
+
+# Guarded so pytest can COLLECT this file without the module-level sys.exit aborting the
+# whole session — importing a module that exits is an INTERNALERROR, not a test failure,
+# and it took the entire suite down rather than reporting anything.
+#
+# Still runnable directly: `python3 tests/test_chunks.py` behaves exactly as before.
+def test_chunks_selftest():
+    assert all(ok), f"{len(ok) - sum(ok)} chunk check(s) failed"
+
+
+if __name__ == "__main__":
+    sys.exit(0 if all(ok) else 1)
