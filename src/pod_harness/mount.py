@@ -214,20 +214,45 @@ class ObjectMount(MountStrategy):
             # the source manifest, a dictionary, a ruleset. sources/ covers directories;
             # nothing covered these, so acquire started with no manifest and died looking
             # for a path that only ever existed on the old volume layout.
-            for name, relpath in rel_roots.items():
-                if not Path(relpath).suffix:
-                    continue
+            # Single-file roots are fetched SEPARATELY, and to their declared path.
+            #
+            # They were appended to `items` and fetched with the sources, which put them
+            # under `landing` — the first declared root. So the manifest declared as
+            # "corpus_research.json" landed at scratch/corpus/corpus_research.json while
+            # every consumer was told scratch/corpus_research.json. Fetched successfully,
+            # to the wrong place, reported ready.
+            #
+            # They also do not belong in the chunk plan at all: chunking exists to bound a
+            # corpus against container disk, and a manifest is kilobytes. Putting them in
+            # the plan meant they could land in a chunk that never gets fetched.
+            cfg = st.require()
+            file_roots = {n: r for n, r in rel_roots.items() if Path(r).suffix}
+            for name, relpath in file_roots.items():
                 key = f"{self.prefix}/{relpath}".strip("/") if self.prefix else relpath
-                items.append(Item(key=key, rel=relpath, size=0, group=f"_file_{name}"))
+                dest = self.scratch / relpath
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                import shutil as _sh
+                with open(dest, "wb") as f:
+                    _sh.copyfileobj(
+                        st.client.get_object(Bucket=cfg.bucket, Key=key)["Body"], f)
+                print(f"    mount: {name} <- {key} ({dest.stat().st_size:,} bytes)",
+                      flush=True)
 
             chunks, why = plan(items, path=str(self.scratch))
             print(f"    mount: {why}", flush=True)
-            if len(chunks) > 1:
-                print(f"    mount: the working set does not fit at once — the job must "
-                      f"process it in {len(chunks)} passes, or run on more disk",
-                      flush=True)
 
-            cfg = st.require()
+            # Fetching only chunk 0 while reporting ready=True is the failure this project
+            # exists to catch: the job starts against a fraction of its inputs and every
+            # stage succeeds over it. If the working set does not fit, say so and refuse —
+            # the caller can raise disk or the workload can use chunks.process(), but it
+            # must not be a silent truncation dressed as success.
+            if len(chunks) > 1:
+                return {"ready": False, "strategy": self.kind,
+                        "chunks": len(chunks),
+                        "error": f"the working set needs {len(chunks)} passes to fit on "
+                                 f"this disk; prepare() materialises one",
+                        "hint": "raise disk_gb, narrow params.sources, or have the stage "
+                                "iterate with chunks.process() which is built for this"}
 
             def _get(it):
                 dest = landing / it.rel
@@ -253,8 +278,23 @@ class ObjectMount(MountStrategy):
                     "error": f"{type(exc).__name__}: {exc}",
                     "hint": "check PODH_S3_* env on the compute — ObjectMount needs "
                             "credentials at launch, unlike VolumeMount"}
+        # Verify what was promised actually exists, rather than inferring it from "no
+        # exception was raised". Every declared root is a path a stage will open; a root
+        # that is absent here becomes a FileNotFoundError three stages later, with nothing
+        # in the log connecting it back to the fetch that quietly did not happen.
+        #
+        # This is verify_outputs() applied to the mount. The stage engine has caught
+        # "reported success, produced nothing" three times; the mount had no equivalent.
+        missing = [f"{k}={v}" for k, v in roots.items() if not Path(v).exists()]
+        if missing:
+            return {**{k: str(v) for k, v in roots.items()},
+                    "ready": False, "strategy": self.kind, "missing": missing,
+                    "error": "declared root(s) absent after prepare: " + ", ".join(missing),
+                    "hint": "the object may not exist under mount.root — check the key "
+                            "the log printed against what is actually in the bucket"}
         return {**{k: str(v) for k, v in roots.items()},
-                "ready": True, "pulled": pulled, "strategy": self.kind}
+                "ready": True, "pulled": pulled, "strategy": self.kind,
+                "objects": len(items)}
 
     def publish(self, spec: dict, out_root: Path) -> dict:
         try:
