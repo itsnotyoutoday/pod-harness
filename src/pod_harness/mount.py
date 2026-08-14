@@ -182,7 +182,18 @@ class ObjectMount(MountStrategy):
         from .objectstore import get_storage
         return get_storage(self.profile)
 
-    def prepare(self, spec: dict) -> dict:
+    def prepare(self, spec: dict, *, fetch_sources: bool = True) -> dict:
+        """Materialise the working set. With fetch_sources=False, only the file roots.
+
+        Boot-time prepare must NOT pull the sources when the spec is chunked: the whole
+        point of chunking is that the corpus never has to be resident at once, and asking
+        for it anyway is asking the disk-fit guard to refuse. That is precisely what
+        happened on the first full three-source run — 11.09 GB requested against a 20 GB
+        container disk, correctly refused, before a single chunk had a chance to run.
+
+        The single-file roots (a manifest, a ruleset) are still fetched, because they are
+        kilobytes, every chunk needs them, and re-fetching per chunk would be waste.
+        """
         rel_roots = mount_roots(spec)
         roots = {k: self.scratch / v for k, v in rel_roots.items()}
         for k, d in roots.items():
@@ -212,6 +223,8 @@ class ObjectMount(MountStrategy):
             # 11 GB from the original hosts at 0.05 MB/s, data that was already sitting in
             # our own bucket. The pod would have hit its 8-hour budget on the first file.
             srcs = (spec.get("params") or {}).get("sources") or spec.get("sources") or []
+            if not fetch_sources:
+                srcs = []          # the chunk loop fetches these, one source at a time
 
             items = []
             for src in srcs:

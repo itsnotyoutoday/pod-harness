@@ -50,7 +50,14 @@ def main() -> int:
         return 0
 
     m = for_spec(spec)
-    r = m.prepare(spec)
+    # A chunked spec fetches its sources per chunk, inside the run. Prefetching them here
+    # would ask for the entire corpus at once — the thing chunking exists to avoid — and
+    # the disk-fit guard would refuse, as it did on the first full three-source run.
+    chunked = bool((spec.get("mount") or {}).get("chunk_by"))
+    if chunked:
+        print("  prepare: chunked spec — fetching shared roots only; "
+              "each chunk pulls its own source")
+    r = m.prepare(spec, fetch_sources=not chunked)
 
     ready = r.get("ready", True)
     fetched = r.get("fetched") or r.get("pulled") or []
