@@ -339,12 +339,45 @@ print('  fetched', key)
         fi
     fi
 
-    # Ask to be terminated. pod-control acts within a second; the poll would catch it
-    # within a minute anyway, which is why losing this request is survivable.
-    python3 -c "from pod_harness import heartbeat; heartbeat.done()" 2>/dev/null || true
+    # Ask to be terminated, and SAY whether it worked.
+    #
+    # This was `2>/dev/null || true` — the one call responsible for stopping the billing was
+    # the one call whose failure was silenced. A finished pod then idled for 20 minutes at
+    # $0.48/hr with nothing in the log to explain why, and the comment underneath claimed
+    # the poll would catch it within a minute. It would not have: see below.
+    set +e
+    dmsg=$(python3 -c "
+from pod_harness import heartbeat
+r = heartbeat.done()
+print('terminate requested' if r else 'NOT SENT — no control url or pod id')
+" 2>&1)
+    drc=$?
+    set -e
+    if [ "$drc" -eq 0 ]; then
+        echo "  control: $dmsg"
+    else
+        echo "  ! control: could not request termination — $(echo "$dmsg" | tail -2 | tr '\n' ' ')"
+        echo "    This pod will keep billing until the watchdog reaps it. Stopping the"
+        echo "    heartbeat below is what lets that happen."
+    fi
+
+    # Stop heartbeating now that the work is done.
+    #
+    # The heartbeat thread ran for the container's whole life, so an idling FINISHED pod
+    # kept reporting itself healthy — and the watchdog's primary signal is "was reporting,
+    # went quiet". A pod that never goes quiet is never stuck, so the safety net could not
+    # fire and the only remaining backstop was the 8-hour budget.
+    #
+    # Going quiet deliberately is what turns the watchdog from a formality into a bound:
+    # if the terminate request above failed, the pod now looks stuck within
+    # stale_after_sec and gets reaped for it.
+    touch /tmp/podh-stop-heartbeat
 
     # Then hold the container open. Idling costs pennies a minute and is bounded by the
     # reaper; restarting costs a whole job every time and is bounded by nothing.
+    #
+    # "Bounded by the reaper" is only true because the heartbeat stopped above. While it
+    # kept running, this loop was bounded by nothing except the budget.
     echo "  idling until terminated externally — an exiting container gets restarted,"
     echo "  which would run this job again from the top."
     while true; do sleep 300; done

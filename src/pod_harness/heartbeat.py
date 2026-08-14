@@ -144,7 +144,18 @@ def start(interval_sec: float = 60.0) -> threading.Thread | None:
               "every heartbeat will be rejected", flush=True)
 
     def loop():
+        import os as _os
         while True:
+            # A finished pod must go QUIET, not keep insisting it is healthy.
+            #
+            # The watchdog's primary signal is "was reporting, stopped reporting". A pod
+            # that heartbeats forever is by definition never stuck, so a finished-but-alive
+            # pod was invisible to the one mechanism meant to bound it — leaving only the
+            # 8-hour budget, which is a ceiling and not a reaper.
+            if _os.path.exists("/tmp/podh-stop-heartbeat"):
+                print("  [heartbeat] job finished — going quiet so the watchdog can "
+                      "reap this pod if termination did not take", flush=True)
+                return
             alive()
             time.sleep(interval_sec)
 
