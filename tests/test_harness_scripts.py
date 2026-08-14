@@ -145,3 +145,96 @@ def test_logs_never_change_the_outcome():
     (d / "console.log").write_text("hello")
     g = _load("podh-logs")
     assert g["main"]() == 0        # no store configured in the test env
+
+
+def test_chunk_scoped_stages_run_once_per_chunk():
+    """The disk-bound case: heavy stages per chunk, the rest once over the accumulation.
+
+    An 11 GB corpus does not fit beside its outputs on a 20 GB container disk, and RunPod
+    caps that disk at 20. This is the mechanism that makes the full corpus runnable at all,
+    so it is worth pinning the ORDER — publish before evict, reduce after every chunk.
+    """
+    from pod_harness.framework import Context, Runner, Stage, Verification
+
+    seen = []
+
+    class Heavy(Stage):
+        name, number, scope = "heavy", 1, "chunk"
+        produces = ("m",)
+
+        def execute(self, ctx):
+            seen.append(("heavy", ctx.params.get("only")))
+            ctx.artifacts.setdefault("m", []).append(ctx.params.get("only"))
+            return {"n": 1}
+
+        def verify_outputs(self, ctx):
+            return Verification(ok=True)
+
+    class Reduce(Stage):
+        name, number = "reduce", 2
+        requires = ("m",)
+
+        def execute(self, ctx):
+            seen.append(("reduce", tuple(ctx.get("m"))))
+            return {"total": len(ctx.get("m"))}
+
+        def verify_outputs(self, ctx):
+            return Verification(ok=True)
+
+    ctx = Context(region="r")
+    ctx.chunks = ("a", "b", "c")
+    ctx.enter_chunk = lambda k: (seen.append(("enter", k)),
+                                 ctx.params.__setitem__("only", k))
+    ctx.exit_chunk = lambda k: seen.append(("exit", k))
+
+    r = Runner("t", [Heavy(), Reduce()]).run(ctx)
+    assert r["ok"] and r["chunks"] == 3
+    assert [s for s in seen] == [
+        ("enter", "a"), ("heavy", "a"), ("exit", "a"),
+        ("enter", "b"), ("heavy", "b"), ("exit", "b"),
+        ("enter", "c"), ("heavy", "c"), ("exit", "c"),
+        ("reduce", ("a", "b", "c"))], seen
+    # every chunk's stage result is attributed to its chunk, or a failure cannot be located
+    assert {s.get("chunk") for s in r["stages"] if s["stage"] == "heavy"} == {"a", "b", "c"}
+
+
+def test_a_runner_without_chunk_stages_is_unchanged():
+    """Chunking answers a disk limit; a workload that fits must not pay for it."""
+    from pod_harness.framework import Context, Runner, Stage, Verification
+
+    class Plain(Stage):
+        name, number = "plain", 1
+
+        def execute(self, ctx):
+            return {"ran": True}
+
+        def verify_outputs(self, ctx):
+            return Verification(ok=True)
+
+    ctx = Context(region="r")
+    ctx.chunks = ("a", "b")            # present, but no stage is chunk-scoped
+    r = Runner("t", [Plain()]).run(ctx)
+    assert r["ok"] and "chunks" not in r and len(r["stages"]) == 1
+
+
+def test_exit_chunk_runs_even_when_a_stage_fails():
+    """A chunk's completed work must not be discarded because a later stage failed."""
+    from pod_harness.framework import Context, Runner, Stage, Verification
+
+    left = []
+
+    class Boom(Stage):
+        name, number, scope = "boom", 1, "chunk"
+
+        def execute(self, ctx):
+            raise RuntimeError("stage exploded")
+
+        def verify_outputs(self, ctx):
+            return Verification(ok=True)
+
+    ctx = Context(region="r")
+    ctx.chunks = ("a", "b")
+    ctx.enter_chunk = lambda k: None
+    ctx.exit_chunk = lambda k: left.append(k)
+    Runner("t", [Boom()]).run(ctx)
+    assert "a" in left, "publish/evict was skipped when a stage raised"

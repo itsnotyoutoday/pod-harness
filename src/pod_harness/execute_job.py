@@ -90,7 +90,7 @@ def context_from_spec(spec: dict) -> Context:
     needing to know the field exists.
     """
     p = spec.get("params") or {}
-    return Context(
+    ctx = Context(
         region=p.get("region") or "_default",
         base=p.get("base"),
         limit=p.get("limit"),
@@ -98,6 +98,72 @@ def context_from_spec(spec: dict) -> Context:
         opts=p.get("opts") or {},
         params=p,
     )
+    attach_chunks(spec, ctx)
+    return ctx
+
+
+def attach_chunks(spec: dict, ctx: Context) -> None:
+    """Give the Context its chunk keys and the hooks that materialise them.
+
+    Only when the spec asks for it — `mount.chunk_by: "source"`. Chunking answers a disk
+    limit (RunPod caps the container disk at 20 GB, against an 11 GB corpus), and a workload
+    that fits should not pay for the machinery.
+
+    One chunk per SOURCE, because that is the smallest unit alignment can run over without
+    splitting a speaker across two partial alignments that each look whole.
+
+    The engine still learns nothing about mounts: it calls hooks. The hooks are built here,
+    at the boundary where the spec is already known, and they degrade to no-ops when the
+    mount cannot materialise anything — a local run with the corpus already on disk needs
+    no fetching and should not fail for lack of it.
+    """
+    mount = spec.get("mount") or {}
+    if (mount.get("chunk_by") or "") != "source":
+        return
+
+    sources = list((spec.get("params") or {}).get("sources") or [])
+    keys = [(s.get("id") if isinstance(s, dict) else s) for s in sources]
+    keys = [k for k in keys if k]
+    if len(keys) < 2:
+        return                      # one chunk is just an ordinary run
+
+    by_id = {(s.get("id") if isinstance(s, dict) else s): s for s in sources}
+
+    try:
+        from .mount import for_spec
+        m = for_spec(spec)
+    except Exception:
+        m = None
+
+    def enter(key):
+        # Narrow params to this chunk BEFORE fetching, so the stages and the fetch agree
+        # about what "this chunk" means rather than deriving it twice.
+        ctx.params["sources"] = [by_id[key]]
+        if m is None:
+            return
+        try:
+            r = m.prepare({**spec, "params": {**(spec.get("params") or {}),
+                                              "sources": [by_id[key]]}})
+            if not r.get("ready", True):
+                print(f"  ! chunk {key}: {r.get('error')}", flush=True)
+        except Exception as exc:
+            print(f"  ! chunk {key}: {type(exc).__name__}: {exc}", flush=True)
+
+    def leave(key):
+        # Publish BEFORE evicting. Reversing these loses the outputs, and once the inputs
+        # are gone too there is nothing left to recompute them from.
+        if m is None:
+            return
+        try:
+            m.publish(spec, ctx.params.get("out_root") or "")
+        except Exception as exc:
+            print(f"  ! chunk {key} publish: {type(exc).__name__}: {exc}", flush=True)
+
+    ctx.chunks = tuple(keys)
+    ctx.enter_chunk = enter
+    ctx.exit_chunk = leave
+    print(f"  chunked: {len(keys)} chunk(s), one source at a time — {', '.join(keys)}",
+          flush=True)
 
 
 def run(spec: dict, *, job_id: str = "", reporter: Any = None,
