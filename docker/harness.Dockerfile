@@ -78,7 +78,7 @@ RUN set -eux; \
 
 # One COPY for every script and the API. Seven COPYs holding 25 KB would be six wasted
 # layers. `chmod` rides along rather than costing its own RUN.
-COPY --chmod=0755 docker/harness/podh-init docker/harness/podh-mount docker/harness/podh-roots docker/harness/podh-prepare \
+COPY --chmod=0755 docker/harness/podh-init docker/harness/podh-mount docker/harness/podh-code docker/harness/podh-roots docker/harness/podh-prepare \
      docker/harness/podh-preflight docker/harness/podh-watchdog \
      /usr/local/bin/
 COPY docker/harness/Caddyfile /etc/caddy/Caddyfile

@@ -1,0 +1,56 @@
+"""Rebuild the workload code this job pinned, into PODH_CODE_ROOT.
+
+Two layouts, because revisions published before the content-addressed store still exist and
+must stay launchable — "republish everything" is a demand, not a migration:
+
+    PODH_CODE_JOB       code/<workload>/jobs/<job_id>   pointer → tree → one packed object
+    PODH_CODE_ROOT_KEY  code/<workload>/<rev>           a directory of individual objects
+
+The pointer is preferred when present. The fallback is not a nicety: a pod running a new
+image against an older published revision would otherwise fail with a bare 404 on an
+object that was never supposed to exist.
+
+Written as a file rather than inline in podh-init because podh-init already nests
+heredocs, and a second one sharing a terminator silently swallows the rest of the script —
+a shell subtlety that has cost this project three separate incidents.
+"""
+import os
+import sys
+
+sys.path.insert(0, "/app")
+
+from pod_harness import codestore
+
+
+def main() -> int:
+    dest = os.environ.get("PODH_CODE_ROOT", "")
+    if not dest:
+        print("  code: PODH_CODE_ROOT unset — nothing to rebuild")
+        return 0
+
+    job_key = os.environ.get("PODH_CODE_JOB", "")
+    legacy = os.environ.get("PODH_CODE_ROOT_KEY", "")
+
+    try:
+        if job_key and "/jobs/" in job_key:
+            r = codestore.fetch(job_key, dest)
+            print(f"  code: tree {r['tree'][:12]} → {r['files']} file(s), "
+                  f"{r['verified']} verified")
+        elif legacy:
+            print(f"  code: legacy layout — listing {legacy}/")
+            r = codestore.fetch_legacy(legacy, dest)
+            print(f"  code: {r['files']} file(s) from the pre-pack layout")
+        else:
+            print("  code: neither PODH_CODE_JOB nor PODH_CODE_ROOT_KEY set")
+            return 0
+    except Exception as e:
+        # Non-zero so podh-init can be fatal about it. Continuing would run the image's
+        # baked code while reporting success against the wrong source, which is worse than
+        # stopping — the job would produce plausible results from code nobody chose.
+        print(f"  ✗ code: {type(e).__name__}: {e}")
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
