@@ -349,7 +349,11 @@ print('  fetched', key)
     dmsg=$(python3 -c "
 from pod_harness import heartbeat
 r = heartbeat.done()
-print('terminate requested' if r else 'NOT SENT — no control url or pod id')
+if r:
+    print('terminate requested')
+else:
+    e = heartbeat.last_error()
+    print('NOT SENT — ' + (e if e else 'no control url or pod id configured'))
 " 2>&1)
     drc=$?
     set -e

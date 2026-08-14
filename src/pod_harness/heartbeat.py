@@ -86,6 +86,15 @@ def _verify_pin(sock, expected: str) -> None:
             f"this pod was told to trust.")
 
 
+#: Why the last request failed, for callers that need to report rather than retry.
+_LAST_ERROR = ""
+
+
+def last_error() -> str:
+    """The most recent transport failure, or empty if there has not been one."""
+    return _LAST_ERROR
+
+
 def _post(path: str, body: dict, timeout: int = 10) -> dict | None:
     url, token, _ = _cfg()
     if not url:
@@ -102,8 +111,15 @@ def _post(path: str, body: dict, timeout: int = 10) -> dict | None:
                 if sock is not None:
                     _verify_pin(sock, ctx._podh_expected)
             return json.loads(r.read())
-    except Exception:
-        return None          # never fatal — the sweep still holds the deadline
+    except Exception as exc:
+        # Never fatal — the sweep still holds the deadline — but never SILENT either.
+        # This returned a bare None, so a caller could not tell "not configured" from
+        # "the request failed", and podh-init reported a termination failure as
+        # "no control url or pod id" while the url was plainly set. The one call
+        # responsible for stopping the billing was the one whose reason was discarded.
+        global _LAST_ERROR
+        _LAST_ERROR = f"{type(exc).__name__}: {exc}"
+        return None
 
 
 def alive(deadline_ts: float | None = None) -> dict | None:
