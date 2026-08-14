@@ -1,4 +1,4 @@
-# lingua-runner — THE framework image. Every other image is built on top of this one.
+# pod-harness — THE framework image. Every other image is built on top of this one.
 #
 # ## Why this exists
 #
