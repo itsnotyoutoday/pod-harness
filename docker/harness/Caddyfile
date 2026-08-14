@@ -34,7 +34,17 @@
 		format console
 	}
 
-	@authorized header X-Lingua-Token "{$LINGUA_API_TOKEN}"
+	# PODH_, not LINGUA_. This file was missed when the framework variables were renamed,
+	# and the failure was silent in the worst possible way: an unset {$...} expands to the
+	# empty string, so the matcher compared every request's token against "" and the file
+	# root became "". Caddy started, logged that it was serving, and reported healthy —
+	# while serving nothing. The container went dark at the same time as the pipeline
+	# began failing, so the one tool for diagnosing the failure was itself broken by it.
+	#
+	# The workload's own LINGUA_* variables are deliberately left alone; those belong to
+	# the pipeline, not the harness. The rule is: the harness reads PODH_, and anything in
+	# docker/harness/ that reads LINGUA_ is drift. assert_env.py enforces exactly that.
+	@authorized header X-Podh-Token "{$PODH_API_TOKEN}"
 
 	handle /v1/* {
 		# The API enforces the token itself too — belt and braces, because a
@@ -44,11 +54,19 @@
 	}
 
 	handle @authorized {
-		root * {$LINGUA_LOG_ROOT}
+		root * {$PODH_LOG_ROOT}
 		file_server browse
 	}
 
+	# Liveness, deliberately unauthenticated and deliberately BEFORE the API can matter.
+	# The previous arrangement had no unauthenticated route at all, so "is this pod
+	# serving?" and "is my token right?" and "is the API up?" all answered 404 — three
+	# very different problems wearing one indistinguishable symptom.
+	handle /alive {
+		respond "podh ok" 200
+	}
+
 	handle {
-		respond "unauthorized: set X-Lingua-Token" 401
+		respond "unauthorized: set X-Podh-Token" 401
 	}
 }

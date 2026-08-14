@@ -90,23 +90,19 @@ if [ -x /usr/local/bin/podh-seed-models ]; then
     /usr/local/bin/podh-seed-models || echo "  ! model seeding failed (continuing)"
 fi
 
-# -- 2b. data view --------------------------------------------------------------------
-# The container is TOLD how its data arrives (PODH_MOUNT_KIND) and arranges it: a bind
-# mount or network volume needs only verifying, FUSE needs mounting before anything can
-# read a path, object mode defers to each job. Same image, three modes, chosen at start.
-#
-# A failure here is fatal on purpose. Continuing would run the job against an empty
-# directory, and a stage that processes zero files can still report success — the failure
-# mode this project's whole verification framework exists to prevent.
-if [ -x /usr/local/bin/podh-mount ]; then
-    if ! /usr/local/bin/podh-mount; then
-        fatal "data view could not be established. Set PODH_MOUNT_KIND=object for the strategy that needs no host capabilities."
-    fi
-fi
-
 # -- 3. sidecars ----------------------------------------------------------------------
-# Caddy serves the static artefacts (console.log, status.json) and reverse-proxies /v1
-# to the API. One exposed port, one auth check, both kinds of traffic.
+# BEFORE the mount, deliberately, and this ordering is the whole point of the sidecars.
+#
+# They used to start after it. That made the pod dark for the entire duration of the
+# mount — minutes while an object mount fetches a working set — and permanently dark
+# whenever the mount FAILED, because a failed mount lands in fatal()'s idle loop and the
+# log server was still three steps away from starting. So the one situation where you
+# most need to read the console was the one situation guaranteed to serve nothing, and
+# from outside it is indistinguishable from a pod that never booted.
+#
+# Nothing here needs the mount. Caddy serves $PODH_WORKSPACE/runs, which is container
+# disk; console.log is already being written to it by the tee above. Starting them first
+# costs nothing and buys visibility into every subsequent step, including the failures.
 if [ -x /usr/local/bin/caddy ] && [ -f /etc/caddy/Caddyfile ]; then
     if [ -z "${PODH_API_TOKEN:-}" ]; then
         echo "  ! PODH_API_TOKEN unset — Caddy will reject every request."
@@ -131,6 +127,37 @@ if [ "$PODH_SERVE_API" = "1" ] && command -v uvicorn >/dev/null 2>&1; then
     echo "  api      127.0.0.1:$PODH_API_PORT (uvicorn)"
 else
     echo "  api      disabled (PODH_SERVE_API=$PODH_SERVE_API)"
+fi
+
+# -- 4. data view ----------------------------------------------------------------------
+# The container is TOLD how its data arrives (PODH_MOUNT_KIND) and arranges it: a bind
+# mount or network volume needs only verifying, FUSE needs mounting before anything can
+# read a path, object mode defers to each job. Same image, three modes, chosen at start.
+#
+# A failure here is fatal on purpose. Continuing would run the job against an empty
+# directory, and a stage that processes zero files can still report success — the failure
+# mode this project's whole verification framework exists to prevent.
+#
+# Fatal, but now VISIBLE: the log server above is already serving, so the reason is
+# readable over HTTP instead of dying with the pod.
+if [ -x /usr/local/bin/podh-mount ]; then
+    if ! /usr/local/bin/podh-mount; then
+        fatal "data view could not be established. Set PODH_MOUNT_KIND=object for the strategy that needs no host capabilities."
+    fi
+fi
+
+# Apply the roots the mount resolved from the spec.
+#
+# podh-mount runs as a CHILD process and a child cannot set its parent's environment, so
+# it writes them here instead. Without this line the roots were computed correctly, printed
+# correctly, and then discarded — the workload kept the image's baked defaults and looked
+# for the manifest at a path from the previous storage layout. The log said the right
+# answer while the job used the wrong one, which is the hardest kind of bug to see.
+if [ -f /tmp/podh-roots.env ]; then
+    set -a
+    . /tmp/podh-roots.env
+    set +a
+    echo "  roots:   applied $(grep -c '^export' /tmp/podh-roots.env) from the job spec"
 fi
 
 echo "  workload: $*"
@@ -243,8 +270,20 @@ print(f'  fetched {n} file(s) to {dest}')
     # that exits — so a finished job runs again, and again. Observed: 18 boots, 8 complete
     # runs of the same benchmark, which would have continued until the budget or somebody
     # noticed. Billing eight times for one answer.
+    # set +e around the job, and this is not a style choice.
+    #
+    # `set -e` is on for this whole script, so a job exiting non-zero killed podh-init
+    # right here — before `rc=$?`, before the heartbeat, and before the idle loop below
+    # that exists specifically to stop boot loops. The guard against restarting was
+    # unreachable in the only case that triggers a restart: failure.
+    #
+    # The result was the exact loop the idle loop was written to prevent, and worse than
+    # the original: 19 boots in five minutes, 58 identical acquire failures, still billing.
+    # A failing job is precisely when the container must stay up to be read.
+    set +e
     python3 -u -m "${PODH_ENTRY:-pod_harness.execute_job}" --spec "$PODH_JOB_SPEC"
     rc=$?
+    set -e
     echo "  job finished (exit $rc)"
 
     # Ask to be terminated. pod-control acts within a second; the poll would catch it

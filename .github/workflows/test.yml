@@ -37,6 +37,7 @@ jobs:
         run: |
           PYTHONPATH=src python3 docker/assert_contract.py
           PYTHONPATH=src python3 docker/assert_independence.py
+          PYTHONPATH=src python3 docker/assert_env.py
 
       - name: Build harness test image
         run: docker build -f docker/test.Dockerfile -t pod-harness-test .

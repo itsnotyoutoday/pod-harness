@@ -94,7 +94,14 @@ COPY contract.json /app/contract.json
 # one was only visible as a pod that billed for 13 minutes and served 404. Failing the
 # build is the cheapest place to find it.
 COPY docker/assert_independence.py /tmp/assert_independence.py
-RUN python /tmp/assert_independence.py && rm /tmp/assert_independence.py
+# The env guard needs the files it is checking, not the installed image — the Caddyfile
+# and podh-init as SOURCE, plus the contract that says which variables the loader supplies.
+COPY docker/assert_env.py /tmp/guard/docker/assert_env.py
+COPY docker/harness/Caddyfile docker/harness/podh-init /tmp/guard/docker/harness/
+COPY contract.json /tmp/guard/contract.json
+RUN python /tmp/assert_independence.py \
+ && python /tmp/guard/docker/assert_env.py \
+ && rm -rf /tmp/assert_independence.py /tmp/guard
 
 WORKDIR /app
 EXPOSE 8000

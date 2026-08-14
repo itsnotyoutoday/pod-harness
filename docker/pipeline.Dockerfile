@@ -210,10 +210,16 @@ RUN mkdir -p /workspace/corpus /workspace/runs /workspace/cache
 # on a different interpreter than `python3` resolves to. plexus added this after a real
 # incident where pip succeeded and the runtime still raised ModuleNotFoundError.
 COPY docker/assert_independence.py /tmp/assert_independence.py
+# The env guard needs the files it is checking, not the installed image — the Caddyfile
+# and podh-init as SOURCE, plus the contract that says which variables the loader supplies.
+COPY docker/assert_env.py /tmp/guard/docker/assert_env.py
+COPY docker/harness/Caddyfile docker/harness/podh-init /tmp/guard/docker/harness/
+COPY contract.json /tmp/guard/contract.json
 RUN echo "=== runtime sanity check ===" \
  && echo "python3 -> $(readlink -f $(which python3))" \
  && python3 --version \
  && python3 /tmp/assert_independence.py \
+ && python3 /tmp/guard/docker/assert_env.py \
  && python3 -m pod_harness.execute_job --help >/dev/null \
  && python3 -c "import serve.jobs, serve.code, serve.api; print('serve imports OK')" \
  && ffmpeg -version | head -1 \
