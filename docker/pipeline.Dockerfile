@@ -171,7 +171,7 @@ print('ECAPA cached')" \
 COPY docker/harness/Caddyfile /etc/caddy/Caddyfile
 COPY docker/harness/podh-init docker/harness/podh-preflight \
      docker/harness/podh-watchdog docker/harness/podh-self-delete \
-     docker/harness/podh-seed-models docker/harness/podh-mount \
+     docker/harness/podh-seed-models docker/harness/podh-mount docker/harness/podh-roots \
      /usr/local/bin/
 RUN chmod +x /usr/local/bin/podh-*
 

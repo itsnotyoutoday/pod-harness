@@ -1,0 +1,36 @@
+"""Print the spec's declared mount roots as shell exports.
+
+A separate file rather than an inline heredoc because podh-mount already nests heredocs,
+and a second one sharing a terminator silently swallows the rest of the script — which is
+exactly the kind of shell subtlety that has cost this project three separate incidents.
+
+Both prefixes are emitted: the framework reads PODH_*, while a workload reads whatever it
+has always read, and renaming a workload's variables out from under it breaks it for no
+benefit.
+"""
+import json
+import os
+import sys
+
+sys.path.insert(0, "/app")
+from pod_harness.mount import mount_roots
+
+spec = {}
+path = os.environ.get("PODH_JOB_SPEC", "")
+if path and os.path.exists(path):
+    try:
+        spec = json.load(open(path))
+    except Exception:
+        spec = {}
+
+# Must agree with ObjectMount.scratch, or the workload is told a path nothing was
+# fetched to — a wrong answer that looks like a right one.
+scratch = os.environ.get("PODH_SCRATCH")
+if not scratch:
+    kind = (os.environ.get("PODH_MOUNT_KIND") or "").lower()
+    ws = os.environ.get("PODH_WORKSPACE", "/workspace").rstrip("/")
+    scratch = f"{ws}/scratch" if kind == "object" else ws
+for key, rel in mount_roots(spec).items():
+    full = rel if rel.startswith("/") else f"{scratch.rstrip('/')}/{rel}"
+    print(f"export PODH_{key.upper()}={full}")
+    print(f"export LINGUA_{key.upper()}={full}")

@@ -59,7 +59,7 @@ COPY src/pod_harness/ /app/pod_harness/
 COPY contract.json /app/contract.json
 
 COPY docker/harness/Caddyfile /etc/caddy/Caddyfile
-COPY docker/harness/podh-init         /usr/local/bin/podh-init
+COPY docker/harness/podh-roots docker/harness/podh-init         /usr/local/bin/podh-init
 COPY docker/harness/podh-preflight    /usr/local/bin/podh-preflight
 COPY docker/harness/podh-watchdog     /usr/local/bin/podh-watchdog
 COPY docker/harness/podh-self-delete  /usr/local/bin/podh-self-delete
