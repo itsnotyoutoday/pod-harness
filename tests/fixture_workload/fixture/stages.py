@@ -9,24 +9,53 @@ import time
 from pod_harness.framework import Stage, Verification
 
 
+def _roots():
+    """Where the documented layout says things go, resolved the way a workload resolves it.
+
+    corpus/, assets/ and out/ are siblings under the mount root — the same anchoring the
+    trainer uses, so this fixture exercises the real filing rule rather than a test-only one.
+    """
+    import os
+    from pathlib import Path
+    corpus = Path(os.environ.get("PODH_CORPUS_ROOT", "/workspace/corpus"))
+    mount = corpus.parent
+    return corpus, mount / "assets" / "derived", mount / "assets" / "profiles"
+
+
 class Acquire(Stage):
+    # chunk-scoped: in a real workload this is where audio arrives, and audio is what does
+    # not fit on the disk.
+    scope = "chunk"
     name, number = "acquire", 1
     produces = ("sources",)
     def execute(self, ctx):
-        ctx.put("sources", [f"f{i}.wav" for i in range(4)])
-        return {"n": 4}
+        corpus, _, _ = _roots()
+        sid = (ctx.params.get("sources") or [{}])[0].get("id", "src")
+        found = sorted(p.name for p in (corpus / "raw" / sid).glob("*.wav"))
+        ctx.artifacts.setdefault("sources", []).extend(found)
+        return {"source": sid, "n": len(found)}
 
 
 class Normalize(Stage):
+    scope = "chunk"
     name, number = "normalize", 2
     requires, produces = ("sources",), ("normalized",)
     def execute(self, ctx):
-        srcs = ctx.get("sources")
+        import json
+        corpus, derived, _ = _roots()
+        sid = (ctx.params.get("sources") or [{}])[0].get("id", "src")
+        out = derived / "normalized" / sid
+        out.mkdir(parents=True, exist_ok=True)
+        srcs = sorted(p.name for p in (corpus / "raw" / sid).glob("*.wav"))
         for i, s in enumerate(srcs):
             ctx.progress(i + 1, len(srcs), note=s)
-            time.sleep(0.05)
-        ctx.put("normalized", srcs)
-        return {"n": len(srcs)}
+            (out / s).write_bytes(b"NORM" + bytes(200))
+        # Beside the artifact, so a later run can tell what it was made from and whether
+        # reusing it is safe. Without this a cached directory is just bytes.
+        (out / "_derivation.json").write_text(json.dumps(
+            {"stage": "normalized", "source_id": sid, "params": {"rate": 16000}}))
+        ctx.artifacts.setdefault("normalized", []).extend(srcs)
+        return {"source": sid, "n": len(srcs)}
 
 
 class Embed(Stage):
@@ -38,11 +67,50 @@ class Embed(Stage):
 
 
 class Measure(Stage):
+    scope = "chunk"
     name, number = "measure", 4
     requires, produces = ("normalized",), ("measurements",)
     def execute(self, ctx):
-        ctx.put("measurements", {"x": 1})
-        return {"ok": True}
+        import json, os
+        from pathlib import Path
+        sid = (ctx.params.get("sources") or [{}])[0].get("id", "src")
+        out = Path(os.environ.get("PODH_OUT_ROOT", "/workspace/out")) / "runs" / ctx.region
+        out.mkdir(parents=True, exist_ok=True)
+        (out / f"measurements_{sid}.jsonl").write_text(
+            json.dumps({"source": sid, "n": len(ctx.get("normalized") or [])}) + "\n")
+        ctx.artifacts.setdefault("measurements", []).append(sid)
+        return {"source": sid}
+
+
+class Profile(Stage):
+    """Job-scoped: runs ONCE, over every chunk's measurements, and promotes the result.
+
+    This is the reduce half. It also exercises promotion — an immutable per-run directory
+    plus a `current` pointer — which is how a result outlives the run that produced it,
+    since runs/ is prunable by age.
+    """
+    name, number = "profile", 5
+    requires = ("measurements",)
+    def execute(self, ctx):
+        import json, os
+        _, _, profiles = _roots()
+        run_id = os.environ.get("PODH_JOB_ID", "local")
+        dest = profiles / ctx.region / run_id
+        dest.mkdir(parents=True, exist_ok=True)
+        (dest / "profile.json").write_text(json.dumps(
+            {"region": ctx.region, "sources": ctx.get("measurements")}))
+        # `current` LAST, so it can never name a directory that is not finished.
+        (profiles / ctx.region / "current").write_text(run_id)
+        return {"sources": len(ctx.get("measurements") or []), "run_id": run_id}
+
+    def verify_outputs(self, ctx):
+        _, _, profiles = _roots()
+        import os
+        run_id = os.environ.get("PODH_JOB_ID", "local")
+        p = profiles / ctx.region / run_id / "profile.json"
+        return Verification(ok=p.exists(),
+                            checks={"profile": p.exists()},
+                            failures=[] if p.exists() else [f"missing {p}"])
 
 
 class Fail(Stage):
@@ -70,4 +138,4 @@ class Slow(Stage):
 
 
 STAGES = {"acquire": Acquire, "normalize": Normalize, "embed": Embed,
-          "measure": Measure, "_fail": Fail, "_liar": Liar, "_slow": Slow}
+          "measure": Measure, "profile": Profile, "_fail": Fail, "_liar": Liar, "_slow": Slow}

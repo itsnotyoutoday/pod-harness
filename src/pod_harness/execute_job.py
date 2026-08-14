@@ -170,7 +170,9 @@ def attach_chunks(spec: dict, ctx: Context) -> None:
         root = pathlib.Path(ws).parent if ws else None
 
         published = 0
-        for local, prefix, skip in _chunk_trees(root, ws, key):
+        # The mount root's parent: `corpus/` gives "", a nested test prefix gives itself.
+        base = "/".join(str(getattr(m, "prefix", "")).strip("/").split("/")[:-1])
+        for local, prefix, skip in _chunk_trees(root, ws, key, base):
             try:
                 r = m.publish_tree(local, prefix, skip_existing=skip)
                 if r.get("published"):
@@ -203,20 +205,29 @@ def attach_chunks(spec: dict, ctx: Context) -> None:
           flush=True)
 
 
-def _chunk_trees(root, corpus_root, key):
+def _chunk_trees(root, corpus_root, key, base: str = ""):
     """What one chunk publishes: its raw source and its derived artifacts.
 
     Not the run's out/ — that accumulates across chunks and is published once at the end by
     podh-publish. Publishing it per chunk would upload the same growing files N times.
+
+    `base` is the key prefix these trees live under, derived from the mount root's PARENT.
+    In production the mount root is `corpus/`, so the parent is empty and the keys are
+    `assets/derived/...` at the bucket root — unchanged. When the mount root is nested, as
+    it is for an isolated test prefix, the assets follow it instead of escaping to the root.
+
+    Keys were previously hardcoded at the bucket root regardless of the mount, which meant a
+    run against a sub-prefix silently wrote outside it.
     """
     if root is None:
         return []
+    b = (base.strip("/") + "/") if base.strip("/") else ""
     return [
-        (f"{corpus_root}/raw/{key}", f"corpus/raw/{key}", True),
+        (f"{corpus_root}/raw/{key}", f"{b}corpus/raw/{key}", True),
         (root / "assets" / "derived" / "normalized" / key,
-         f"assets/derived/normalized/{key}", False),
+         f"{b}assets/derived/normalized/{key}", False),
         (root / "assets" / "derived" / "work" / key,
-         f"assets/derived/work/{key}", False),
+         f"{b}assets/derived/work/{key}", False),
     ]
 
 

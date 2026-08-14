@@ -162,10 +162,20 @@ class ObjectMount(MountStrategy):
 
     kind = "object"
 
-    def __init__(self, prefix: str = "", scratch: str = "/workspace/scratch",
+    def __init__(self, prefix: str = "", scratch: str | None = None,
                  profile: str | None = None):
         self.prefix = prefix.strip("/")
-        self.scratch = Path(scratch)
+        # Derived from the environment, not hardcoded to /workspace/scratch.
+        #
+        # The literal ignored PODH_WORKSPACE, so the mount fetched to one place while
+        # everything else — roots, config, publish — resolved from the workspace. On a pod
+        # those happened to agree; anywhere else they do not, and the first end-to-end run
+        # outside a pod failed with "read-only file system: /workspace" on every chunk.
+        #
+        # A default that is only correct in one environment is a coupling, not a default.
+        self.scratch = Path(
+            scratch or os.environ.get("PODH_SCRATCH")
+            or f"{os.environ.get('PODH_WORKSPACE', '/workspace').rstrip('/')}/scratch")
         self.profile = profile
 
     def _storage(self):
