@@ -47,12 +47,17 @@ RUN python -m pip install --no-cache-dir --upgrade pip && \
 
 RUN python -m pip install --no-cache-dir \
         "styletts2" "numpy<2.0" "scipy>=1.11" "soundfile>=0.12" \
+        "pandas" "matplotlib" "nltk" "phonemizer" \
         "librosa>=0.10" "pyyaml>=6" "boto3>=1.34" \
         "pod-harness @ git+https://github.com/itsnotyoutoday/pod-harness@main"
 
 # The training driver, pinned. Only the loop and its utils; the model comes from the package.
 # monotonic_align comes from the upstream tree below, not from pip: the PyPI package is a
 # Cython extension with no wheel that needs numpy headers, and upstream vendors its own.
+# pandas, matplotlib, nltk and phonemizer are imported by styletts2's meldataset, its
+# training utilities and its text frontend, and declared by none of them. Found by the ABI
+# check rather than by a pod: an undeclared transitive import fails at first use, which for
+# a trainer is several minutes into a billed GPU run.
 ARG STYLETTS2_COMMIT=main
 RUN set -eux; \
     git clone --depth 1 https://github.com/yl4579/StyleTTS2.git /tmp/st2; \
