@@ -97,6 +97,11 @@ snapshot_download('papercup-ai/multilingual-pl-bert', local_dir='/opt/models/plb
  || echo "WARNING: PL-BERT not cached; will fetch at runtime"
 
 # --- 5. pod_harness: the stage engine ----------------------------------------------------
+# WORKDIR before the COPY, exactly as pipeline.Dockerfile does it. Python puts the working
+# directory on sys.path, and that is how the ABI check below resolves `import pod_harness` —
+# PYTHONPATH is not set until section 7. Copying to /app without cd-ing there built an image
+# whose ABI check could not see the engine it had just installed.
+WORKDIR /app
 COPY src/pod_harness/ /app/pod_harness/
 COPY contract.json /app/contract.json
 
