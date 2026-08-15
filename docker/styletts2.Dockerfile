@@ -61,32 +61,39 @@ RUN python -m pip install --no-cache-dir --upgrade pip \
         --index-url https://download.pytorch.org/whl/cu124 \
         "torch>=2.2" "torchaudio>=2.2"
 
-# pandas, matplotlib, nltk and phonemizer are imported by styletts2's meldataset, its
-# training utilities and its text frontend, and declared by none of them. monotonic_align is
-# NOT here: the PyPI package is a Cython extension with no wheel, and upstream vendors its
-# own copy, which section 4 takes.
-RUN python -m pip install --no-cache-dir \
-        "styletts2" "numpy<2.0" "scipy>=1.11" "soundfile>=0.12" "librosa>=0.10" \
-        "pandas" "matplotlib" "nltk" "phonemizer" "pyyaml>=6" \
-        "boto3>=1.34" "fastapi>=0.110" "uvicorn[standard]>=0.29"
-
-# --- 4. the vendored training loop ------------------------------------------------------
-# The pip package ships models, losses, the dataset reader and optimizers — everything but
-# the training driver, which exists only upstream. Upstream is MIT, so the loop is VENDORED
-# at a pinned ref rather than forked: a fork is a thing to keep in sync forever and we need
-# two files. Phase 2 is where the prosody predictors this project overrides are fit, so a
-# missing driver ships a model that speaks and cannot be steered.
+# --- 4. the upstream tree, and its OWN dependency list ------------------------------------
+# Cloned BEFORE the python install so that `pip install -r requirements.txt` can be the
+# source of truth. Hand-listing styletts2's dependencies cost four builds discovering them
+# one ImportError at a time — pandas, then monotonic_align, then whatever came next — when
+# the authoritative list was in the repo the whole time.
+#
+# The pip package `styletts2` is an INFERENCE wrapper and ships no training driver. Upstream
+# is MIT, so the drivers are vendored at a pinned ref rather than forked: a fork is a thing
+# to keep in sync forever and we need a handful of files. train_finetune.py is the one this
+# project will actually use — we are adapting a pretrained model to Spanish, not training
+# from scratch — and train_first/train_second are kept for the from-scratch path.
 ARG STYLETTS2_COMMIT=main
 ENV STYLETTS2_VENDOR=/app/vendor/styletts2
 RUN set -eux; \
     git clone --depth 1 https://github.com/yl4579/StyleTTS2.git /tmp/st2; \
+    cd /tmp/st2 && git checkout "${STYLETTS2_COMMIT}" 2>/dev/null || true; \
     mkdir -p "$STYLETTS2_VENDOR"; \
-    cp -r /tmp/st2/train_first.py /tmp/st2/train_second.py /tmp/st2/losses.py \
-          /tmp/st2/meldataset.py /tmp/st2/models.py /tmp/st2/optimizers.py \
-          /tmp/st2/utils.py /tmp/st2/Utils /tmp/st2/Configs /tmp/st2/monotonic_align \
-          "$STYLETTS2_VENDOR/"; \
-    cp /tmp/st2/LICENSE "$STYLETTS2_VENDOR/LICENSE"; \
-    rm -rf /tmp/st2
+    cp -r /tmp/st2/train_first.py /tmp/st2/train_second.py \
+          /tmp/st2/train_finetune.py /tmp/st2/train_finetune_accelerate.py \
+          /tmp/st2/losses.py /tmp/st2/meldataset.py /tmp/st2/models.py \
+          /tmp/st2/optimizers.py /tmp/st2/utils.py /tmp/st2/text_utils.py \
+          /tmp/st2/Modules /tmp/st2/Utils /tmp/st2/Configs /tmp/st2/requirements.txt \
+          /tmp/st2/LICENSE \
+          "$STYLETTS2_VENDOR/"
+
+# Upstream's list verbatim, plus the two it cannot express: monotonic_align is a git
+# dependency inside requirements.txt (resemble-ai's fork, since the PyPI package has no
+# wheel), and phonemizer/pandas are imported by the training utilities without being
+# declared anywhere.
+RUN python -m pip install --no-cache-dir -r "$STYLETTS2_VENDOR/requirements.txt" \
+ && python -m pip install --no-cache-dir \
+        "styletts2" "numpy<2.0" "scipy>=1.11" "pandas" "phonemizer" \
+        "boto3>=1.34" "fastapi>=0.110" "uvicorn[standard]>=0.29"
 
 # Multilingual PL-BERT: 14 languages including Spanish, which is what makes this a fine-tune
 # rather than a text-encoder training project. Baked so a pod without egress still starts.
@@ -115,7 +122,7 @@ COPY contract.json /app/contract.json
 RUN echo "=== ABI check ===" \
  && python -c "\
 import torch, librosa, soundfile, numpy, scipy, yaml, pandas, sys; \
-import styletts2, styletts2.models, styletts2.meldataset; \
+import styletts2, monotonic_align, munch, einops, accelerate; \
 import pod_harness, pod_harness.framework, pod_harness.execute_job, pod_harness.stage_manifest; \
 print('imports OK on', sys.version.split()[0]); \
 print('torch', torch.__version__, '| cuda', torch.version.cuda, '| librosa', librosa.__version__)"
@@ -167,7 +174,7 @@ RUN set -eux; \
     for s in podh-init podh-mount podh-code podh-publish podh-logs podh-roots podh-prepare; do \
         test -x "/usr/local/bin/$s" || { echo "FAIL: $s missing"; exit 1; }; \
     done; \
-    for f in train_first.py train_second.py models.py meldataset.py monotonic_align; do \
+    for f in train_first.py train_second.py train_finetune.py models.py meldataset.py Modules; do \
         test -e "$STYLETTS2_VENDOR/$f" || { echo "FAIL: vendored $f missing"; exit 1; }; \
     done; \
     python -c "\
