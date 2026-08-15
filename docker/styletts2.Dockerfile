@@ -47,10 +47,12 @@ RUN python -m pip install --no-cache-dir --upgrade pip && \
 
 RUN python -m pip install --no-cache-dir \
         "styletts2" "numpy<2.0" "scipy>=1.11" "soundfile>=0.12" \
-        "librosa>=0.10" "pyyaml>=6" "boto3>=1.34" "monotonic-align" \
+        "librosa>=0.10" "pyyaml>=6" "boto3>=1.34" \
         "pod-harness @ git+https://github.com/itsnotyoutoday/pod-harness@main"
 
 # The training driver, pinned. Only the loop and its utils; the model comes from the package.
+# monotonic_align comes from the upstream tree below, not from pip: the PyPI package is a
+# Cython extension with no wheel that needs numpy headers, and upstream vendors its own.
 ARG STYLETTS2_COMMIT=main
 RUN set -eux; \
     git clone --depth 1 https://github.com/yl4579/StyleTTS2.git /tmp/st2; \
@@ -59,6 +61,7 @@ RUN set -eux; \
     cp -r /tmp/st2/train_first.py /tmp/st2/train_second.py /tmp/st2/losses.py \
           /tmp/st2/meldataset.py /tmp/st2/models.py /tmp/st2/optimizers.py \
           /tmp/st2/utils.py /tmp/st2/Utils /tmp/st2/Configs \
+          /tmp/st2/monotonic_align \
           /app/vendor/styletts2/ 2>/dev/null || true; \
     cp /tmp/st2/LICENSE /app/vendor/styletts2/LICENSE 2>/dev/null || true; \
     rm -rf /tmp/st2
