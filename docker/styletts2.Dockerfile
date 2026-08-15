@@ -94,6 +94,15 @@ RUN set -eux; \
           /tmp/st2/LICENSE \
           "$STYLETTS2_VENDOR/"
 
+# Upstream's list verbatim, plus what it omits. The training DRIVERS import four packages
+# requirements.txt never declares — IPython, click, numpy, pandas — and train_first.py opens
+# with `from torch.utils.tensorboard import SummaryWriter`, which needs the `tensorboard`
+# distribution that torch itself does not pull in. That last one killed a run at line 35 of
+# the driver, after the dataset stage had already succeeded.
+#
+# Found by scanning every import in the vendored files against requirements.txt rather than
+# one ModuleNotFoundError per GPU-hour, which is how the first four were found.
+#
 # Upstream's list verbatim, plus the two it cannot express: monotonic_align is a git
 # dependency inside requirements.txt (resemble-ai's fork, since the PyPI package has no
 # wheel), and phonemizer/pandas are imported by the training utilities without being
@@ -107,8 +116,9 @@ RUN set -eux; \
     python -m pip install --no-cache-dir "cython<3" "numpy<2.0"; \
     python -m pip install --no-cache-dir -r "$STYLETTS2_VENDOR/requirements.txt"; \
     python -m pip install --no-cache-dir \
-        "styletts2" "scipy>=1.11" "pandas" "phonemizer" \
-        "boto3>=1.34" "fastapi>=0.110" "uvicorn[standard]>=0.29"; \
+        "styletts2" "scipy>=1.11" "phonemizer" \
+        "boto3>=1.34" "fastapi>=0.110" "uvicorn[standard]>=0.29" \
+        "tensorboard" "pandas" "ipython" "click"; \
     apt-get purge -y --auto-remove build-essential python3-dev; \
     apt-get clean; rm -rf /var/lib/apt/lists/*
 
