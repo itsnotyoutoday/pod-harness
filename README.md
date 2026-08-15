@@ -105,6 +105,15 @@ curl "localhost:8000/v1/jobs/$JOB/log?tail=8192"    # bounded, reports total_byt
 > `None` and a silently wrong answer — which is why response keys are pinned in
 > `contract.json`.
 
+**A chunked run reads two ways.** `stages` answers *where is this job now* and is
+last-writer, so three chunks over seven stages leave seven keys there. `chunks` —
+`{chunk: {stage: outcome}}` — answers *which units of work reached which stage*, which is
+the only view that can attribute a failure to a source. Every event carries a `chunk` field
+for the same reason; without it, `align` on one chunk and `align` on another are the same
+event twice. Chunk boundaries are emitted as events too, because the gap between chunks is
+a multi-gigabyte fetch and unexplained silence is the problem the event stream exists to
+remove.
+
 ### Reporting to a control plane
 
 If the launcher supplies `PODH_CONTROL_URL`, `PODH_CONTROL_TOKEN` and

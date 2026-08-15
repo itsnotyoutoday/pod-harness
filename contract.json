@@ -4,9 +4,9 @@
     "The complete interface between the harness and whatever launches it. This file is the",
     "ONLY thing the two sides share; they share no code at all.",
     "",
-    "That is deliberate. A shared Python package does not even guarantee agreement \u2014 a pip",
+    "That is deliberate. A shared Python package does not even guarantee agreement — a pip",
     "install served a stale engine out of a Docker layer cache exactly once, which is how",
-    "the lesson was learned \u2014 whereas a versioned contract can be tested independently from",
+    "the lesson was learned — whereas a versioned contract can be tested independently from",
     "both sides. The harness asserts it honours this file; the loader asserts every spec it",
     "emits validates against it.",
     "",
@@ -22,7 +22,7 @@
       "PODH_MODE": "batch | serve | shell"
     },
     "required_for_batch": {
-      "PODH_JOB_ID": "the job this pod owns. Assigned at creation, never discovered \u2014 workers that scan for work can race, and object storage cannot arbitrate.",
+      "PODH_JOB_ID": "the job this pod owns. Assigned at creation, never discovered — workers that scan for work can race, and object storage cannot arbitrate.",
       "PODH_JOB_SPEC": "absolute path to the job spec, written BEFORE the pod is created",
       "PODH_RUN_PREFIX": "object-key prefix where this job publishes status, e.g. runs/<job_id>",
       "PODH_WRITE_PREFIXES": "comma-separated object-key prefixes this job may write to. The harness refuses any write outside them. A harness that could write anywhere could overwrite corpus/raw/, the one thing here that cannot be regenerated."
@@ -34,7 +34,7 @@
       "PODH_API_PORT": "default 8000",
       "PODH_ENTRY": "override the batch entry module (default pod_harness.execute_job)",
       "PODH_SERVE_API": "0 to skip the control surface",
-      "MAX_LIFE_SEC": "in-pod deadline. DETECTS but cannot terminate \u2014 runpodctl inside a pod returns Unauthorized, so cost control must be external.",
+      "MAX_LIFE_SEC": "in-pod deadline. DETECTS but cannot terminate — runpodctl inside a pod returns Unauthorized, so cost control must be external.",
       "MAX_IDLE_SEC": "idle shutdown; 0 disables"
     },
     "provider_supplied": {
@@ -42,7 +42,7 @@
     }
   },
   "spec": {
-    "_comment": "Written by the loader, read by the harness. `params` is opaque to both \u2014 only the workload interprets it. Everything else is framework surface the harness acts on.",
+    "_comment": "Written by the loader, read by the harness. `params` is opaque to both — only the workload interprets it. Everything else is framework surface the harness acts on.",
     "type": "object",
     "required": [
       "spec_version",
@@ -54,7 +54,7 @@
       },
       "idempotency_key": {
         "type": "string",
-        "description": "optional, unique. A re-POST returns the existing job rather than starting a second pod-hour \u2014 agents retry on timeout, and this makes that safe."
+        "description": "optional, unique. A re-POST returns the existing job rather than starting a second pod-hour — agents retry on timeout, and this makes that safe."
       },
       "code": {
         "type": "object",
@@ -105,7 +105,7 @@
       },
       "runner": {
         "type": "object",
-        "description": "how to provision. The harness ignores this entirely \u2014 it is the loader talking to itself, carried in the spec so a job record is self-describing.",
+        "description": "how to provision. The harness ignores this entirely — it is the loader talking to itself, carried in the spec so a job record is self-describing.",
         "properties": {
           "provider": {
             "type": "string"
@@ -140,7 +140,7 @@
     "_comment": "Written by the harness, read by the loader. Append-only JSON lines plus an atomically-replaced status.json snapshot.",
     "files": {
       "$PODH_LOG_ROOT/$PODH_JOB_ID/events.jsonl": "append-only",
-      "$PODH_LOG_ROOT/$PODH_JOB_ID/status.json": "snapshot, atomic replace",
+      "$PODH_LOG_ROOT/$PODH_JOB_ID/status.json": "snapshot, atomic replace. Carries `stages` (last-writer: where is this job now) and, for a chunked run, `chunks` = {chunk: {stage: outcome}} (which units of work reached which stage). Two structures because they answer two questions and both are asked.",
       "$PODH_LOG_ROOT/$PODH_JOB_ID/job.log": "stdout and stderr",
       "$PODH_RUN_PREFIX/status.json": "the same snapshot in object storage, so status survives the pod"
     },
@@ -181,6 +181,13 @@
             "integer",
             "null"
           ]
+        },
+        "chunk": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The unit of work a chunk-scoped stage ran under; empty or absent for a job-scoped stage. Part of the event's IDENTITY, not a detail: `align` on one chunk and `align` on another are two executions with two outcomes, and without this they are the same event twice."
         },
         "state": {
           "enum": [
@@ -241,7 +248,9 @@
     "invariants": [
       "`state` carries StageResult.status verbatim. Collapsing `unverified` into `ok` would make status report green for exactly the bug class the verification layer exists to catch: three separate bugs where a stage reported success and produced nothing.",
       "`seq` never decreases and never repeats within a job.",
-      "A terminal job answers a long-poll immediately rather than waiting out the timeout."
+      "A terminal job answers a long-poll immediately rather than waiting out the timeout.",
+      "A chunked run records every (chunk, stage) outcome under `chunks`. `stages` remains last-writer and is not redefined: seven stages over three chunks write seven keys there, and the fourteen discarded outcomes include the failure that stopped the run.",
+      "`chunk` is additive to contract_version 1. A reader that ignores it sees exactly what it saw before, which is why the version does not bump."
     ]
   },
   "api": {
@@ -313,7 +322,7 @@
       "Errors carry a `hint` naming the fix."
     ],
     "responses": {
-      "_comment": "Response shapes a loader depends on. Added because my own polling scripts read `state` twice in one day when the job endpoint returns `job_state` \u2014 the poll silently reported None while the job had genuinely failed. An endpoint list is not enough; the keys are part of the interface.",
+      "_comment": "Response shapes a loader depends on. Added because my own polling scripts read `state` twice in one day when the job endpoint returns `job_state` — the poll silently reported None while the job had genuinely failed. An endpoint list is not enough; the keys are part of the interface.",
       "GET /v1/jobs/{job_id}": {
         "required": [
           "job_id",
@@ -321,7 +330,7 @@
         ],
         "properties": {
           "job_id": "string",
-          "job_state": "queued | running | done | failed | cancelled \u2014 NOT `state`",
+          "job_state": "queued | running | done | failed | cancelled — NOT `state`",
           "seq": "integer, cursor into the event stream",
           "stages": "object keyed by stage name; each has state, index, seconds, verification"
         }
