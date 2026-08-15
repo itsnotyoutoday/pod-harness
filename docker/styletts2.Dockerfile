@@ -25,7 +25,7 @@ ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1 \
     DEBIAN_FRONTEND=noninteractive \
-    PYTHONPATH=/app/code \
+    PYTHONPATH=/app \
     STYLETTS2_VENDOR=/app/vendor/styletts2 \
     HF_HOME=/models/hf \
     PLBERT_PATH=/models/plbert
@@ -69,25 +69,50 @@ from huggingface_hub import snapshot_download
 snapshot_download("papercup-ai/multilingual-pl-bert", local_dir="/models/plbert")
 PY
 
-COPY code/ /app/code/
 
-# Report what is actually here. The check that would have caught a missing training driver
-# before a GPU-hour was spent discovering it.
-RUN python - <<'PY'
-import os, torch
-from pathlib import Path
-from voice_style import stages, speakers, dataset, infer
-print("=== lingua-styletts2 ===")
-print(f"  stages     {[s.name for s in stages.STAGES]}")
-print(f"  voices     {speakers.all_keys()}")
-print(f"  torch      {torch.__version__}  cuda_built={torch.version.cuda}")
-v = Path(os.environ['STYLETTS2_VENDOR'])
-for f in ("train_first.py", "train_second.py", "models.py"):
-    print(f"  vendor     {f:<18}{'ok' if (v/f).exists() else 'MISSING'}")
-print(f"  plbert     {'ok' if any(Path('/models/plbert').glob('*')) else 'not cached'}")
-print(f"  fps        {infer.frames_per_second()} ({1000/infer.frames_per_second():.2f} ms/frame)")
-PY
+# The harness, exactly as every other image embeds it. The WORKLOAD's code is deliberately
+# absent: `podh-code` pulls the published code tree onto the pod at job time, which is why
+# `runctl launch` reports a tree hash and why editing a stage does not rebuild an image.
+# Baking code/ in would fork that: the image would carry one version and the codestore
+# another, and the pod would run whichever the entrypoint happened to find first.
+COPY --chmod=0755 docker/harness/podh-init docker/harness/podh-mount docker/harness/podh-code \
+     docker/harness/podh-publish docker/harness/podh-logs docker/harness/podh-roots \
+     docker/harness/podh-prepare docker/harness/podh-preflight docker/harness/podh-watchdog \
+     /usr/local/bin/
+COPY docker/harness/Caddyfile /etc/caddy/Caddyfile
+COPY serve/ /app/serve/
+COPY src/pod_harness/ /app/pod_harness/
+COPY contract.json /app/contract.json
 
-WORKDIR /app
+# The independence guard the other images carry: no loader module may appear here. A pod
+# cannot launch a pod because the code is not present, not because it was asked not to.
+COPY docker/assert_independence.py /tmp/assert_independence.py
+RUN python /tmp/assert_independence.py && rm /tmp/assert_independence.py
+
+# ABI check, immediately after the install and for the same reason the other images have
+# one: without it the first symptom of a broken wheel is an ImportError from inside a job on
+# a billed pod, which reads like a code bug and sends you debugging the wrong file.
+#
+# Note what is NOT checked here: the workload's own modules. They arrive at job time from the
+# codestore, so importing them at build time would be checking a copy that never runs.
+RUN echo "=== ABI check ===" \
+ && python -c "\
+import torch, librosa, soundfile, numpy, scipy, yaml, sys; \
+import styletts2, styletts2.models, styletts2.meldataset; \
+import pod_harness, pod_harness.framework, pod_harness.execute_job, pod_harness.stage_manifest; \
+print('imports OK on', sys.version.split()[0]); \
+print('torch', torch.__version__, '| cuda', torch.version.cuda, '| librosa', librosa.__version__)"
+
+# The vendored training loop must be present, or phase 2 silently never runs and the model
+# ships unsteerable. Verified here so the failure is a red build, not a wasted GPU-hour.
+RUN set -eux; \
+    for f in train_first.py train_second.py models.py meldataset.py; do \
+        test -f "$STYLETTS2_VENDOR/$f" || { echo "FAIL: vendored $f missing"; exit 1; }; \
+    done; \
+    python -c "from pathlib import Path; import os; \
+print('plbert cached' if any(Path('/models/plbert').glob('*')) else 'plbert NOT cached')"; \
+    echo "confirmed: styletts2 runtime + vendored two-phase training loop"
+
+WORKDIR /workspace
 ENTRYPOINT ["/usr/bin/tini", "--"]
 CMD ["python", "-m", "pod_harness.execute_job"]

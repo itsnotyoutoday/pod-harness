@@ -13,7 +13,7 @@ ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1 \
     DEBIAN_FRONTEND=noninteractive \
-    PYTHONPATH=/app/code \
+    PYTHONPATH=/app \
     TTS_HOME=/models/coqui \
     HF_HOME=/models/hf
 
@@ -36,22 +36,37 @@ RUN python -m pip install --no-cache-dir \
         "numpy<2.0" "scipy>=1.11" "soundfile>=0.12" "librosa>=0.10" "boto3>=1.34" \
         "pod-harness @ git+https://github.com/itsnotyoutoday/pod-harness@main"
 
-COPY code/ /app/code/
 
-RUN python - <<'PY'
-import torch
-from voice_fs2 import stages, speakers, infer
-from TTS.tts.configs.fastspeech2_config import Fastspeech2Config
-print("=== lingua-fastspeech2 ===")
-print(f"  stages   {[s.name for s in stages.STAGES]}")
-print(f"  voices   {speakers.all_keys()}")
-print(f"  torch    {torch.__version__}  cuda_built={torch.version.cuda}")
-a = Fastspeech2Config().model_args
-print(f"  predictors  pitch={a.use_pitch} energy={a.use_energy} "
-      f"duration=yes  speaker_emb={hasattr(a,'use_speaker_embedding')}")
-print(f"  fps      {infer.frames_per_second()}")
-PY
+# The harness, exactly as every other image embeds it. The WORKLOAD's code is deliberately
+# absent: `podh-code` pulls the published code tree onto the pod at job time, which is why
+# `runctl launch` reports a tree hash and why editing a stage does not rebuild an image.
+# Baking code/ in would fork that: the image would carry one version and the codestore
+# another, and the pod would run whichever the entrypoint happened to find first.
+COPY --chmod=0755 docker/harness/podh-init docker/harness/podh-mount docker/harness/podh-code \
+     docker/harness/podh-publish docker/harness/podh-logs docker/harness/podh-roots \
+     docker/harness/podh-prepare docker/harness/podh-preflight docker/harness/podh-watchdog \
+     /usr/local/bin/
+COPY docker/harness/Caddyfile /etc/caddy/Caddyfile
+COPY serve/ /app/serve/
+COPY src/pod_harness/ /app/pod_harness/
+COPY contract.json /app/contract.json
 
-WORKDIR /app
+# The independence guard the other images carry: no loader module may appear here. A pod
+# cannot launch a pod because the code is not present, not because it was asked not to.
+COPY docker/assert_independence.py /tmp/assert_independence.py
+RUN python /tmp/assert_independence.py && rm /tmp/assert_independence.py
+
+RUN echo "=== ABI check ===" \
+ && python -c "\
+import torch, librosa, soundfile, numpy, scipy, sys; \
+import TTS; from TTS.tts.configs.fastspeech2_config import Fastspeech2Config; \
+import pod_harness, pod_harness.framework, pod_harness.execute_job, pod_harness.stage_manifest; \
+a = Fastspeech2Config().model_args; \
+assert a.use_pitch and a.use_energy, 'pitch/energy predictors absent — this image is pointless without them'; \
+print('imports OK on', sys.version.split()[0]); \
+print('torch', torch.__version__, '| cuda', torch.version.cuda); \
+print('predictors: pitch, energy, duration + speaker embedding')"
+
+WORKDIR /workspace
 ENTRYPOINT ["/usr/bin/tini", "--"]
 CMD ["python", "-m", "pod_harness.execute_job"]
