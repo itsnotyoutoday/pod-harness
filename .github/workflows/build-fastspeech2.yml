@@ -1,0 +1,81 @@
+name: Build fastspeech2 image
+
+# FastSpeech2 GPU training image, built on coqui. Nothing vendored — coqui ships the trainer.
+#
+# Separate workflow per image, same reason build-detect.yml is separate from build-harness:
+# these rebuild when the ML dependencies move, and sharing one workflow would rebuild
+# several gigabytes every time an unrelated script gained a line.
+#
+# Built HERE and not in the workload repo because a workload repo holds code/, jobs/,
+# tests/ and .pod.env — the images are this repo's responsibility, so every one of them is
+# built the same way and none of them drifts.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'docker/fastspeech2.Dockerfile'
+      - '.github/workflows/build-fastspeech2.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compute tags
+        id: meta
+        run: |
+          OWNER=$(echo '${{ github.repository_owner }}' | tr A-Z a-z)
+          SHA=$(git rev-parse --short HEAD)
+          echo "owner=$OWNER" >> $GITHUB_OUTPUT
+          if [ -n "${{ secrets.DOCKERHUB_USER }}" ]; then
+            HUB='${{ secrets.DOCKERHUB_USER }}'
+            echo "tags=docker.io/$HUB/lingua-fastspeech2atest,docker.io/$HUB/lingua-fastspeech2:$SHA" >> $GITHUB_OUTPUT
+            echo "::notice::publishing to Docker Hub as $HUB/lingua-fastspeech2"
+          else
+            echo "tags=ghcr.io/$OWNER/lingua-fastspeech2atest,ghcr.io/$OWNER/lingua-fastspeech2:$SHA" >> $GITHUB_OUTPUT
+            echo "::warning::no DOCKERHUB_USER secret — publishing to GHCR, whose pull latency from RunPod is unpredictable"
+          fi
+
+      # A GPU image is large and RunPod bills the pull. Docker Hub is the publish target for
+      # the same reason the other images use it; GHCR carries only the build cache, which
+      # never leaves CI.
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /opt/hostedtoolcache/CodeQL
+          df -h /
+
+      - name: Log in to Docker Hub
+        if: env.DOCKERHUB_USER != ''
+        env:
+          DOCKERHUB_USER: ${{ secrets.DOCKERHUB_USER }}
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USER }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: docker/fastspeech2.Dockerfile
+          platforms: linux/amd64        # RunPod is x86; an arm64 image fails there opaquely
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          cache-from: type=registry,ref=ghcr.io/${{ steps.meta.outputs.owner }}/lingua-fastspeech2:buildcache,ignore-error=true
+          cache-to: type=registry,ref=ghcr.io/${{ steps.meta.outputs.owner }}/lingua-fastspeech2:buildcache,mode=max
