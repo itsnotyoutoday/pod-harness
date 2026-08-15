@@ -36,10 +36,10 @@ jobs:
           echo "owner=$OWNER" >> $GITHUB_OUTPUT
           if [ -n "${{ secrets.DOCKERHUB_USER }}" ]; then
             HUB='${{ secrets.DOCKERHUB_USER }}'
-            echo "tags=docker.io/$HUB/lingua-fastspeech2atest,docker.io/$HUB/lingua-fastspeech2:$SHA" >> $GITHUB_OUTPUT
+            echo "tags=docker.io/$HUB/lingua-fastspeech2:latest,docker.io/$HUB/lingua-fastspeech2:$SHA" >> $GITHUB_OUTPUT
             echo "::notice::publishing to Docker Hub as $HUB/lingua-fastspeech2"
           else
-            echo "tags=ghcr.io/$OWNER/lingua-fastspeech2atest,ghcr.io/$OWNER/lingua-fastspeech2:$SHA" >> $GITHUB_OUTPUT
+            echo "tags=ghcr.io/$OWNER/lingua-fastspeech2:latest,ghcr.io/$OWNER/lingua-fastspeech2:$SHA" >> $GITHUB_OUTPUT
             echo "::warning::no DOCKERHUB_USER secret — publishing to GHCR, whose pull latency from RunPod is unpredictable"
           fi
 
