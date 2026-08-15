@@ -10,9 +10,17 @@ opportunistic and imported lazily.
 ## The schema
 
     {"job_id": "...", "seq": 7, "ts": "2026-08-12T20:14:03Z",
-     "stage": "align", "index": 3, "total": 7,
+     "stage": "align", "index": 3, "total": 7, "chunk": "heroico",
      "state": "running|ok|skipped|failed|unverified",
      "detail": {...}}
+
+`chunk` is part of the event's IDENTITY, not a detail. `align` on one chunk and `align` on
+another are two executions with two outcomes; without this field they are the same event
+twice and no client can say which source failed. That is not hypothetical — a chunked run
+overwrites the same key in `status["stages"]` once per chunk, so the failure that stopped
+the run is the one most likely to be overwritten. Snapshots therefore carry a parallel
+`chunks: {chunk: {stage: outcome}}` structure alongside `stages`, and `stages` keeps its
+last-writer meaning, which is the correct one for "where is this job now".
 
 `seq` is the load-bearing field. It is a monotonic per-job counter, which is what lets a
 client resume from where it left off no matter how it is connected — long-poll passes
@@ -114,12 +122,21 @@ class EventLog:
     # -- writing ------------------------------------------------------------------------
 
     def emit(self, *, stage: str = "", index: int = 0, total: int = 0,
-             state: str = "running", **detail) -> dict:
-        """Append one event and refresh the snapshot. Returns the event."""
+             state: str = "running", chunk: str = "", **detail) -> dict:
+        """Append one event and refresh the snapshot. Returns the event.
+
+        `chunk` names the unit of work a chunk-scoped stage ran under, and "" for a
+        job-scoped one. It is a top-level field rather than a detail key because it is part
+        of the event's IDENTITY: `align` on chunk A and `align` on chunk B are two different
+        executions with two different outcomes, and without this they are indistinguishable
+        on the wire. A client could not tell you which source failed to normalise — which is
+        precisely the failure that once let three job-scoped stages reduce over a hole and
+        report green.
+        """
         seq = self._next_seq()
         ev = {"job_id": self.job_id, "seq": seq, "ts": _now(),
               "stage": stage, "index": index, "total": total,
-              "state": state, "detail": detail}
+              "chunk": chunk, "state": state, "detail": detail}
         with self.events_path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(ev, default=str) + "\n")
             f.flush()
@@ -170,18 +187,37 @@ class EventLog:
         # later progress event arrived, and verification is the whole point.
         stages = cur.setdefault("stages", {})
         if ev["stage"]:
-            prev = stages.get(ev["stage"], {})
-            d = ev["detail"]
-            merged = {**prev, "state": ev["state"], "index": ev["index"]}
-            for k in ("seconds", "error", "verification", "produces", "requires",
-                      "progress"):
-                if d.get(k) is not None:
-                    merged[k] = d[k]
-            # A progress event must not overwrite a terminal state with "running".
-            if prev.get("state") in ("ok", "failed", "skipped", "unverified") \
-                    and ev["state"] == "running" and d.get("progress"):
-                merged["state"] = prev["state"]
-            stages[ev["stage"]] = merged
+            def merge_into(into: dict) -> dict:
+                prev = into.get(ev["stage"], {})
+                d = ev["detail"]
+                merged = {**prev, "state": ev["state"], "index": ev["index"]}
+                for k in ("seconds", "error", "verification", "produces", "requires",
+                          "progress"):
+                    if d.get(k) is not None:
+                        merged[k] = d[k]
+                # A progress event must not overwrite a terminal state with "running".
+                if prev.get("state") in ("ok", "failed", "skipped", "unverified") \
+                        and ev["state"] == "running" and d.get("progress"):
+                    merged["state"] = prev["state"]
+                merged["updated_at"] = ev["ts"]
+                into[ev["stage"]] = merged
+                return merged
+
+            merge_into(stages)
+
+            # A chunk-scoped stage ALSO records under its chunk. Two structures rather than
+            # one because they answer different questions and both are asked: `stages` is
+            # "where is this job now", which is what a progress line wants and what every
+            # existing client already reads; `chunks` is "which units of work reached which
+            # stage", which is the only thing that can render a grid.
+            #
+            # Keeping `stages` unchanged is not politeness to old clients — a chunked run
+            # overwrites the same stage key once per chunk there, so `stages` genuinely IS
+            # the last-writer view and pretending otherwise would make the progress line
+            # lie. The per-chunk truth needs its own home, not a reinterpretation of that
+            # one.
+            if ev.get("chunk"):
+                merge_into(cur.setdefault("chunks", {}).setdefault(ev["chunk"], {}))
         if cur["job_state"] in ("done", "failed", "cancelled"):
             cur["finished_at"] = ev["ts"]
         self._atomic_write(self.status_path, json.dumps(cur, indent=2, default=str))
@@ -313,13 +349,24 @@ class EventLog:
         """
         st = self.status()
         stages = st.get("stages", {})
+        chunks = st.get("chunks", {})
         # `unverified` is surfaced alongside `failed` deliberately: a stage that ran
         # without its outputs being checked is not a success, and the whole point of the
         # Stage contract is that the difference is visible.
-        failed = [{"stage": k, "state": v.get("state"), "error": v.get("error"),
-                   "verification": v.get("verification")}
-                  for k, v in stages.items()
+        #
+        # Read from the per-chunk view where there is one, because `stages` is last-writer
+        # for a chunked run: a stage that failed on the first of three chunks and was never
+        # reached again is invisible there, and it is the one you need to see.
+        failed = [{"stage": k, "chunk": chunk, "state": v.get("state"),
+                   "error": v.get("error"), "verification": v.get("verification")}
+                  for chunk, per_stage in sorted(chunks.items())
+                  for k, v in per_stage.items()
                   if v.get("state") in ("failed", "unverified")]
+        failed += [{"stage": k, "chunk": "", "state": v.get("state"),
+                    "error": v.get("error"), "verification": v.get("verification")}
+                   for k, v in stages.items()
+                   if v.get("state") in ("failed", "unverified") and k not in {
+                       s for per_stage in chunks.values() for s in per_stage}]
         tail: list[str] = []
         if self.log_path.exists():
             try:
@@ -339,6 +386,15 @@ class EventLog:
                         "verified": (v.get("verification") or {}).get("ok"),
                         "progress": v.get("progress")}
                        for k, v in stages.items()],
+            # (chunk, stage) -> outcome. Empty for an unchunked run, which is why it is a
+            # separate key rather than a reshaping of `stages`: a client that does not care
+            # about chunks never has to learn about them.
+            "chunks": {chunk: [{"stage": k, "state": v.get("state"),
+                                "seconds": v.get("seconds"),
+                                "verified": (v.get("verification") or {}).get("ok"),
+                                "progress": v.get("progress")}
+                               for k, v in per_stage.items()]
+                       for chunk, per_stage in sorted(chunks.items())},
             "failures": failed,
             "log_tail": tail,
             "log_bytes": self.log_path.stat().st_size if self.log_path.exists() else 0,

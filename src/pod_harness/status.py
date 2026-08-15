@@ -45,6 +45,11 @@ class EventReporter(NullReporter):
         self.registry = registry          # optional: mirror stage outcomes into the record
         self.total = 0
         self.index = 0
+        #: The chunk currently resident, or "" outside a chunked section. Held on the
+        #: reporter rather than threaded through every hook because the runner already
+        #: guarantees exactly one chunk is resident at a time — two at once would defeat
+        #: the entire point of bounding the disk — so a single value cannot be ambiguous.
+        self.chunk = ""
         try:
             from .events import EventLog
             self._log = EventLog(job_id)
@@ -70,10 +75,25 @@ class EventReporter(NullReporter):
         self._emit(stage="", index=0, total=total, state="running",
                    job_state="running", event="job_start")
 
+    def chunk_start(self, key: str) -> None:
+        """A unit of work became resident. Emitted as its own event, not merely recorded,
+        because the gap between chunks is a fetch of tens of gigabytes — without an event
+        there, a client watching a chunked run sees a long silence and no reason for it,
+        which is the same "long stage looks like a hang" problem stage events exist to
+        solve one level down."""
+        self.chunk = key
+        self._emit(stage="", index=self.index, total=self.total, state="running",
+                   chunk=key, event="chunk_start")
+
+    def chunk_done(self, key: str) -> None:
+        self._emit(stage="", index=self.index, total=self.total, state="running",
+                   chunk=key, event="chunk_done")
+        self.chunk = ""
+
     def stage_start(self, stage: Any) -> None:
         self.index += 1
         self._emit(stage=getattr(stage, "name", "?"), index=self.index,
-                   total=self.total, state="running",
+                   total=self.total, state="running", chunk=self.chunk,
                    requires=list(getattr(stage, "requires", ())),
                    produces=list(getattr(stage, "produces", ())))
 
@@ -82,14 +102,19 @@ class EventReporter(NullReporter):
         state = getattr(result, "status", "unverified")
         verification = getattr(result, "verification", None) or {}
         self._emit(stage=name, index=self.index, total=self.total, state=state,
+                   chunk=self.chunk,
                    seconds=getattr(result, "seconds", None),
                    error=getattr(result, "error", None),
                    verification=verification,
                    produces=list(getattr(stage, "produces", ())))
         if self.registry is not None:
             try:
-                self.registry.record_stage(self.job_id, name, {
+                # Keyed by chunk too, or a seven-stage run over three chunks records seven
+                # rows and silently discards fourteen.
+                key = f"{name}@{self.chunk}" if self.chunk else name
+                self.registry.record_stage(self.job_id, key, {
                     "state": state,
+                    "chunk": self.chunk,
                     "seconds": getattr(result, "seconds", None),
                     "verification": verification,
                     "error": getattr(result, "error", None)})
@@ -115,8 +140,10 @@ class EventReporter(NullReporter):
         name = getattr(stage, "name", "?")
         idx, total = self.index, self.total
 
+        chunk = self.chunk
+
         def emit(done: int, of: int, note: str) -> None:
-            self._emit(stage=name, index=idx, total=total, state="running",
+            self._emit(stage=name, index=idx, total=total, state="running", chunk=chunk,
                        progress={"done": done, "total": of, "note": note})
 
         return ProgressSink(emit)

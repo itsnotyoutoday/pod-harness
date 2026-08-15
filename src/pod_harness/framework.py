@@ -260,6 +260,12 @@ class NullReporter:
     def stage_start(self, stage: Any) -> None: ...
     def stage_done(self, stage: Any, result: Any) -> None: ...
     def job_done(self, ok: bool, error: str | None = None) -> None: ...
+    #: Which unit of work is resident. Without these, `align` on one chunk and `align` on
+    #: another are indistinguishable on the wire, and no client can say WHICH source
+    #: failed — the question that matters when a job-scoped stage would otherwise reduce
+    #: over a hole.
+    def chunk_start(self, key: str) -> None: ...
+    def chunk_done(self, key: str) -> None: ...
 
     def progress_for(self, stage: Any):
         """Return a sink for sub-stage progress, or None to disable it."""
@@ -345,6 +351,7 @@ class Runner:
         aborted: str | None = None
         for i, key in enumerate(keys, 1):
             print(f"\n{'#'*74}\n  CHUNK {i}/{len(keys)} · {key}\n{'#'*74}", flush=True)
+            reporter.chunk_start(key)
             enter = getattr(ctx, "enter_chunk", None)
             if callable(enter):
                 enter(key)
@@ -365,6 +372,10 @@ class Runner:
                 leave = getattr(ctx, "exit_chunk", None)
                 if callable(leave):
                     leave(key)
+                # After exit_chunk, so the event marks the point at which the chunk's
+                # outputs are actually published and it is safe to evict — not the point at
+                # which the last stage returned.
+                reporter.chunk_done(key)
             if aborted:
                 break
 
