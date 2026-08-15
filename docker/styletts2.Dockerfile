@@ -32,11 +32,19 @@ ENV PYTHONUNBUFFERED=1 \
 # --- 1. the few system tools the base lacks -------------------------------------------
 # fuse3 provides fusermount3, needed to unmount cleanly in FuseMount.publish().
 # espeak-ng is styletts2's text frontend, not an engine choice here.
+# ONE interpreter, deliberately. The first version installed python3.11 and symlinked only
+# `python`, leaving `python3` as jammy's own 3.10 — so the build installed every package
+# into 3.11, the ABI check passed under 3.11, and then podh-init (which calls `python3`
+# explicitly, as do all the harness scripts) ran 3.10 against an empty site-packages. The
+# container exited 1 before writing a single byte, twice.
+#
+# jammy's python3 is 3.10, which satisfies both coqui (>=3.9) and styletts2 (<3.12), so the
+# extra interpreter bought nothing and cost two pods.
 RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends \
-        python3.11 python3.11-venv python3-pip \
+        python3 python3-pip python3-venv \
         curl ca-certificates unzip procps fuse3 git tini \
         ffmpeg libsndfile1 espeak-ng espeak-ng-data \
-    && ln -sf /usr/bin/python3.11 /usr/local/bin/python \
+    && ln -sf /usr/bin/python3 /usr/local/bin/python \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # --- 2. static tooling ----------------------------------------------------------------
@@ -95,13 +103,13 @@ RUN set -eux; \
 # the image is ~200 MB carried for one build step, and RunPod bills the pull.
 RUN set -eux; \
     apt-get update -qq; \
-    apt-get install -y -qq --no-install-recommends build-essential python3.11-dev; \
+    apt-get install -y -qq --no-install-recommends build-essential python3-dev; \
     python -m pip install --no-cache-dir "cython<3" "numpy<2.0"; \
     python -m pip install --no-cache-dir -r "$STYLETTS2_VENDOR/requirements.txt"; \
     python -m pip install --no-cache-dir \
         "styletts2" "scipy>=1.11" "pandas" "phonemizer" \
         "boto3>=1.34" "fastapi>=0.110" "uvicorn[standard]>=0.29"; \
-    apt-get purge -y --auto-remove build-essential python3.11-dev; \
+    apt-get purge -y --auto-remove build-essential python3-dev; \
     apt-get clean; rm -rf /var/lib/apt/lists/*
 
 # Multilingual PL-BERT: 14 languages including Spanish, which is what makes this a fine-tune
@@ -128,6 +136,15 @@ COPY contract.json /app/contract.json
 #
 # The WORKLOAD's own modules are deliberately not imported: they arrive at job time from the
 # codestore, so checking them at build time would be checking a copy that never runs.
+# `python` and `python3` MUST be the same interpreter — the harness scripts use python3 and
+# the build uses python, and a mismatch is invisible until a pod exits 1 with no output.
+RUN set -eux; \
+    a=$(python -c "import sys; print(sys.executable, sys.version_info[:2])"); \
+    b=$(python3 -c "import sys; print(sys.executable, sys.version_info[:2])"); \
+    echo "python : $a"; echo "python3: $b"; \
+    python3 -c "import pod_harness" \
+      || { echo "FAIL: python3 cannot import pod_harness — the harness scripts run python3"; exit 1; }
+
 RUN echo "=== ABI check ===" \
  && python -c "\
 import torch, librosa, soundfile, numpy, scipy, yaml, pandas, sys; \
