@@ -1,72 +1,156 @@
-# FastSpeech2 training image, built on coqui.
+# The FastSpeech2 TRAINING image — GPU, and built on the harness like every other image.
 #
-# Smaller and simpler than the StyleTTS2 image and deliberately so: coqui ships the trainer,
-# so there is nothing to vendor and no upstream loop to keep in sync. That is this repo's
-# entire argument for existing as a fallback.
+# ## Written by deriving from pipeline.Dockerfile, after not doing so cost a wasted pod
 #
-# The transformers and torchcodec pins are load-bearing and were both found by importing,
-# not by reading: coqui calls `isin_mps_friendly` (transformers >= 4.45) and requires
-# torchcodec for audio IO from torch 2.9. Neither failure names the responsible package.
+# The first version of this file was written from scratch around the model stack. It built,
+# published, launched, and produced a pod that reported RUNNING and wrote zero bytes —
+# because it had torch and coqui and none of the machinery that makes a pod legible or even
+# runnable:
+#
+#   * ENTRYPOINT was `python -m pod_harness.execute_job`, which requires --spec and exits
+#     instantly. The entrypoint is `podh-init`: it mounts, pulls the published code, starts
+#     the log server, and only then runs the job with the spec it staged.
+#   * caddy was absent, so nothing served /logs — which is why the pod was silent AND why
+#     `runctl watch --log` had nothing to show. One missing binary, both symptoms. The only
+#     reason the failure was visible at all is that RunPod's own console shows container
+#     stdout, bypassing our log endpoint entirely.
+#   * PYTHONPATH did not put /workspace/code ahead of /app, so a synced stage edit would
+#     have been ignored in favour of whatever was baked.
+#
+# Sections and their numbering mirror pipeline.Dockerfile deliberately. A reader who knows
+# that file knows this one, and a change made there is easy to mirror here.
+#
+# ## What differs from pipeline.Dockerfile, and why
+#
+# The base. pipeline builds on the MFA image because alignment is its job; this needs CUDA
+# and torch and never aligns anything. Everything from section 2 onward is the same shape,
+# and sections 1, 2 and 5 onward are IDENTICAL to styletts2.Dockerfile by construction —
+# the two images differ only in their model layer.
 FROM --platform=linux/amd64 nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1 \
-    DEBIAN_FRONTEND=noninteractive \
-    PYTHONPATH=/app \
-    TTS_HOME=/models/coqui \
-    HF_HOME=/models/hf
+    DEBIAN_FRONTEND=noninteractive
 
-RUN set -eux; \
-    apt-get update; \
-    apt-get install -y --no-install-recommends \
-        python3.11 python3.11-venv python3-pip git curl ca-certificates \
-        ffmpeg libsndfile1 espeak-ng espeak-ng-data tini; \
-    ln -sf /usr/bin/python3.11 /usr/local/bin/python; \
-    apt-get clean; rm -rf /var/lib/apt/lists/*; \
-    mkdir -p /app /models/coqui /models/hf /workspace
+# --- 1. the few system tools the base lacks -------------------------------------------
+# fuse3 provides fusermount3, needed to unmount cleanly in FuseMount.publish().
+# espeak-ng is coqui's phonemiser dependency; we do not use it to phonemise (our IPA comes
+# from the alignment) but coqui imports it regardless.
+RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends \
+        python3.11 python3.11-venv python3-pip \
+        curl ca-certificates unzip procps fuse3 git tini \
+        ffmpeg libsndfile1 espeak-ng espeak-ng-data \
+    && ln -sf /usr/bin/python3.11 /usr/local/bin/python \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
 
-RUN python -m pip install --no-cache-dir --upgrade pip && \
-    python -m pip install --no-cache-dir \
+# --- 2. static tooling ----------------------------------------------------------------
+# caddy serves logs and proxies /v1; runpodctl is best-effort self-delete; rclone backs
+# the FuseMount strategy. All three are single static binaries.
+ARG CADDY_VERSION=2.8.4
+RUN curl -sL "https://github.com/caddyserver/caddy/releases/download/v${CADDY_VERSION}/caddy_${CADDY_VERSION}_linux_amd64.tar.gz" \
+        | tar -xz -C /usr/local/bin caddy \
+ && chmod +x /usr/local/bin/caddy \
+ && curl -sL https://github.com/runpod/runpodctl/releases/latest/download/runpodctl-linux-amd64 \
+        -o /usr/local/bin/runpodctl \
+ && chmod +x /usr/local/bin/runpodctl \
+ && curl -sL https://downloads.rclone.org/rclone-current-linux-amd64.zip -o /tmp/rc.zip \
+ && cd /tmp && unzip -q rc.zip && mv rclone-*/rclone /usr/local/bin/rclone \
+ && chmod +x /usr/local/bin/rclone && rm -rf /tmp/rc.zip /tmp/rclone-*
+
+# --- 3. the model stack ----------------------------------------------------------------
+# torch from the CUDA index. This is one of two images in the project where the CUDA build
+# is the right one.
+RUN python -m pip install --no-cache-dir --upgrade pip \
+ && python -m pip install --no-cache-dir \
         --index-url https://download.pytorch.org/whl/cu124 \
         "torch>=2.2" "torchaudio>=2.2"
 
+# Two pins are load-bearing and both were found by importing, not by reading:
+#   transformers>=4.45  coqui calls `isin_mps_friendly`, added in 4.45. pip's own resolution
+#                       of coqui-tts picks something older and the failure surfaces only at
+#                       `import TTS`, as a missing-name ImportError naming neither package.
+#   torchcodec          from torch 2.9 coqui requires it for audio IO. The base carries a
+#                       newer torch, so this is not optional even though coqui's metadata
+#                       treats it as an extra.
 RUN python -m pip install --no-cache-dir \
         "coqui-tts>=0.24" "transformers>=4.45,<5" torchcodec \
-        "numpy<2.0" "scipy>=1.11" "soundfile>=0.12" "librosa>=0.10" "boto3>=1.34" \
-        "pod-harness @ git+https://github.com/itsnotyoutoday/pod-harness@main"
+        "numpy<2.0" "scipy>=1.11" "soundfile>=0.12" "librosa>=0.10" \
+        "boto3>=1.34" "fastapi>=0.110" "uvicorn[standard]>=0.29"
 
+ENV TTS_HOME=/opt/models/coqui
 
-# The harness, exactly as every other image embeds it. The WORKLOAD's code is deliberately
-# absent: `podh-code` pulls the published code tree onto the pod at job time, which is why
-# `runctl launch` reports a tree hash and why editing a stage does not rebuild an image.
-# Baking code/ in would fork that: the image would carry one version and the codestore
-# another, and the pod would run whichever the entrypoint happened to find first.
-COPY --chmod=0755 docker/harness/podh-init docker/harness/podh-mount docker/harness/podh-code \
-     docker/harness/podh-publish docker/harness/podh-logs docker/harness/podh-roots \
-     docker/harness/podh-prepare docker/harness/podh-preflight docker/harness/podh-watchdog \
-     /usr/local/bin/
-COPY docker/harness/Caddyfile /etc/caddy/Caddyfile
-COPY serve/ /app/serve/
+# --- 5. pod_harness: the stage engine ----------------------------------------------------
 COPY src/pod_harness/ /app/pod_harness/
 COPY contract.json /app/contract.json
 
-# The independence guard the other images carry: no loader module may appear here. A pod
-# cannot launch a pod because the code is not present, not because it was asked not to.
-COPY docker/assert_independence.py /tmp/assert_independence.py
-RUN python /tmp/assert_independence.py && rm /tmp/assert_independence.py
-
+# --- 5b. ABI check, immediately after the install ----------------------------------------
+# Without it the first symptom of a broken wheel is an ImportError from inside a job on a
+# billed pod, which reads like a code bug and sends you debugging the wrong file. It has
+# already caught pandas and monotonic_align here.
+#
+# The WORKLOAD's own modules are deliberately not imported: they arrive at job time from the
+# codestore, so checking them at build time would be checking a copy that never runs.
 RUN echo "=== ABI check ===" \
  && python -c "\
 import torch, librosa, soundfile, numpy, scipy, sys; \
 import TTS; from TTS.tts.configs.fastspeech2_config import Fastspeech2Config; \
-import pod_harness, pod_harness.framework, pod_harness.execute_job, pod_harness.stage_manifest; \
 a = Fastspeech2Config().model_args; \
-assert a.use_pitch and a.use_energy, 'pitch/energy predictors absent — this image is pointless without them'; \
+assert a.use_pitch and a.use_energy, 'pitch/energy predictors absent — the image is pointless without them'; \
+import pod_harness, pod_harness.framework, pod_harness.execute_job, pod_harness.stage_manifest; \
 print('imports OK on', sys.version.split()[0]); \
-print('torch', torch.__version__, '| cuda', torch.version.cuda); \
-print('predictors: pitch, energy, duration + speaker embedding')"
+print('torch', torch.__version__, '| cuda', torch.version.cuda, '| librosa', librosa.__version__)"
 
+# --- 6. harness + control API -------------------------------------------------------------
+# One COPY for the scripts rather than one per file: seven layers holding 25 KB is pure
+# manifest overhead.
+COPY docker/harness/Caddyfile /etc/caddy/Caddyfile
+COPY docker/harness/podh-init docker/harness/podh-preflight \
+     docker/harness/podh-watchdog docker/harness/podh-self-delete \
+     docker/harness/podh-seed-models docker/harness/podh-mount docker/harness/podh-code \
+     docker/harness/podh-publish docker/harness/podh-logs docker/harness/podh-roots \
+     docker/harness/podh-prepare \
+     /usr/local/bin/
+RUN chmod +x /usr/local/bin/podh-*
+
+COPY serve/ /app/serve/
+
+# --- 7. runtime defaults -------------------------------------------------------------------
+# PYTHONPATH puts /workspace/code AHEAD of the baked /app. That single ordering is what makes
+# the deps-only doctrine work: the image ships dependencies, the codestore ships CODE, and
+# editing a stage is a few-KB upload rather than a rebuild.
+#
+# Missing it does not error. It silently runs the BAKED code while you believe you are running
+# what you just synced.
+ENV LINGUA_CORPUS_ROOT=/workspace/corpus \
+    PODH_OUT_ROOT=/workspace/out \
+    PODH_CACHE_ROOT=/workspace/cache \
+    PODH_LOG_ROOT=/workspace/runs \
+    LINGUA_MANIFEST=/workspace/manifest/corpus_research.json \
+    PODH_API_PORT=8010 \
+    PODH_SERVE_API=1 \
+    PYTHONPATH=/workspace/code:/app \
+    PODH_MODEL_ROOT=/opt/models \
+    HF_HOME=/opt/models/hf
+
+RUN mkdir -p /workspace/corpus /workspace/runs /workspace/cache /workspace/out
+
+# --- 8. build-time sanity check -------------------------------------------------------------
+# The independence guard every image carries: no loader module may appear here. A pod cannot
+# launch a pod because the code is not present, not because it was asked not to.
+COPY docker/assert_independence.py /tmp/assert_independence.py
+RUN python /tmp/assert_independence.py && rm /tmp/assert_independence.py
+
+# Prove the harness can BOOT, not merely that the model stack imports. The first launch of
+# this image failed exactly here and only discovered it on a billed pod.
+RUN set -eux; \
+    caddy version; runpodctl version; rclone version | head -1; \
+    for s in podh-init podh-mount podh-code podh-publish podh-logs podh-roots podh-prepare; do \
+        test -x "/usr/local/bin/$s" || { echo "FAIL: $s missing"; exit 1; }; \
+    done; \
+    echo "=== image is good: harness boots, fastspeech2 trains ==="
+
+EXPOSE 8000
 WORKDIR /workspace
-ENTRYPOINT ["/usr/bin/tini", "--"]
-CMD ["python", "-m", "pod_harness.execute_job"]
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/podh-init"]
+CMD []
