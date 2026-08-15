@@ -90,10 +90,19 @@ RUN set -eux; \
 # dependency inside requirements.txt (resemble-ai's fork, since the PyPI package has no
 # wheel), and phonemizer/pandas are imported by the training utilities without being
 # declared anywhere.
-RUN python -m pip install --no-cache-dir -r "$STYLETTS2_VENDOR/requirements.txt" \
- && python -m pip install --no-cache-dir \
-        "styletts2" "numpy<2.0" "scipy>=1.11" "pandas" "phonemizer" \
-        "boto3>=1.34" "fastapi>=0.110" "uvicorn[standard]>=0.29"
+# A compiler is needed and then removed in the same layer: monotonic_align is a Cython
+# extension with no wheel for any platform, so it builds from source. A toolchain left in
+# the image is ~200 MB carried for one build step, and RunPod bills the pull.
+RUN set -eux; \
+    apt-get update -qq; \
+    apt-get install -y -qq --no-install-recommends build-essential python3.11-dev; \
+    python -m pip install --no-cache-dir "cython<3" "numpy<2.0"; \
+    python -m pip install --no-cache-dir -r "$STYLETTS2_VENDOR/requirements.txt"; \
+    python -m pip install --no-cache-dir \
+        "styletts2" "scipy>=1.11" "pandas" "phonemizer" \
+        "boto3>=1.34" "fastapi>=0.110" "uvicorn[standard]>=0.29"; \
+    apt-get purge -y --auto-remove build-essential python3.11-dev; \
+    apt-get clean; rm -rf /var/lib/apt/lists/*
 
 # Multilingual PL-BERT: 14 languages including Spanish, which is what makes this a fine-tune
 # rather than a text-encoder training project. Baked so a pod without egress still starts.
