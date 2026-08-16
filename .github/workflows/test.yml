@@ -52,10 +52,13 @@ jobs:
         #
         # Changing the tests to suit the runner would be the wrong way round. The exit
         # code IS the contract here, and a loop over the files honours it exactly.
+        # test_*.py only — the same set pytest collected. tests/ also holds e2e_layout.py,
+        # which talks to a real bucket and is meant to be run by hand against one; globbing
+        # *.py swept it in and it failed on the credentials it is supposed to need.
         run: |
           python3 -m pip install --quiet boto3
           fail=0
-          for t in tests/*.py; do
+          for t in tests/test_*.py; do
             echo "── $t"
             PYTHONPATH=src python3 "$t" || { echo "   FAILED: $t"; fail=1; }
           done
