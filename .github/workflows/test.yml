@@ -43,9 +43,23 @@ jobs:
       # line runs, so ast.parse and the import guards all passed while podh-publish crashed
       # on a pod and lost a finished run's entire output.
       - name: Harness scripts run
+        # Run as SCRIPTS, not under pytest. Every file in tests/ is a standalone program
+        # that prints its own checks and calls sys.exit() at module level — which pytest
+        # hits during COLLECTION and reports as `INTERNALERROR: SystemExit: 0`, followed
+        # by "no tests ran" and a non-zero exit. So the job went red the moment the first
+        # such test was added, and stayed red while every check inside it was passing:
+        # a CI failure that carried no information about the code.
+        #
+        # Changing the tests to suit the runner would be the wrong way round. The exit
+        # code IS the contract here, and a loop over the files honours it exactly.
         run: |
-          python3 -m pip install --quiet pytest boto3
-          PYTHONPATH=src python3 -m pytest tests/ -q
+          python3 -m pip install --quiet boto3
+          fail=0
+          for t in tests/*.py; do
+            echo "── $t"
+            PYTHONPATH=src python3 "$t" || { echo "   FAILED: $t"; fail=1; }
+          done
+          exit $fail
 
       - name: Build harness test image
         run: docker build -f docker/test.Dockerfile -t pod-harness-test .
