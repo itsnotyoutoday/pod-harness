@@ -99,6 +99,49 @@ def job_dir(job_id: str) -> Path:
     return log_root() / job_id
 
 
+HANDOFF = "handoff.json"
+
+
+def write_handoff(job_id: str, facts: dict) -> Path | None:
+    """Record small FACTS for whatever step runs after this one.
+
+    A file rather than an argument because the two ends are different processes: stages run
+    inside the job, and `heartbeat.done()` is invoked afterwards by podh-init. The file is
+    how one hands the other something.
+
+    Merged, not replaced, so several stages can each contribute without knowing about each
+    other. Only pod-control reads this — it posts on /v1/done and is injected into the next
+    step's env as PODH_HANDOFF.
+
+    ⚠️ Facts, not data. A run id, a count, a chosen parameter. Bulk output goes to the
+    object store, which is what `out_root` is already for; pod-control caps this and drops
+    anything over the cap, because the request carrying it exists to stop the billing.
+    """
+    if not job_id or not isinstance(facts, dict):
+        return None
+    p = job_dir(job_id)
+    p.mkdir(parents=True, exist_ok=True)
+    f = p / HANDOFF
+    cur = {}
+    if f.exists():
+        try:
+            cur = json.loads(f.read_text(encoding="utf-8")) or {}
+        except (OSError, ValueError):
+            cur = {}
+    cur.update(facts)
+    tmp = f.with_suffix(".tmp")
+    tmp.write_text(json.dumps(cur, indent=1, default=str), encoding="utf-8")
+    tmp.replace(f)
+    return f
+
+
+def read_handoff(job_id: str) -> dict:
+    try:
+        return json.loads((job_dir(job_id) / HANDOFF).read_text(encoding="utf-8")) or {}
+    except (OSError, ValueError):
+        return {}
+
+
 class EventLog:
     """Append-only event log for one job, with a snapshot alongside it.
 

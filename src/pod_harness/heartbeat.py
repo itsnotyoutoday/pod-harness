@@ -35,6 +35,11 @@ import urllib.request
 _UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
        "(KHTML, like Gecko) Chrome/120.0 Safari/537.36")
 
+#: Ceiling on the completion report, matching pod-control's own cap. Kept the same on both
+#: ends deliberately: a client that sends more than the server stores would have its report
+#: silently discarded, and the failure would look like a chain that refuses for no reason.
+_MAX_REPORT_BYTES = 64 * 1024
+
 
 def _cfg() -> tuple[str, str, str]:
     return (os.environ.get("PODH_CONTROL_URL", "").rstrip("/"),
@@ -143,13 +148,89 @@ def done(rc: int = 0) -> dict | None:
     to record HOW the job ended. It used to terminate the pod and leave the job row saying
     "running", so the next sweep saw a job whose pod had vanished and marked it failed —
     a successful run recorded as a failure by the very mechanism that reaped it correctly.
+
+    The per-stage summary travels with it for a different reason: `rc` says how the job
+    ENDED, not what it PRODUCED, and a chained job downstream of this one needs the second
+    question answered before it is allowed to start. A job can exit 0 having produced a
+    fraction of what it claimed — that is not hypothetical, it is how 600 unaligned
+    utterances reached a training run unnoticed.
+
+    Reported here rather than read back out of the bucket by the control plane. This pod
+    wrote status.json, so fetching it from S3 would be the same bytes by a longer path —
+    and it would mean the control plane needed object-store credentials to do something it
+    is already being told directly. It is not a trust boundary either way: the artifact
+    and the report have the same author.
     """
     url, _, pod_id = _cfg()
     if not url or not pod_id:
         return None
-    return _post("/v1/done", {"pod_id": pod_id, "provider": "runpod", "rc": int(rc),
-                              "job_id": os.environ.get("PODH_CONTROL_JOB_ID")
-                                        or os.environ.get("PODH_JOB_ID", "")})
+    body = {"pod_id": pod_id, "provider": "runpod", "rc": int(rc),
+            "job_id": os.environ.get("PODH_CONTROL_JOB_ID")
+                      or os.environ.get("PODH_JOB_ID", "")}
+    s = _status_summary()
+    if s:
+        body["status"] = s
+    h = _handoff()
+    if h:
+        body["handoff"] = h
+    return _post("/v1/done", body)
+
+
+def _handoff() -> dict | None:
+    """Facts this job chose to hand to whatever runs next. See events.write_handoff."""
+    try:
+        from . import events as _events
+        job = (os.environ.get("PODH_JOB_ID")
+               or os.environ.get("PODH_CONTROL_JOB_ID") or "")
+        return _events.read_handoff(job) or None if job else None
+    except Exception:
+        return None
+
+
+def _status_summary() -> dict | None:
+    """`stages` and `chunks` from this job's own status.json, and nothing else.
+
+    Deliberately not the whole document: the interesting parts are small and bounded, while
+    the full snapshot grows with the run. A completion report that can get large is one that
+    starts failing on the runs that matter most.
+    """
+    try:
+        from . import events as _events
+        job = (os.environ.get("PODH_JOB_ID")
+               or os.environ.get("PODH_CONTROL_JOB_ID") or "")
+        if not job:
+            return None
+        p = _events.job_dir(job) / "status.json"
+        if not p.exists():
+            return None
+        d = json.loads(p.read_text(encoding="utf-8"))
+        out = {"job_state": d.get("job_state"),
+               "stages": {k: {"state": (v or {}).get("state")}
+                          for k, v in (d.get("stages") or {}).items()},
+               "chunks": {c: {k: {"state": (v or {}).get("state")}
+                              for k, v in (st or {}).items()}
+                          for c, st in (d.get("chunks") or {}).items()}}
+
+        # Bounded, because this rides on the request that stops the billing. `stages` is
+        # fixed by the pipeline, but `chunks` grows with the input — so a run large enough
+        # to matter is exactly the one that would push this over a limit and lose the
+        # termination request with it.
+        #
+        # When it does not fit, drop the chunks that are FINE and keep the ones that are
+        # not. A truncation that discarded the failures would turn a partial run into a
+        # clean-looking one, which is the precise error this whole channel exists to stop.
+        if len(json.dumps(out)) > _MAX_REPORT_BYTES:
+            bad = {c: st for c, st in out["chunks"].items()
+                   if any((v or {}).get("state") not in ("ok", "skipped")
+                          for v in (st or {}).values())}
+            out["chunk_total"] = len(out["chunks"])
+            out["chunk_bad"] = len(bad)
+            out["chunks"] = dict(list(bad.items())[:200])
+            out["truncated"] = True
+        return out
+    except Exception:
+        # Never break the one request whose job is to get this pod terminated.
+        return None
 
 
 def start(interval_sec: float = 60.0) -> threading.Thread | None:
