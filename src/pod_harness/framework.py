@@ -93,6 +93,37 @@ class Context:
             except Exception:
                 pass        # telemetry must never break the work it is reporting on
 
+    def hand_on(self, **facts: Any) -> None:
+        """Hand small FACTS to whatever step runs after this one, in another pod.
+
+        `put`/`get` share state between stages inside ONE job and die with the pod. This
+        crosses to the next pod in a chain: pod-control collects it on /v1/done and injects
+        it as PODH_HANDOFF, keyed by step name.
+
+        For a run id, a count, a chosen parameter — not for output. Bulk results go to
+        `out_root`, which the mount already publishes to runs/<job_id>/out/ for the next
+        pod to read directly. Anything large is dropped by the control plane on arrival.
+        """
+        import os
+
+        from .events import write_handoff
+        write_handoff(os.environ.get("PODH_JOB_ID", ""), facts)
+
+    @staticmethod
+    def handed_over() -> dict:
+        """What earlier steps in this chain handed on, keyed by step name.
+
+        Empty for a job that is not part of a chain, which is the normal case — a stage can
+        call this unconditionally.
+        """
+        import json as _json
+        import os
+
+        try:
+            return _json.loads(os.environ.get("PODH_HANDOFF") or "{}")
+        except ValueError:
+            return {}
+
     def put(self, key: str, value: Any) -> None:
         self.artifacts[key] = value
 
