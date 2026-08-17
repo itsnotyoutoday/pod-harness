@@ -99,8 +99,47 @@ def context_from_spec(spec: dict) -> Context:
         opts=p.get("opts") or {},
         params=p,
     )
+    seed_given(spec, ctx)
     attach_chunks(spec, ctx)
     return ctx
+
+
+#: The placeholder a `given` name is seeded with. Truthy so `Context.has` accepts it, and
+#: recognisable so a stage can tell "declared, not yet fetched" from a real artifact.
+GIVEN = {"_given": True}
+
+
+def seed_given(spec: dict, ctx: Context) -> list:
+    """Artifacts the job asserts come from OUTSIDE this pipeline.
+
+    `Runner.wiring` refuses to run when a stage requires something no earlier stage
+    produces. That check is worth having — it catches a stage reading an artifact nobody
+    writes, before a pod-hour is spent — but it assumes every input is made here, and some
+    legitimately are not:
+
+        pipeline: {stages: [probe], given: [checkpoint]}
+
+    ...is "probe the model that already exists", which needs no training run and no corpus.
+    Without this it is unexpressible, and the only way to reach `probe` is to retrain — the
+    most expensive possible way to discover that `probe` itself is broken. That is not
+    hypothetical: an 18-hour run reached epoch 999 and the one stage that can falsify the
+    model never executed.
+
+    The name is seeded, never the value. The stage that declared the requirement is the only
+    thing that knows how to fetch it, and it does so in `readiness()`; this only tells the
+    static check to stop objecting. If the stage cannot actually supply it, the RUNTIME
+    readiness check still finds the placeholder unreplaced and skips the stage — so an
+    incorrect `given` degrades to "did not run", not to "ran on nothing".
+    """
+    names = [n for n in ((spec.get("pipeline") or {}).get("given")
+                         or spec.get("given") or []) if n]
+    for n in names:
+        if not ctx.has(n):
+            ctx.put(n, dict(GIVEN))
+    if names:
+        print(f"  given: {', '.join(names)} — supplied from outside this pipeline",
+              flush=True)
+    return names
 
 
 def attach_chunks(spec: dict, ctx: Context) -> None:
