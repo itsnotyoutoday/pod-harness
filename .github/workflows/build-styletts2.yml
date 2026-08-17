@@ -15,6 +15,17 @@ on:
     branches: [main]
     paths:
       - 'docker/styletts2.Dockerfile'
+      # The engine and harness that EVERY image embeds. A change here genuinely
+      # invalidates this image — it carries its own copy, so the copy really is stale.
+      # This was MISSING here while the CPU images had it, so a change to the stage
+      # engine reached three images and silently skipped this one: the pod would run a
+      # months-old engine against freshly-synced workload code. That is exactly the
+      # version drift baking the engine in was meant to prevent.
+      - 'src/**'
+      - 'serve/**'
+      - 'docker/harness/**'
+      - 'docker/assert_*.py'
+      - 'contract.json'
       - '.github/workflows/build-styletts2.yml'
   workflow_dispatch:
 
