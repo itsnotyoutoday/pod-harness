@@ -74,6 +74,29 @@ docker run -d -p 8000:8000 \
 curl -s localhost:8000/v1/health
 ```
 
+### Sidecar: install into a container you did not build
+
+Catalog images (runpod/comfyui and the like) own their entrypoint. Rather than rebuilding
+them on this base, install the control surface beside the workload:
+
+```bash
+pip install "pod-harness[serve] @ git+https://github.com/itsnotyoutoday/pod-harness@v0.2.0"
+PODH_API_TOKEN=<per-pod token> \
+PODH_SIDECAR_LOGS="comfy=/workspace/comfyui.log,/workspace/doppel/*.log" \
+PODH_SIDECAR_ARTIFACTS=/workspace/outputs \
+podh-serve --sidecar &          # port PODH_SIDECAR_PORT, default 8000; expose "8000/http"
+```
+
+Routes (all but health need `X-Podh-Token`): `GET /v1/health`, `GET /v1/`, `GET /v1/logs`,
+`GET /v1/logs/{name}?tail=&offset=&wait=` (bounded, followable), `POST /v1/progress
+{"step"}` and `GET /v1/events?since_seq=&wait=`, `GET /v1/system` (disk, GPU),
+`GET /v1/artifacts?path=` and `/v1/artifacts/file?path=` (read-only, never outside a
+root), `POST /v1/done` (ask pod-control to terminate this pod).
+
+It runs no stages and does not heartbeat by default: a sidecar that heartbeats on its own
+keeps a hung pod looking alive. `PODH_SIDECAR_HEARTBEAT=1` plus `PODH_SIDECAR_LIVENESS=<url
+the workload answers>` heartbeats only while the workload does. See `pod_harness/sidecar.py`.
+
 ### Submit a job
 
 ```bash

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pod-harness"
-version = "0.1.0"
+version = "0.2.0"
 description = "The in-pod execution engine: stage model, verification, resume, status"
 # 3.9 because that is what ships on macOS and what this actually runs on — every module
 # imports under it, since the annotations are all postponed via __future__. Claiming 3.10
@@ -29,6 +29,10 @@ dependencies = [
 # need not be true of a serverless worker.
 serve = ["fastapi>=0.110", "uvicorn[standard]>=0.29"]
 dev = ["pytest>=8"]
+
+[project.scripts]
+# Sidecar mode only: the full harness ships as its own image, not as a pip install.
+podh-serve = "pod_harness.sidecar:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
