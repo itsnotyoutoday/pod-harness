@@ -51,6 +51,16 @@ def load_spec(path: Optional[str], ctx: Context) -> dict:
         except (OSError, ValueError) as e:
             raise BootFailure(f"cannot read the boot spec {path}: {e}", stage="spec")
     if not heartbeat._cfg()[0]:
+        # No control plane and no spec: the image was started on its own (a provider's
+        # console, `docker run`). An image that ships a default spec stays usable then —
+        # e.g. ComfyUI on :8188 — instead of idling on a fatal "no spec".
+        fallback = os.environ.get("PODH_STANDALONE_SPEC", "")
+        if fallback and Path(fallback).is_file():
+            say(f"standalone: no control plane — running this image's default spec ({fallback})")
+            try:
+                return json.loads(Path(fallback).read_text())
+            except (OSError, ValueError) as e:
+                raise BootFailure(f"cannot read the standalone spec {fallback}: {e}", stage="spec")
         raise BootFailure("no boot spec: give --spec FILE or set PODH_CONTROL_URL", stage="spec")
     deadline = time.time() + ctx.limit("spec")
     delay = 2.0

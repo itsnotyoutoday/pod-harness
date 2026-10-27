@@ -191,5 +191,10 @@ RUN set -eux; \
 
 WORKDIR /workspace
 EXPOSE 8188
+# Started on its own (no control plane, no spec), the image still boots: GPU check, then
+# ComfyUI on :8188 with models under /workspace/models. Under pod-control the job's spec wins.
+COPY docker/comfyui/standalone.json /opt/podh/standalone.json
+ENV PODH_STANDALONE_SPEC=/opt/podh/standalone.json
+EXPOSE 8188
 ENTRYPOINT ["/usr/bin/tini", "--", "/opt/venv/bin/podh-boot"]
 CMD []
