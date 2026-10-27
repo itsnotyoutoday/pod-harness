@@ -127,7 +127,10 @@ jobs:
       - name: Compute tags
         id: meta
         run: |
-          OWNER='${{ needs.base.outputs.owner }}'
+          # Recomputed here, not taken from the base job: GitHub blanks a job output whose
+          # value matches a secret (the owner equals DOCKERHUB_USER), which gave "ghcr.io//…".
+          OWNER=$(echo '${{ github.repository_owner }}' | tr A-Z a-z)
+          echo "owner=$OWNER" >> $GITHUB_OUTPUT
           VERSION='${{ needs.base.outputs.version }}'
           TAGS="ghcr.io/$OWNER/podh-comfyui-video:$VERSION,ghcr.io/$OWNER/podh-comfyui-video:latest"
           if [ -n "$DOCKERHUB_USER" ]; then
@@ -170,5 +173,5 @@ jobs:
           build-args: |
             BASE_IMAGE=${{ steps.meta.outputs.base }}
           tags: ${{ steps.meta.outputs.tags }}
-          cache-from: type=registry,ref=ghcr.io/${{ needs.base.outputs.owner }}/podh-comfyui-video:buildcache,ignore-error=true
-          cache-to: type=registry,ref=ghcr.io/${{ needs.base.outputs.owner }}/podh-comfyui-video:buildcache,mode=max,ignore-error=true
+          cache-from: type=registry,ref=ghcr.io/${{ steps.meta.outputs.owner }}/podh-comfyui-video:buildcache,ignore-error=true
+          cache-to: type=registry,ref=ghcr.io/${{ steps.meta.outputs.owner }}/podh-comfyui-video:buildcache,mode=max,ignore-error=true
