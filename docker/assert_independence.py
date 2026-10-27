@@ -38,7 +38,7 @@ FORBIDDEN = ("sync", "volume", "capabilities", "reaper", "runpod_api", "batch_po
 #: Must be importable: the engine the harness actually runs.
 REQUIRED = ("framework", "execute_job", "registry", "events", "status", "spec",
             "resume", "progress", "mount", "storage", "objectstore", "parallel",
-            "resources", "heartbeat", "report", "gpucheck", "fetch", "kits")
+            "resources", "heartbeat", "report", "gpucheck", "fetch", "kits", "local")
 
 INIT = pathlib.Path("/usr/local/bin/podh-init")
 

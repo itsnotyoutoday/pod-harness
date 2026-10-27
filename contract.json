@@ -43,7 +43,10 @@
       "PODH_GPUCHECK_TIMEOUT": "CUDA probe timeout in seconds, default 120",
       "PODH_HEARTBEAT_SEC": "seconds between /alive beats, default 60",
       "PODH_HEARTBEAT_STALE_SEC": "beats stop once console output and job events have been still this long (default 1800), so a hung workload goes quiet. 0 disables the gate.",
-      "PODH_HEARTBEAT_STOP_FILE": "the flag that silences the heartbeat at done; default /tmp/podh-stop-heartbeat. Exists for tests."
+      "PODH_HEARTBEAT_STOP_FILE": "the flag that silences the heartbeat at done; default /tmp/podh-stop-heartbeat. Exists for tests.",
+      "PODH_LOCAL_PORT": "podh-boot's local API port on 127.0.0.1; default ephemeral",
+      "PODH_LOCAL_TOKEN": "token for the local API; default random. Exported to the app and workload.",
+      "PODH_LOCAL_URL": "set BY podh-boot for the app stage, the workload and app.serve: the local API (POST /busy, GET /state, POST /done). podh-report busy|idle|done use it."
     },
     "provider_supplied": {
       "RUNPOD_POD_ID": "set by RunPod; used only for labelling, never for logic"
@@ -525,5 +528,67 @@
         }
       ]
     }
+  },
+  "local_api": {
+    "_comment": "Served by podh-boot on 127.0.0.1 for the app's worker. Auth: X-Podh-Token: $PODH_LOCAL_TOKEN (or Authorization: Bearer). /health needs none.",
+    "routes": [
+      {
+        "method": "GET",
+        "path": "/health",
+        "reply": [
+          "ok"
+        ]
+      },
+      {
+        "method": "POST",
+        "path": "/busy",
+        "body": {
+          "required": [
+            "busy"
+          ],
+          "optional": [
+            "detail"
+          ]
+        },
+        "reply": [
+          "busy"
+        ],
+        "note": "rides on the next /alive (sent within ~2 s of a flip)"
+      },
+      {
+        "method": "GET",
+        "path": "/state",
+        "reply": [
+          "drain",
+          "park",
+          "extend_until",
+          "models_rev",
+          "models",
+          "busy",
+          "detail",
+          "stage",
+          "ready"
+        ],
+        "note": "drain/park/extend_until/models_rev are the last /alive reply's; models is {path: present|fetching|failed}"
+      },
+      {
+        "method": "POST",
+        "path": "/done",
+        "body": {
+          "required": [
+            "rc"
+          ],
+          "optional": [
+            "reason",
+            "stage"
+          ]
+        },
+        "reply": [
+          "requested",
+          "configured"
+        ],
+        "note": "the only exit: reported to the control plane, and podh-boot stops what it supervises"
+      }
+    ]
   }
 }
