@@ -644,9 +644,11 @@
             "200": [
               "tasks",
               "lease_s"
-            ]
+            ],
+            "200 draining": "draining: true, no tasks: no more claims; unstarted tasks are released",
+            "409": "this pod was not launched for a task pool: polled again"
           },
-          "note": "have = {models: [paths under the models root], loaded: [the last task's needs.loads]}. kinds only with --kinds; window_s (the paid keep-warm/idle window left, from /state window_until) only when known. Each task: task_id, kind, state (claimed|held), held_reason?, lease_s?, timeout_s?, stall_s?, needs, workflow, inputs {name: url | {url, sha256?, size?, filename?}}, outputs {to?, keep?, put? {name: url | {url, ref}}, put_url?}, models? [{path, url, sha256?, size?}] (links for a held task's missing models; absent: asked of podh-boot by path), payload, fallback?"
+          "note": "have = {models: [paths under the models root], loaded: [the last task's needs.loads]}. kinds only with --kinds; window_s only when known (pod-control ignores both today). Each task (claim_view): task_id, kind, lane, pool, state (claimed|held), attempt, lease_s, lease_until, timeout_s (null: none), needs {models [{path, size?, sha256?}], loads, …}, workflow, payload, labels, inputs {name: {url, ref?} (presigned at claim) | {value} (a dependency's result path)}, outputs {to?, keep, put_url?, put? {name: url} (only for outputs.names), sign?}, held_reason (pod_fetch), missing_models [path]. No model links: pod-control adds a held task's models to the pod's job and podh-boot fetches them by path (GET /v1/pod/models). Source: pod-control src/pod_control/taskapi.py, tasks.py; TASK-API §3, §8, §9"
         },
         {
           "method": "POST",
@@ -658,19 +660,24 @@
           ],
           "reply": {
             "200": [
-              "cancel"
+              "cancel",
+              "state",
+              "lease_until"
             ],
-            "404/409/410": "the lease is lost: work stops, nothing is reported"
+            "200 cancel": "state cancelled: cancel (interrupt, report cancelled); any other state: the lease is gone (requeued or another pod's) — work stops, nothing is reported",
+            "404/409/410": "not ours: work stops, nothing is reported"
           },
-          "note": "every lease_s/3 from claim to report, held and prefetched tasks too"
+          "note": "every lease_s/3 (lease_s 15–3600) from claim to report, held and prefetched tasks too"
         },
         {
           "method": "POST",
           "path": "/v1/pod/tasks/{id}/start",
           "client": "worker/api.py",
           "reply": {
-            "2xx": "running",
-            "404/409/410": "not ours any more: dropped",
+            "200": [
+              "state"
+            ],
+            "404/409": "not ours any more (409 {detail: {error, cancel: true}}): dropped",
             "other": "retried 4 times, then released"
           }
         },
@@ -685,9 +692,16 @@
           "optional": [
             "result",
             "error",
-            "usage"
+            "usage",
+            "retryable"
           ],
-          "note": "artifacts [{name, ref, size, sha256}]; result is finish()'s JSON (≤ 256 KB); error {stage, reason, log_tail}, stage cancelled for a cancel; usage {phases {fetch_s, run_s, upload_s}, held_s, prefetched, vram_peak_mb?}. Retried on no answer or 5xx."
+          "reply": {
+            "200": [
+              "accepted",
+              "state"
+            ]
+          },
+          "note": "artifacts [{name, size?, sha256?, url?}] — pod-control makes each ref (outputs.to + name); url only when there is no store prefix (put_url). result is finish()'s JSON (≤ 256 KB); error {stage, reason, log_tail}, stage cancelled for a cancel; retryable: true for stages inputs, upload, stall (or TaskFailed(retryable=True)) → requeued attempt + 1, failed at max_attempts. usage: pod-control reads phases {fetch_s, run_s, upload_s} and vram_peak_mb and computes the rest (cost_usd, wall_s, held_s, prefetched). accepted false (cancelled or lost) is final. Retried on no answer or 5xx."
         },
         {
           "method": "POST",
@@ -696,44 +710,77 @@
           "required": [
             "reason"
           ],
-          "note": "\"no handler\", \"draining\", \"models: …\", \"failed on pod: …\" (fallback: app)"
+          "reply": {
+            "200": [
+              "released",
+              "state"
+            ]
+          },
+          "note": "\"no handler\" (the only reason counted toward max_releases), \"draining\", \"models: …\", \"failed on pod: …\" (fallback: app → returned). Never offered to this pod again."
+        },
+        {
+          "method": "POST",
+          "path": "/v1/pod/tasks/{id}/outputs",
+          "client": "worker/api.py",
+          "required": [
+            "names"
+          ],
+          "reply": {
+            "200": [
+              "put"
+            ],
+            "409": "not running here, or outputs are not a store prefix"
+          },
+          "note": "presigned PUTs {name: url} under outputs.to for names chosen at run time; asked again for a link refused with 401/403"
         },
         {
           "method": "POST",
           "path": "/v1/pod/tasks/{id}/sign",
           "client": "worker/api.py",
-          "optional": [
-            "refs",
-            "put"
+          "required": [
+            "refs"
           ],
           "reply": {
             "200": [
               "urls",
-              "put"
-            ]
+              "expires_s"
+            ],
+            "403": "not an input, not under outputs.to, not in a lane-bound store"
           },
-          "note": "refs: store:// refs for ctx.fetch → urls {ref: url}; put: artifact names without a link in the claim → put {name: url | {url, ref}}. Asked again for a put link refused with 401/403."
+          "note": "ctx.fetch(store://…): presigned GETs {ref: url}"
         },
         {
           "method": "POST",
           "path": "/v1/pod/tasks/{id}/event",
           "client": "worker/api.py",
           "required": [
-            "event"
+            "data"
           ],
-          "note": "ctx.emit; at most 1/s per task (the worker waits out the gap), ≤ 16 KB"
+          "reply": {
+            "200": [
+              "emitted",
+              "cancel"
+            ]
+          },
+          "note": "ctx.emit → task.event; at most 1/s per task (the worker waits out the gap; pod-control drops extras with emitted: false), ≤ 16 KB"
         },
         {
           "method": "POST",
-          "path": "/v1/pod/tasks/{id}/artifact",
+          "path": "/v1/pod/tasks/{id}/artifacts",
           "client": "worker/api.py",
           "optional": [
             "name",
-            "ref",
             "size",
-            "sha256"
+            "sha256",
+            "url"
           ],
-          "note": "after each upload, mid-run included; best effort"
+          "reply": {
+            "200": [
+              "cancel",
+              "artifacts"
+            ]
+          },
+          "note": "after each upload, mid-run included (task.artifact); best effort"
         }
       ]
     }

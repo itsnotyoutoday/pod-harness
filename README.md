@@ -216,28 +216,38 @@ claim → (held: fetch models) → start → fetch inputs → handler prepare/ru
   `--prefetch` (claimed ahead, default 1): the next task's models download while one runs.
   The claim reports the models on disk and `have.loaded` (the last task's `needs.loads`), so
   the control plane can prefer a pod that already has the checkpoint.
-- **Held** tasks wait for their models, fetched through podh-boot's `POST /models/fetch`;
-  a model that cannot be fetched releases the task (no attempt counted).
+- **Held** tasks wait for their models (`missing_models`, by path): the control plane has
+  added them to the pod's job, and podh-boot's `POST /models/fetch` fetches them; a model
+  that cannot be fetched releases the task (no attempt counted).
 - **Busy**: the local busy flag is true while the worker holds any task, so the pod's idle
   clock is right.
-- **Cancel** (a beat reply): ComfyUI is interrupted; if it does not stop within 20 s the
-  workload is restarted; reported as `cancelled`. A task cancelled before it starts is
-  dropped. A lease answered 404/409/410 is no longer this pod's: work stops, nothing is
-  reported.
+- **Cancel** (a beat reply `{"cancel": true, "state": "cancelled"}`): ComfyUI is
+  interrupted; if it does not stop within 20 s the workload is restarted; reported as
+  `cancelled`. A task cancelled before it starts is dropped. A beat reply with `cancel` and
+  any other state, or a 404/409/410, means the lease is gone (requeued, or another pod's):
+  work stops, nothing is reported.
 - **Stall**: a ComfyUI execution with no progress for `stall_s` (task, else `--stall-s`,
   default 600) is interrupted, then restarted if need be — a failed attempt, stage `stall`.
-  `timeout_s` caps the whole task.
+  `timeout_s` caps the whole task. Failures at `inputs`, `upload` and `stall` are sent
+  `retryable` (another attempt, up to `max_attempts`); a handler can choose with
+  `TaskFailed(reason, stage, retryable=True|False)`.
 - **Drain / park / SIGTERM**: no more claims, unstarted tasks released `draining`, the
   running ones finish, exit 0.
 - An unknown `kind`, or one outside `--kinds`, is released with reason `no handler`.
 - A task with `fallback: "app"` is released rather than failed when it fails on the pod.
-- Inputs are cached across tasks up to `PODH_INPUT_CACHE_GB` (default 2).
-- `done` carries `result` (finish()'s JSON, ≤ 256 KB), `artifacts` and `usage` (fetch, run
-  and upload seconds, held seconds, prefetched, VRAM peak when `nvidia-smi` exists).
+- Inputs arrive presigned in the claim (`{url, ref?}`) and are cached across tasks up to
+  `PODH_INPUT_CACHE_GB` (default 2). An input that is a dependency's result path arrives as
+  `{value}`: it is in `ctx.values`, and `{input:<name>}` in a patch becomes the value.
+- Outputs go to the claim's `outputs.put` links (names declared at submit), else to links
+  asked for by name under `outputs.to` (`POST …/outputs`), else to the app's `put_url`.
+- `done` carries `result` (finish()'s JSON, ≤ 256 KB), `artifacts` (`{name, size, sha256}`;
+  the control plane files each under `outputs.to`) and `usage` (fetch, run and upload
+  seconds; VRAM peak when `nvidia-smi` exists).
 
 `--once` runs one task and exits (for tests and one-shot pods); `--poll S` sets the gap
 between empty claims. The routes it calls are in `contract.json` under
-`control_plane.pod_calls`.
+`control_plane.pod_calls`; `tests/test_worker_against_server.py` runs the worker against a
+real control plane when its source is importable.
 
 **The built-in `comfy` kind** loads `workflow.ref` (a file in the app bundle) or
 `workflow.inline` (ComfyUI's API format), applies `workflow.patch`

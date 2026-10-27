@@ -18,6 +18,9 @@ For podh-boot it also plays the parts outside pod-control:
   prefix_routes [(METHOD, path prefix, fn(req) -> (code, obj))] — for routes with ids in
             them (/v1/pod/tasks/{id}/beat); tried after `routes`.
 
+The task routes (/v1/pod/tasks/*) are tests/_fake_tasks.py, built on prefix_routes with
+the control plane's own reply shapes.
+
 Not a test itself (no test_ prefix), so CI's `tests/test_*.py` loop does not run it.
 """
 from __future__ import annotations

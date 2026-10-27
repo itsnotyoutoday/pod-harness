@@ -8,11 +8,15 @@ one runs.
 
 Endings, per task:
   ok                      done {ok: true, result, artifacts, usage}
-  failed                  done {ok: false, error {stage, reason, log_tail}} — or a release,
-                          when the task says `fallback: "app"` (the app runs it itself)
-  cancelled (beat reply)  ComfyUI interrupted (workload restarted if it ignores that), then
-                          done {ok: false, error {stage: "cancelled"}}; before start: dropped
-  lease lost (404/409/410 on a beat or start)   work stopped, nothing reported
+  failed                  done {ok: false, error {stage, reason, log_tail}}, with
+                          retryable: true for a transient stage (inputs, upload, stall) —
+                          or a release, when the task says `fallback: "app"` (pod-control
+                          ends it `returned`; the app runs it itself)
+  cancelled (beat reply {cancel: true, state: "cancelled"})   ComfyUI interrupted (workload
+                          restarted if it ignores that), then done {ok: false, error
+                          {stage: "cancelled"}}; before start: dropped
+  lease lost (beat {cancel: true, state: other}, or 404/409/410)   work stopped, nothing
+                          reported
   no handler / kind not served here             release "no handler"
   drain, park, SIGTERM    unstarted tasks released ("draining"), running ones finish,
                           then exit 0
@@ -31,13 +35,16 @@ import time
 from pathlib import Path
 from typing import Optional
 
-from .. import fetch, local
+from .. import local
 from ..comfy import Cancelled, ComfyError
 from . import api
 from .context import TaskContext
 from .handlers import TaskFailed, load_handlers
 
 DEFAULT_LEASE = 180.0
+#: Failures worth another attempt, perhaps on another pod: pod-control requeues them
+#: (attempt + 1) on done {retryable: true}, or fails them at max_attempts.
+RETRYABLE_STAGES = ("inputs", "upload", "stall")
 MAX_RESULT = 256 * 1024
 _NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 _SKIP = (".part", ".aria2", ".tmp", ".podh-tmp")
@@ -240,6 +247,9 @@ class Worker:
                 self.log(f"[podh-worker] claim: pod-control answered {status or 'nothing'}")
             self.next_claim = time.time() + self.poll_s
             return
+        if obj.get("draining") and not self.draining:
+            self.log("[podh-worker] pod-control says this pod is draining: no more claims")
+            self.draining = True
         got = [t for t in (obj.get("tasks") or []) if isinstance(t, dict) and t.get("task_id")]
         if not got:
             self.next_claim = time.time() + self.poll_s
@@ -275,7 +285,13 @@ class Worker:
                 t.ctx.stop("lost")
                 if not t.started:
                     self._drop(t)
-            elif 200 <= st < 300 and isinstance(obj, dict) and obj.get("cancel"):
+            elif 200 <= st < 300 and api.gone(obj) == "lost":
+                t.ctx.log(f"lease lost (the task is {obj.get('state')}); stopping, "
+                          f"reporting nothing")
+                t.ctx.stop("lost")
+                if not t.started:
+                    self._drop(t)
+            elif 200 <= st < 300 and api.gone(obj) == "cancelled":
                 if t.ctx.stop_reason is None:
                     t.ctx.log("cancelled by pod-control")
                 t.ctx.stop("cancelled")
@@ -297,7 +313,7 @@ class Worker:
                 t.ctx.log(f"no handler for kind {t.kind!r}: {why}")
                 return self._release(t, "no handler")
             t.handler = h
-            if t.held or t.task.get("models"):
+            if t.held or t.task.get("missing_models"):
                 t0 = time.time()
                 err = self._models(t)
                 t.held_s = time.time() - t0
@@ -312,58 +328,45 @@ class Worker:
             t.ctx.log(f"prepare crashed: {type(e).__name__}: {e}")
             self._release(t, f"worker error: {type(e).__name__}"[:300])
 
-    def _needed(self, t: TaskRun) -> tuple:
-        """(files with links, bare paths) of the task's models not on this disk."""
-        files, paths = [], []
-        for m in t.task.get("models") or []:
-            if isinstance(m, dict) and m.get("path") and m.get("url"):
-                files.append(m)
-        linked = {m["path"] for m in files}
+    def _needed(self, t: TaskRun) -> list:
+        """The task's models (needs.models, and the claim's missing_models) not on this disk,
+        by path. pod-control has added them to this pod's job (mid-life additions), so
+        podh-boot's local API fetches them through GET /v1/pod/models."""
+        sizes: dict = {}
         for m in (t.task.get("needs") or {}).get("models") or []:
             p = m.get("path") if isinstance(m, dict) else m
-            if isinstance(p, str) and p not in linked:
-                paths.append(p)
+            if isinstance(p, str) and p:
+                sizes[p] = m.get("size") if isinstance(m, dict) else None
+        for p in t.task.get("missing_models") or []:
+            if isinstance(p, str) and p:
+                sizes.setdefault(p, None)
 
         def missing(p, size=None):
             f = self.models_root / p
             return not f.is_file() or (size is not None and f.stat().st_size != int(size))
-        return ([m for m in files if missing(m["path"], m.get("size"))],
-                [p for p in paths if missing(p)])
+        return [p for p, size in sizes.items() if missing(p, size)]
 
     def _models(self, t: TaskRun) -> Optional[str]:
-        files, paths = self._needed(t)
-        want = [m["path"] for m in files] + paths
+        want = self._needed(t)
         if not want:
             return None
         t.ctx.log(f"fetching {len(want)} model(s): {', '.join(want)[:200]}")
         t.ctx.progress(0.0, "fetching models")
-        if self.local.configured:
-            st, obj = self.local.models_fetch(files, paths)
-            if st == 202:
-                end = time.time() + self.model_timeout_s
-                while time.time() < end:
-                    if t.ctx.stop_reason or t.closed:
-                        return "stopped"
-                    states = (self.local.state().get("models") or {})
-                    if all(states.get(p) in ("present", "failed") for p in want):
-                        bad = [p for p in want if states.get(p) == "failed"]
-                        return f"failed: {', '.join(bad)}" if bad else None
-                    time.sleep(0.5)
-                return f"not present after {self.model_timeout_s:.0f}s"
-            if st not in (0, 503):
-                return f"local /models/fetch answered {st}: {obj}"
-        # no podh-boot to ask: fetch the linked ones here
-        if paths:
-            return f"no link for {', '.join(paths)[:200]}"
-        for m in files:
-            dest = (self.models_root / m["path"]).resolve()
-            if self.models_root.resolve() not in dest.parents:
-                return f"{m['path']}: outside the models root"
-            try:
-                fetch.download(m["url"], dest, size=m.get("size"), sha256=m.get("sha256"))
-            except fetch.DownloadError as e:
-                return str(e)
-        return None
+        if not self.local.configured:
+            return f"no podh-boot local API to fetch {', '.join(want)[:200]}"
+        st, obj = self.local.models_fetch([], want)
+        if st != 202:
+            return f"local /models/fetch answered {st}: {obj}"
+        end = time.time() + self.model_timeout_s
+        while time.time() < end:
+            if t.ctx.stop_reason or t.closed:
+                return "stopped"
+            states = (self.local.state().get("models") or {})
+            if all(states.get(p) in ("present", "failed") for p in want):
+                bad = [p for p in want if states.get(p) == "failed"]
+                return f"failed: {', '.join(bad)}" if bad else None
+            time.sleep(0.5)
+        return f"not present after {self.model_timeout_s:.0f}s"
 
     def _dispatch(self) -> None:
         with self.lock:
@@ -394,7 +397,7 @@ class Worker:
                 t.ctx.restart_workload()
                 self._report(t, ok=False, error={
                     "stage": "cancelled" if t.ctx.cancelled() else (t.ctx.stop_reason or "run"),
-                    "reason": "the handler did not stop"})
+                    "reason": "the handler did not stop"}, retryable=not t.ctx.cancelled())
                 self.broken = f"task {t.id}: the handler did not stop"
                 self._close(t)
 
@@ -405,6 +408,9 @@ class Worker:
                 raise TaskFailed(f"input name {name!r} is not a plain name", "inputs")
             if isinstance(spec, str):
                 spec = {"url": spec}
+            if isinstance(spec, dict) and "value" in spec and not spec.get("url"):
+                t.ctx.values[name] = spec["value"]      # a dependency's result path
+                continue
             if not isinstance(spec, dict) or not spec.get("url"):
                 raise TaskFailed(f"input {name}: no link (the claim should carry one)", "inputs")
             url = str(spec["url"])
@@ -425,6 +431,7 @@ class Worker:
         ctx, task = t.ctx, t.task
         phase, phases = "start", {}
         ok, result, error = False, None, None
+        retryable: Optional[bool] = None
         mark = time.time()
 
         def lap(name):
@@ -474,6 +481,8 @@ class Worker:
             error = {"stage": "cancelled", "reason": str(e) or "cancelled"}
         except TaskFailed as e:
             error = {"stage": e.stage or phase, "reason": e.reason}
+            if e.retryable is not None:
+                retryable = bool(e.retryable)
         except ComfyError as e:
             error = {"stage": e.stage or phase, "reason": e.reason}
         except Exception as e:
@@ -486,7 +495,11 @@ class Worker:
         usage = {"phases": phases, "held_s": round(t.held_s, 3), "prefetched": t.prefetched}
         if t.vram_peak:
             usage["vram_peak_mb"] = t.vram_peak
-        self._report(t, ok, result=result, error=error, usage=usage)
+        if error and retryable is None:
+            retryable = error["stage"] in RETRYABLE_STAGES
+        self._report(t, ok, result=result, error=error, usage=usage,
+                     retryable=bool(retryable) and error is not None
+                     and error["stage"] != "cancelled")
         if ok:
             loads = (task.get("needs") or {}).get("loads")
             if isinstance(loads, list):
@@ -494,7 +507,8 @@ class Worker:
         self._close(t)
 
     # -- endings ----------------------------------------------------------------------------
-    def _report(self, t: TaskRun, ok: bool, result=None, error=None, usage=None) -> None:
+    def _report(self, t: TaskRun, ok: bool, result=None, error=None, usage=None,
+                retryable: bool = False) -> None:
         with t.lock:
             if t.closed:
                 return
@@ -505,11 +519,14 @@ class Worker:
             api.release(t.id, reason)
             self.reports.append((t.id, "released"))
             return
-        st, _ = api.done(t.id, ok, list(t.ctx.artifacts), result=result, error=error,
-                         usage=usage)
+        st, obj = api.done(t.id, ok, list(t.ctx.artifacts), result=result, error=error,
+                           usage=usage, retryable=retryable)
         outcome = "succeeded" if ok else ("cancelled" if error and error.get("stage") ==
-                                          "cancelled" else "failed")
-        t.ctx.log(f"done: {outcome} (pod-control answered {st or 'nothing'})")
+                                          "cancelled" else "retry" if retryable else "failed")
+        said = f"{st or 'nothing'}"
+        if isinstance(obj, dict) and "state" in obj:
+            said += f", {'accepted' if obj.get('accepted') else 'not accepted'}: {obj['state']}"
+        t.ctx.log(f"done: {outcome} (pod-control answered {said})")
         self.reports.append((t.id, outcome))
 
     def _release(self, t: TaskRun, reason: str) -> None:

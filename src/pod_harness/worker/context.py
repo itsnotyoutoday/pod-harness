@@ -2,13 +2,14 @@
 
     ctx.task, ctx.task_id, ctx.payload, ctx.models_root, ctx.app_root, ctx.workdir
     ctx.inputs            {name: local Path}, fetched and verified before prepare()
+    ctx.values            {name: JSON value}, inputs that are a dependency's result path
     ctx.comfy             a pod_harness.comfy.ComfyClient wired to this task (cancel,
                           timeout, progress, restart): ctx.comfy.run(graph, timeout_s=, stall_s=)
     ctx.progress(f, msg)  0..1, carried on the next beat
     ctx.log(msg)          the worker's log; the tail goes with a failure
     ctx.emit({...})       a task.event (≤ 1/s, ≤ 16 KB)
     ctx.fetch(url | store://ref, dest=None) → Path
-    ctx.upload(path, name) → {"name", "ref"}   (mid-run too)
+    ctx.upload(path, name) → {"name", "ref"}   (mid-run too; ref is None with a put_url)
     ctx.restart_workload() → bool
     ctx.cancelled() → bool;  ctx.check() raises Cancelled (or TaskFailed on a timeout)
 """
@@ -73,6 +74,7 @@ class TaskContext:
         self.app_root = Path(app_root)
         self.stall_s = float(task.get("stall_s") or stall_s or 0) or None
         self.inputs: dict = {}
+        self.values: dict = {}
         self.artifacts: list = []
         self.local = local_client or local.Client()
         self._log = log or (lambda t: print(t, flush=True))
@@ -115,8 +117,15 @@ class TaskContext:
         if gap < 1.0:
             time.sleep(1.0 - gap)
         self._last_emit = time.time()
-        st, _ = api.event(self.task_id, event)
-        return 200 <= st < 300
+        st, obj = api.event(self.task_id, event)
+        self._heard(obj)
+        return 200 <= st < 300 and bool((obj or {}).get("emitted", True))
+
+    def _heard(self, obj) -> None:
+        """A 200 reply that says the task is no longer running here."""
+        why = api.gone(obj)
+        if why:
+            self.stop(why)
 
     # -- stopping ---------------------------------------------------------------------------
     def stop(self, reason: str) -> None:
@@ -151,10 +160,8 @@ class TaskContext:
             sha256 = sha256 or src.get("sha256")
             size = size if size is not None else src.get("size")
         if url and url.startswith("store://"):
-            st, obj = api.sign(self.task_id, refs=[url])
+            st, obj = api.sign(self.task_id, [url])
             got = ((obj or {}).get("urls") or {}).get(url) if st == 200 else None
-            if isinstance(got, dict):
-                got = got.get("url")
             if not got:
                 raise TaskFailed(f"could not sign {url}: pod-control answered {st}", "inputs")
             name, url = url.rstrip("/").rsplit("/", 1)[-1], got
@@ -167,26 +174,27 @@ class TaskContext:
             raise TaskFailed(f"fetch {name}: {e}", "inputs")
 
     def _put_link(self, name: str, fresh: bool = False) -> tuple:
-        """(url, ref) to upload `name` to: the claim's outputs.put[name], else
-        outputs.put_url ("{name}" filled in), else asked of pod-control (sign put)."""
+        """(url, ref) to upload `name` to: the claim's outputs.put[name] (names declared at
+        submit), else outputs.put_url (the app's own link, "{name}" filled in), else a link
+        asked of pod-control under outputs.to (POST …/outputs {"names"}). ref is
+        outputs.to + name, or None when the app keeps its own storage."""
         out = self.task.get("outputs") or {}
-        ref = None
-        if out.get("to"):
-            ref = str(out["to"]).rstrip("/") + "/" + name
+        to = str(out.get("to") or "")
+        ref = (to if to.endswith("/") else to + "/") + name if to else None
         if not fresh:
             link = (out.get("put") or {}).get(name) if isinstance(out.get("put"), dict) else None
-            if isinstance(link, dict):
-                return link.get("url"), link.get("ref") or ref
-            if isinstance(link, str):
+            if isinstance(link, str) and link:
                 return link, ref
-            if out.get("put_url"):
-                u = str(out["put_url"])
-                return (u.replace("{name}", name) if "{name}" in u else u), ref
-        st, obj = api.sign(self.task_id, put=[name])
+        if out.get("put_url") and not to:
+            u = str(out["put_url"])
+            return (u.replace("{name}", name) if "{name}" in u else u), ref
+        if not to:
+            return None, None
+        st, obj = api.outputs(self.task_id, [name])
+        if st in api.LOST or (st == 200 and api.gone(obj)):
+            self.stop("lost" if st in api.LOST else api.gone(obj))
         link = ((obj or {}).get("put") or {}).get(name) if st == 200 else None
-        if isinstance(link, dict):
-            return link.get("url"), link.get("ref") or ref
-        return link, ref
+        return (link if isinstance(link, str) and link else None), ref
 
     def upload(self, path, name: Optional[str] = None) -> dict:
         """Upload `path` as artifact `name` (stable, the app may cite it). Retried; a refused
@@ -207,14 +215,19 @@ class TaskContext:
                 st, err = 0, f"{type(e).__name__}: {e}"
             if 200 <= st < 300:
                 art = {"name": name, "ref": ref, "size": size, "sha256": sha}
+                if not ref:             # the app's own storage: say where it went
+                    art["url"] = url.split("?", 1)[0]
                 with self._lock:
                     self.artifacts = [a for a in self.artifacts if a["name"] != name] + [art]
-                api.artifact(self.task_id, art)
+                _, obj = api.artifact(self.task_id, art)
+                self._heard(obj)
                 self.log(f"uploaded {name} ({size} bytes)")
                 return {"name": name, "ref": ref}
             if st:
                 err = f"HTTP {st}"
             if st in (401, 403):
                 url, ref = self._put_link(name, fresh=True)
+            if self.stop_reason in ("cancelled", "lost"):
+                raise Cancelled(self.stop_reason)
             time.sleep(min(0.5 * 2 ** i, 8))
         raise TaskFailed(f"upload {name}: {err}", "upload")

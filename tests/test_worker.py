@@ -114,14 +114,17 @@ check("start was called before done", ft.starts == ["t1"])
 check("done ok with the PNG output as an artifact",
       d.get("ok") is True and [a["name"] for a in d.get("artifacts", [])] == ["out_00001.png"])
 art = (d.get("artifacts") or [{}])[0]
-check("...its ref is the one pod-control signed, with size and sha256",
-      art.get("ref") == "store://out/t1/out_00001.png" and art.get("size") == len(fc.blobs.get("t1_out_00001.png", b"x"))
+check("...as pod-control takes it: name, size, sha256 (no ref: the server makes it)",
+      set(art) == {"name", "size", "sha256"} and art.get("size") == len(fc.blobs.get("t1_out_00001.png", b"x"))
       and len(art.get("sha256") or "") == 64)
-check("the file went to the presigned PUT (sign put) without the pod token",
-      fc.blobs.get("t1_out_00001.png", b"").endswith(b"out_00001.png"))
+check("...and pod-control files it under outputs.to",
+      ft.final.get("t1", [{}])[0].get("ref") == "store://art/t1/out_00001.png")
+check("the PUT link was asked of POST …/outputs {names} and used without the pod token",
+      ("t1", {"names": ["out_00001.png"]}) in ft.outputs
+      and fc.blobs.get("t1_out_00001.png", b"").endswith(b"out_00001.png"))
 check("the temp preview was not uploaded", not any("preview" in k for k in fc.blobs))
 check("result carries the prompt id and the outputs' {name, ref}",
-      d.get("result", {}).get("outputs") == [{"name": "out_00001.png", "ref": "store://out/t1/out_00001.png"}]
+      d.get("result", {}).get("outputs") == [{"name": "out_00001.png", "ref": "store://art/t1/out_00001.png"}]
       and d["result"].get("prompt_id") == cf.prompts[-1][0])
 g = cf.prompts[-1][1]
 check("patch applied: seed set", g["3"]["inputs"]["seed"] == 71560655)
@@ -156,11 +159,17 @@ ft.queue.append(task("t-store", inputs={"start": "store://in/x/ref.png"},
                                "patch": {"seed": 5, "image": "{input:start}"}}))
 run()
 g = cf.prompts[-1][1]
-check("a store:// input is signed through pod-control and fetched",
-      ft.dones["t-store"]["ok"] and any(s[0] == "t-store" and s[1].get("refs") == ["store://in/x/ref.png"]
-                                        for s in ft.signs))
+check("a store:// input comes presigned in the claim ({url, ref}) and is fetched, no sign call",
+      ft.dones["t-store"]["ok"] and ("ref.png", "claim", None) in fc.blob_gets
+      and not any(s[0] == "t-store" for s in ft.signs))
 check("workflow.map names patch the mapped inputs", g["3"]["inputs"]["seed"] == 5
       and g["5"]["inputs"]["image"] == "podh/t-store_start.png")
+ft.queue.append(task("t-value", inputs={"start": fc.blob_url("start.png"), "seed": {"value": 99}},
+                     workflow={"ref": "workflows/t2i.json",
+                               "patch": {"3.inputs.seed": "{input:seed}", "5.inputs.image": "{input:start}"}}))
+run()
+check("a {value} input (a dependency's result) patches in as itself",
+      ft.dones["t-value"]["ok"] and cf.prompts[-1][1]["3"]["inputs"]["seed"] == 99)
 cf.outputs = ["a.png", "b.mp4", "c.txt"]
 ft.queue.append(task("t-glob", outputs={"keep": ["*.mp4", "*.png"], "to": "store://art/g/",
                                          "put": {"a.png": fc.url + "/put/given_a.png"}}))
@@ -196,8 +205,9 @@ check("a refused graph fails at stage submit", ft.dones["t-refuse"]["error"]["st
 cf.mode = "error"
 ft.queue.append(task("t-err"))
 run()
-check("an execution error fails at stage execute with ComfyUI's message",
-      ft.dones["t-err"]["error"]["stage"] == "execute" and "out of memory" in ft.dones["t-err"]["error"]["reason"])
+check("an execution error fails at stage execute with ComfyUI's message, not retryable",
+      ft.dones["t-err"]["error"]["stage"] == "execute" and "out of memory" in ft.dones["t-err"]["error"]["reason"]
+      and "retryable" not in ft.dones["t-err"])
 cf.mode = "error"
 ft.queue.append(task("t-fb", fallback="app"))
 run()
@@ -251,10 +261,16 @@ reset()
 print("— lease lost")
 cf.mode = "stall"
 ft.queue.append(task("t-lost"))
+i0 = cf.interrupts
 threading.Timer(1.0, lambda: ft.lost.add("t-lost")).start()
 run()
-check("a 410 on the beat stops the work and reports nothing",
-      "t-lost" not in ft.dones and "t-lost" not in ft.releases and cf.interrupts > 0)
+check("a beat reply {cancel: true, state: queued} (requeued) stops the work and reports nothing",
+      "t-lost" not in ft.dones and "t-lost" not in ft.releases and cf.interrupts > i0)
+i0 = cf.interrupts
+ft.queue.append(task("t-lost2"))
+threading.Timer(1.0, lambda: ft.gone.__setitem__("t-lost2", 404)).start()
+run()
+check("a 404 on the beat does the same", "t-lost2" not in ft.dones and cf.interrupts > i0)
 reset()
 
 # -- stall and timeout ---------------------------------------------------------------------------
@@ -264,8 +280,9 @@ r0 = cf.restarts
 ft.queue.append(task("t-stall", stall_s=1))
 run()
 ds = ft.dones.get("t-stall", {})
-check("no progress for stall_s: interrupted, a failed attempt at stage stall",
-      ds.get("ok") is False and ds["error"]["stage"] == "stall" and cf.restarts == r0)
+check("no progress for stall_s: interrupted, a retryable attempt at stage stall",
+      ds.get("ok") is False and ds["error"]["stage"] == "stall" and cf.restarts == r0
+      and ds.get("retryable") is True)
 cf.ignore_interrupt = True
 ft.queue.append(task("t-stall2", stall_s=1))
 run()
@@ -274,7 +291,8 @@ check("...and a wedged ComfyUI is restarted", ft.dones["t-stall2"]["error"]["sta
 cf.ignore_interrupt = False
 ft.queue.append(task("t-timeout", timeout_s=1))
 run()
-check("timeout_s fails the task at stage timeout", ft.dones["t-timeout"]["error"]["stage"] == "timeout")
+check("timeout_s fails the task at stage timeout (not retried)",
+      ft.dones["t-timeout"]["error"]["stage"] == "timeout" and "retryable" not in ft.dones["t-timeout"])
 reset()
 
 # -- upload retry --------------------------------------------------------------------------------
@@ -285,16 +303,15 @@ run()
 check("two failed PUTs are retried; the third lands", ft.dones["t-up"]["ok"]
       and fc.blobs.get("t-up_out_00001.png"))
 fc.put_refuse["t-up2_out_00001.png"] = 1
-n0 = len([s for s in ft.signs if s[0] == "t-up2"])
 ft.queue.append(task("t-up2"))
 run()
-check("a refused (expired) link is signed again", ft.dones["t-up2"]["ok"]
-      and len([s for s in ft.signs if s[0] == "t-up2" and s[1].get("put")]) >= 2)
+check("a refused (expired) link is asked for again", ft.dones["t-up2"]["ok"]
+      and len([o for o in ft.outputs if o[0] == "t-up2"]) >= 2)
 fc.put_fail["t-up3_out_00001.png"] = 9
 ft.queue.append(task("t-up3"))
 run(timeout=40)
-check("an upload that keeps failing fails the task at stage upload",
-      ft.dones["t-up3"]["error"]["stage"] == "upload")
+check("an upload that keeps failing ends the attempt at stage upload, retryable",
+      ft.dones["t-up3"]["error"]["stage"] == "upload" and ft.dones["t-up3"].get("retryable") is True)
 fc.put_fail.clear()
 
 # -- kinds and handlers ----------------------------------------------------------------------------
@@ -319,6 +336,7 @@ class Echo(TaskHandler):
         p.write_text(task["payload"]["say"] + ":" + Path(ctx.inputs["start"]).read_text())
         ctx.progress(0.5, "half")
         ctx.emit({"said": task["payload"]["say"]})
+        ctx.fetch("store://in/x/s.txt", ctx.workdir / "again.txt")
         return {"ref": ctx.upload(p, "echo.txt")}
     def finish(self, task, ctx, result):
         return {"echo": result["ref"], "models_root": str(ctx.models_root)}
@@ -338,14 +356,16 @@ class Seeded(ComfyRunner):
     "app.broken": "apphandlers.missing:Nope"}}))
 fc.blobs["s.txt"] = b"hello"
 ft.queue.append({"task_id": "t-echo", "kind": "app.echo", "payload": {"say": "hi"},
-                 "inputs": {"start": fc.blob_url("s.txt")}, "outputs": {"to": "store://a/"}})
+                 "inputs": {"start": fc.blob_url("s.txt")}, "outputs": {"to": "store://a"}})
 run()
 de = ft.dones.get("t-echo", {})
 check("an app handler from podh-handlers.json runs with the app root on sys.path",
       de.get("ok") is True and fc.blobs.get("t-echo_echo.txt") == b"hi:hello")
 check("finish()'s result is done's result; ctx.upload returned {name, ref}",
-      de.get("result", {}).get("echo") == {"name": "echo.txt", "ref": "store://out/t-echo/echo.txt"})
-check("ctx.emit reached pod-control", ft.events.get("t-echo") == [{"said": "hi"}])
+      de.get("result", {}).get("echo") == {"name": "echo.txt", "ref": "store://a/echo.txt"})
+check("ctx.emit reached pod-control as event {data}", ft.events.get("t-echo") == [{"said": "hi"}])
+check("ctx.fetch(store://…) is signed through POST …/sign {refs}",
+      ("t-echo", {"refs": ["store://in/x/s.txt"]}) in ft.signs)
 ft.queue.append(task("t-seeded", kind="app.seeded"))
 run()
 check("a ComfyRunner subclass can change the graph and the result",
@@ -359,11 +379,14 @@ check("a handler that does not import releases its kind with 'no handler'",
 # -- held tasks and prefetch ---------------------------------------------------------------------
 print("— held tasks; prefetch while one runs")
 fc.blobs["m1"] = b"M" * 5000
+# what GET /v1/pod/models lists once pod-control has added a held task's models to the job
+fc.routes[("GET", "/v1/pod/models")] = (200, {"models_rev": 2, "files": [
+    {"path": "checkpoints/m1.safetensors", "url": fc.blob_url("m1"), "size": 5000},
+    {"path": "loras/gone.safetensors", "url": fc.blob_url("gone")}]})
 cf.steps, cf.step_delay = 10, 0.2
 ft.queue.extend([task("t-run"),
-                 task("t-held", state="held", needs={"models": ["checkpoints/m1.safetensors"]},
-                      models=[{"path": "checkpoints/m1.safetensors", "url": fc.blob_url("m1"),
-                               "size": 5000}])])
+                 task("t-held", state="held",
+                      needs={"models": [{"path": "checkpoints/m1.safetensors", "size": 5000}]})])
 seen = {}
 
 
@@ -400,8 +423,7 @@ check("...then the worker exits 0", not th.is_alive())
 state.take_reply({"drain": False})
 reset()
 fc.blobs.pop("gone", None)
-ft.queue.append(task("t-nomodel", state="held",
-                     models=[{"path": "loras/gone.safetensors", "url": fc.blob_url("gone")}]))
+ft.queue.append(task("t-nomodel", state="held", missing_models=["loras/gone.safetensors"]))
 run()
 check("a held task whose model cannot be fetched is released, not failed",
       (ft.releases.get("t-nomodel") or "").startswith("models:") and "t-nomodel" not in ft.dones)
@@ -436,6 +458,7 @@ p = subprocess.run([sys.executable, "-m", "pod_harness.worker", "--once"],
                    env=dict(env, PODH_CONTROL_URL=""), capture_output=True, text=True, timeout=30)
 check("with no control plane it exits 2 and says why", p.returncode == 2 and "PODH_CONTROL_URL" in p.stdout)
 
+check("nothing was sent that pod-control would refuse or misread", not ft.bad or print(ft.bad))
 srv.close(); cf.close(); fc.close()
 print(f"\n{sum(ok)}/{len(ok)} passed")
 sys.exit(0 if all(ok) else 1)

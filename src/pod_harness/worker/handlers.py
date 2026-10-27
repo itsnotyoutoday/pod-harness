@@ -34,11 +34,13 @@ HANDLERS_FILE = "podh-handlers.json"
 
 
 class TaskFailed(Exception):
-    """A failure the handler understands: reported as error {stage, reason}."""
+    """A failure the handler understands: reported as error {stage, reason}. `retryable`
+    asks pod-control for another attempt (attempt + 1, up to max_attempts) instead of
+    failing the task; None leaves it to the stage (inputs, upload and stall are)."""
 
-    def __init__(self, reason: str, stage: str = "run"):
+    def __init__(self, reason: str, stage: str = "run", retryable: Optional[bool] = None):
         super().__init__(reason)
-        self.reason, self.stage = reason, stage
+        self.reason, self.stage, self.retryable = reason, stage, retryable
 
 
 class TaskHandler:
@@ -112,13 +114,20 @@ _PLACEHOLDER = re.compile(r"\{input:([A-Za-z0-9_.-]+)\}")
 
 
 def substitute(value, names: dict):
-    """{input:<name>} → the name ComfyUI knows that input by, in strings, lists and dicts."""
+    """{input:<name>} → the name ComfyUI knows that input by, in strings, lists and dicts.
+    A value input (a dependency's result) replaces a string that is only its placeholder
+    as itself (a number stays a number), and is spliced in as text otherwise."""
     if isinstance(value, str):
+        whole = _PLACEHOLDER.fullmatch(value)
+        if whole and whole.group(1) in names:
+            return names[whole.group(1)]
+
         def rep(m):
             if m.group(1) not in names:
                 raise TaskFailed(f"patch names input {m.group(1)!r}, which the task does "
                                  f"not have", "prepare")
-            return names[m.group(1)]
+            v = names[m.group(1)]
+            return v if isinstance(v, str) else json.dumps(v)
         return _PLACEHOLDER.sub(rep, value)
     if isinstance(value, list):
         return [substitute(v, names) for v in value]
@@ -157,6 +166,7 @@ class ComfyRunner(TaskHandler):
         safe = re.sub(r"[^A-Za-z0-9_.-]", "_", str(task.get("task_id") or "task"))[:80]
         for name, path in ctx.inputs.items():
             names[name] = ctx.comfy.upload_input(path, name=f"{safe}_{Path(path).name}")
+        names.update(getattr(ctx, "values", None) or {})
         return apply_patch(graph, spec.get("patch") or {}, names, mapping)
 
     def run(self, task: dict, ctx, graph: dict):
