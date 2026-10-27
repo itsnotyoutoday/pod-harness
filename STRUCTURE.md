@@ -231,3 +231,29 @@ round-trip wave per 32 files, a pack costs one request whatever the file count.
 link: S3 has neither symlinks nor atomic rename, but a single-object PUT replaces wholly or
 not at all, which is the only property a pointer needs. It is written LAST, after the
 directory it names is complete, so `current` can never point at a half-written profile.
+
+
+## On the pod: what podh-boot keeps where
+
+The stores above are what the backend shares. A booting pod has its own small layout, and
+every path in it is configuration — told by env, never guessed by an app:
+
+```
+$PODH_BOOT_DIR/               default $PODH_WORKSPACE/.podh-boot — survives a park
+  markers.json                what this disk already has: addon commits, the app setup
+  models-verified.json        path → sha256 already checked, so a resume does not rehash
+  workload.env                $PODH_WORKLOAD_ENV: KEY=value, binaries' then the spec's
+                              then the app's lines, $VAR expanded when read
+  bin/<name>-<sha12>/         pinned binaries, one directory per sha
+  extra_model_paths.yaml      ComfyUI's model folders → $PODH_MODELS_ROOT
+  logs/                       workload.log, serve.log, app-setup.log, addon-<name>.log
+$PODH_MODELS_ROOT/<path>      default $PODH_WORKSPACE/models; a file at its final name is
+                              complete and verified — partials are <name>.part
+$PODH_ADDONS_ROOT/<name>/     default $PODH_COMFY_ROOT/custom_nodes
+$PODH_APP_DIR/                default /opt/app
+```
+
+Kits are the pod-side cousin of `cache/`: trivially recreatable, keyed by what they were
+built for (the caller's key plus python, torch, CUDA and image), and only ever reused where
+all of that matches. The control plane holds their keys; the bytes sit behind presigned
+URLs and are verified by sha256 before anything is unpacked.

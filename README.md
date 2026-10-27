@@ -139,6 +139,56 @@ while sleep 60; do
 done
 ```
 
+### podh-boot: a job's boot spec, run on the pod
+
+`podh-boot` takes a pod from "created" to "ready" and keeps it honest after. It fetches the
+job's boot spec (`GET /v1/pod/spec` with the pod token; `--spec FILE` for local runs) and
+runs it as ordered stages, each with a time limit and a boot line:
+
+```
+gpu_check → binaries → models → addons → app → workload → ready → app.serve
+```
+
+| stage | does |
+|---|---|
+| `gpu_check` | podh-gpucheck; posts `vram_gb`, `cuda`, `driver`, `gpu` and (after binaries) an NVENC probe to `/v1/pod/facts`. Always runs, even on a resumed pod. |
+| `binaries` | pinned `{name, url, sha256, archive_path, bin_names, env}`, verified, installed once per sha, shared as kit `binary-<name>-<sha16>`; `env` (with `{bin}`/`{bindir}`) goes to `$PODH_WORKLOAD_ENV` |
+| `models` | the manifest's presigned files into `$PODH_MODELS_ROOT`, 2 at a time, resumable (aria2c if present), fresh links on expiry, size/sha checked, per-path state reported |
+| `addons` | git repos at full commits, validated again on the pod, `pip` into the workload's python, links (never outside their roots), import probes; `optional` items only warn; the set is kept as a kit |
+| `app` | the app's code fetched with ITS token (`fetch.auth_env`), unpacked, its `run` executed — before the workload, so it can add files and `KEY=value` lines to `$PODH_WORKLOAD_ENV` |
+| `workload` | ComfyUI (models wired through `extra_model_paths.yaml`) or a command; up within `up_timeout_s`; log scanned for fatal strings; restarted once |
+| `ready` | boot line with stage `ready` |
+| `app.serve` | the app's long-running process: one restart, exit 0 ends the pod, drain/park → SIGTERM then SIGKILL after `serve_grace_s` |
+
+A failure reports `done(rc, reason, stage, log_tail)` and idles (`--exit-on-fail` exits). A
+resumed pod skips what its disk already has. After ready a watcher fetches models added
+mid-life (`models_rev` on the heartbeat reply) without ever ending the pod.
+
+Two ways to run it:
+
+```bash
+# an image built for it
+ENTRYPOINT ["podh-boot"]
+
+# a catalog image: the provider's start command
+bash -lc "pip install 'pod-harness @ git+https://github.com/<owner>/pod-harness@<tag>' && podh-boot"
+```
+
+The app stage, the workload and `app.serve` get `PODH_COMFY_ROOT`, `PODH_COMFY_PY`,
+`PODH_MODELS_ROOT`, `PODH_WORKLOAD_ENV`, `PODH_JOB_ID`, `PODH_GPU_COUNT`, `PODH_APP_DIR` and
+the local API, `PODH_LOCAL_URL` + `PODH_LOCAL_TOKEN` (127.0.0.1 only):
+
+- `POST /busy {"busy", "detail"?}` — rides on the next heartbeat; pod-control's idle clock
+  runs only while the pod is not busy. `podh-report busy [--detail D]` / `podh-report idle`.
+- `GET /state` → `{drain, park, extend_until, models_rev, models, …}` from the last
+  heartbeat reply, so a worker stops claiming work on drain without asking its app.
+- `POST /done {"rc", "reason"?, "stage"?}` — the only exit. `podh-report done` uses it.
+
+`podh-kit get|put <name> <app-key> <dir>` caches anything slow to build (a venv, wheels):
+`get` exits 0 with the dir filled or 2 when nobody has built it yet; the key also carries
+the python, torch, CUDA and image the build is for. The exact routes and fields are in
+`contract.json` under `control_plane.pod_calls`, `local_api` and `boot`.
+
 ### Submit a job
 
 ```bash
