@@ -9,7 +9,8 @@
     ctx.log(msg)          the worker's log; the tail goes with a failure
     ctx.emit({...})       a task.event (≤ 1/s, ≤ 16 KB)
     ctx.fetch(url | store://ref, dest=None) → Path
-    ctx.upload(path, name) → {"name", "ref"}   (mid-run too; ref is None with a put_url)
+    ctx.upload(path, name) → {"name", "ref"}   (mid-run too; ref is None with a put_url;
+                          name may be a relative path a/b/c.ext)
     ctx.restart_workload() → bool
     ctx.cancelled() → bool;  ctx.check() raises Cancelled (or TaskFailed on a timeout)
 """
@@ -58,6 +59,22 @@ def put_file(url: str, path: Path, timeout: float = 600) -> int:
                 return r.status
         except urllib.error.HTTPError as e:
             return e.code
+
+
+def artifact_name(name) -> str:
+    """An artifact name: a file name, or a relative path `a/b/c.ext` (TASK-API: names may be
+    relative paths). `./` segments are dropped; `..`, absolute paths, empty segments
+    (`a//b`, a trailing `/`), backslashes and control characters are refused."""
+    if not isinstance(name, str) or not name:
+        raise ValueError("artifact name is empty")
+    if name.startswith("/") or "\\" in name or any(ord(ch) < 32 for ch in name):
+        raise ValueError(f"artifact name {name!r}: absolute, backslashed or control characters")
+    parts = [p for p in name.split("/") if p != "."]
+    if not parts or any(p == "" for p in parts):
+        raise ValueError(f"artifact name {name!r}: empty path segment")
+    if any(p == ".." for p in parts):
+        raise ValueError(f"artifact name {name!r}: `..` is refused")
+    return "/".join(parts)
 
 
 class TaskContext:
@@ -197,12 +214,14 @@ class TaskContext:
         return (link if isinstance(link, str) and link else None), ref
 
     def upload(self, path, name: Optional[str] = None) -> dict:
-        """Upload `path` as artifact `name` (stable, the app may cite it). Retried; a refused
-        link is asked for again. Returns {"name", "ref"}."""
+        """Upload `path` as artifact `name` (stable, the app may cite it): a file name or a
+        relative path `a/b/c.ext`, normalised (see artifact_name). Retried; a refused link is
+        asked for again. Returns {"name", "ref"}."""
         path = Path(path)
-        name = name or path.name
-        if "/" in name or name in ("", ".", ".."):
-            raise TaskFailed(f"artifact name {name!r} must be a plain file name", "upload")
+        try:
+            name = artifact_name(name or path.name)
+        except ValueError as e:
+            raise TaskFailed(str(e), "upload")
         sha, size = _sha_size(path)
         url, ref = self._put_link(name)
         err = "no upload link for it"

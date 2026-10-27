@@ -264,7 +264,9 @@ real control plane when its source is importable.
 (`"<node>.inputs.<name>": value`, or names from `workflow.map`), copies each input into
 ComfyUI's `input/` and substitutes `{input:<name>}` with the name ComfyUI knows it by,
 posts the graph, follows `/ws` (polling `/history` if there is none), and uploads the saved
-files that match `outputs.keep`. A `keep` that matches nothing fails the task.
+files that match `outputs.keep`, each named by its path under ComfyUI's output directory
+(`clips/run1/x.mp4` for a file saved in subfolder `clips/run1`; a plain file name when there
+is no subfolder). A `keep` that matches nothing fails the task.
 
 **Your own kinds** ship in the app bundle, declared in `podh-handlers.json` at its root and
 imported with the bundle root on `sys.path`:
@@ -308,7 +310,9 @@ change the graph or `finish` to check the outputs. `ctx` gives `task`, `payload`
 `models_root`, `app_root`, `workdir`, `inputs`, `comfy` (a `pod_harness.comfy.ComfyClient`
 wired to this task's cancel, timeout and progress: `upload_input`, `run`, `interrupt`,
 `history`, `collect`), `progress(fraction, message)`, `log`, `emit(dict)`,
-`fetch(url | store://ref, dest)`, `upload(path, name)` → `{name, ref}` (mid-run too),
+`fetch(url | store://ref, dest)`, `upload(path, name)` → `{name, ref}` (mid-run too; `name`
+is a file name or a relative path `a/b/c.ext`, normalised, with `..`, absolute paths and
+empty segments refused),
 `restart_workload()`, `cancelled()` and `check()`. `Cancelled` is a `BaseException`: an
 `except Exception` in a handler cannot swallow a cancel.
 

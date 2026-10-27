@@ -65,8 +65,13 @@ class TimedOut(ComfyError):
 
 
 class RunResult:
-    def __init__(self, prompt_id: str, outputs: list, files: list, history: dict):
+    """`files` are local paths; `names[i]` is files[i]'s path relative to ComfyUI's output
+    directory (`subfolder/filename`), the name a handler uploads it under."""
+
+    def __init__(self, prompt_id: str, outputs: list, files: list, history: dict,
+                 names: Optional[list] = None):
         self.prompt_id, self.outputs, self.files, self.history = prompt_id, outputs, files, history
+        self.names = list(names) if names is not None else [Path(f).name for f in files]
 
     def __repr__(self):
         return f"RunResult({self.prompt_id}, {len(self.files)} file(s))"
@@ -370,8 +375,11 @@ class ComfyClient:
         if st.get("status_str") == "error":
             raise ComfyError(f"ComfyUI execution failed: {_status_reason(st)}", stage="execute",
                              detail={"prompt_id": pid})
-        files = self.collect(outs, keep, dest)
-        return RunResult(pid, outs, files, entry)
+        files, names = [], []
+        for o, f in zip(*self._collect(outs, keep, dest)):
+            files.append(f)
+            names.append(rel_name(o))
+        return RunResult(pid, outs, files, entry, names)
 
     def _follow(self, pid: str, graph: dict, ws: Optional[_WS], timeout_s, stall_s) -> dict:
         t0 = last = time.time()
@@ -474,8 +482,12 @@ class ComfyClient:
     # -- outputs -----------------------------------------------------------------------------
     def collect(self, outs: list, keep: Optional[list] = None, dest=None) -> list:
         """Local paths of the outputs matching `keep` (all when empty): the file in
-        output/ when the root is known, else a copy fetched from /view into `dest`."""
-        files = []
+        output/ when the root is known, else a copy fetched from /view into `dest`
+        (at its subfolder/filename there)."""
+        return self._collect(outs, keep, dest)[1]
+
+    def _collect(self, outs: list, keep: Optional[list] = None, dest=None) -> tuple:
+        kept, files = [], []
         for o in outs:
             if keep and not matches(o, keep):
                 continue
@@ -497,10 +509,12 @@ class ComfyClient:
                 st, data = self._req("GET", f"/view?{q}", timeout=600, raw=True)
                 if st != 200:
                     raise ComfyError(f"{o['filename']}: GET /view answered {st}", stage="outputs")
-                local = d / o["filename"]
+                local = d / rel_name(o)
+                local.parent.mkdir(parents=True, exist_ok=True)
                 local.write_bytes(data)
+            kept.append(o)
             files.append(local)
-        return files
+        return kept, files
 
 
 def _parse(m: str):
@@ -539,6 +553,14 @@ def outputs_of(entry: dict) -> list:
                     out.append({"filename": it["filename"], "subfolder": it.get("subfolder") or "",
                                 "type": it.get("type") or "output", "node": str(node)})
     return out
+
+
+def rel_name(o: dict) -> str:
+    """An output's path relative to its ComfyUI directory: `subfolder/filename`, with
+    anything that would climb out (`..`, absolute, empty segments) dropped."""
+    parts = [p for p in f"{o.get('subfolder') or ''}/{o['filename']}".replace("\\", "/").split("/")
+             if p not in ("", ".", "..")]
+    return "/".join(parts) or "output"
 
 
 def matches(o: dict, keep: list) -> bool:

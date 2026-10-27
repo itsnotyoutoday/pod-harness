@@ -979,7 +979,7 @@
       "PODH_COMFY_URL": "ComfyUI (podh-boot exports it)",
       "PODH_NVENC": "claimed as nvenc"
     },
-    "handlers_file": "$PODH_APP_ROOT/podh-handlers.json: {\"handlers\": {kind: \"module:Class\"}}; built in: comfy",
+    "handlers_file": "$PODH_APP_ROOT/podh-handlers.json: {\"handlers\": {kind: \"module:Class\"}}; built in: comfy (outputs matching outputs.keep, each named subfolder/filename under ComfyUI's output directory)",
     "handler": [
       "prepare(task, ctx) → prepared",
       "run(task, ctx, prepared) → out",
@@ -998,7 +998,7 @@
       "log(msg)",
       "emit(dict)",
       "fetch(url|store://ref, dest)",
-      "upload(path, name) → {name, ref}",
+      "upload(path, name) → {name, ref}  (name: a file name or a relative path a/b/c.ext, normalised; .., absolute and empty segments refused)",
       "restart_workload()",
       "cancelled()",
       "check()"

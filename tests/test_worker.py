@@ -178,6 +178,31 @@ check("keep globs choose the artifacts", sorted(a["name"] for a in ft.dones["t-g
 check("a put link given in the claim is used as is, its ref from outputs.to",
       fc.blobs.get("given_a.png") and {"name": "a.png", "ref": "store://art/g/a.png"}
       in ft.dones["t-glob"]["result"]["outputs"])
+cf.outputs, cf.subfolder = ["x.mp4", "x.png"], "clips/run1"
+ft.queue.append(task("t-sub", outputs={"keep": ["clips/*/*.mp4"], "to": "store://art/s/"}))
+run()
+check("a kept output keeps its path under the output dir as its artifact name",
+      [a["name"] for a in ft.dones["t-sub"]["artifacts"]] == ["clips/run1/x.mp4"]
+      and ft.dones["t-sub"]["result"]["outputs"] == [{"name": "clips/run1/x.mp4",
+                                                       "ref": "store://art/s/clips/run1/x.mp4"}]
+      and ("t-sub", {"names": ["clips/run1/x.mp4"]}) in ft.outputs)
+cf.subfolder = ""
+from pod_harness.worker.context import artifact_name  # noqa: E402
+
+
+def refused(n):
+    try:
+        artifact_name(n)
+        return False
+    except ValueError:
+        return True
+
+
+check("artifact names: relative paths normalised",
+      artifact_name("a/b/c.ext") == "a/b/c.ext" and artifact_name("./a/./b.txt") == "a/b.txt"
+      and artifact_name("plain.png") == "plain.png")
+check("...and `..`, absolute, empty segments refused",
+      all(refused(n) for n in ("../x", "a/../b", "/abs/x", "a//b", "a/", "", ".", "a\\b", None)))
 cf.outputs = ["c.txt"]
 ft.queue.append(task("t-noout", outputs={"keep": ["*.mp4"]}))
 run()

@@ -154,7 +154,8 @@ def apply_patch(graph: dict, patch: dict, names: Optional[dict] = None,
 
 
 class ComfyRunner(TaskHandler):
-    """kind `comfy`: one workflow, patched, run once; outputs by `keep` globs."""
+    """kind `comfy`: one workflow, patched, run once; outputs by `keep` globs, each uploaded
+    under its path relative to the output directory."""
 
     kind = "comfy"
 
@@ -179,7 +180,10 @@ class ComfyRunner(TaskHandler):
         if keep and not result.files:
             raise TaskFailed(f"the run saved no file matching {keep} "
                              f"({len(result.outputs)} output(s) in all)", "outputs")
-        arts = [ctx.upload(p, Path(p).name) for p in result.files]
+        # Each under its path relative to ComfyUI's output directory (subfolder/filename):
+        # two runs' "out_00001.mp4" in different subfolders stay two artifacts.
+        names = getattr(result, "names", None) or [Path(p).name for p in result.files]
+        arts = [ctx.upload(p, n) for p, n in zip(result.files, names)]
         return {"prompt_id": result.prompt_id, "outputs": arts}
 
 
