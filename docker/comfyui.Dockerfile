@@ -106,8 +106,10 @@ ENV LD_LIBRARY_PATH=/opt/venv/lib/python3.12/site-packages/nvidia/cudnn/lib:/opt
 # the models stage's parallel ranged downloads. zstd: kits are published as tar.zst when it
 # exists. git stays: podh-boot's addons stage clones, and recognises a baked pack by its
 # HEAD. openssh-server: for start-sshd; the host keys its install generates are deleted
-# (every container makes its own), and logins are key-only. No compiler: every pinned wheel
-# here is binary (the video image compiles its one exception in a builder stage).
+# (every container makes its own), and logins are key-only. gcc + libc6-dev + python3-dev:
+# not for building wheels (every pinned wheel is binary) but for Triton, which compiles its
+# GPU kernels' host launcher with a C compiler AT RUN TIME — torch.compile, Triton-backed ops
+# and SageAttention fail without one. ~80 MB.
 # safe.directory: a pod that runs as another uid must still be able to read a baked
 # checkout's HEAD, or it would re-clone over it.
 #
@@ -119,6 +121,7 @@ RUN set -eux; \
     apt-get install -y -qq --no-install-recommends \
         python3 python3-venv \
         git aria2 tini curl ca-certificates xz-utils zstd procps openssh-server \
+        gcc libc6-dev python3-dev \
         libgl1 libglib2.0-0; \
     apt-get clean; rm -rf /var/lib/apt/lists/*; \
     rm -f /etc/ssh/ssh_host_*; \
