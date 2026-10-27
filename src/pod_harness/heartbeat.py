@@ -28,6 +28,7 @@ import os
 import threading
 import time
 import ssl
+import urllib.error
 import urllib.request
 
 #: RunPod's proxy sits behind Cloudflare, which rejects urllib's default agent with
@@ -39,6 +40,18 @@ _UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
 #: ends deliberately: a client that sends more than the server stores would have its report
 #: silently discarded, and the failure would look like a chain that refuses for no reason.
 _MAX_REPORT_BYTES = 64 * 1024
+
+#: Caps on the free-text fields, matching the control plane's column sizes. Truncated HERE
+#: rather than left to the server: a server that rejects an over-long reason would drop the
+#: whole /done with it, and /done is the request that stops the billing.
+MAX_REASON = 500
+MAX_STAGE = 64
+MAX_LINE = 300
+
+#: Touched when the work is over. Every heartbeat loop — this module's and the sidecar's —
+#: checks it and goes quiet. See `start` for why a finished pod must stop reporting.
+#: Overridable only so tests on a workstation do not silence a real pod's flag in /tmp.
+STOP_FILE = os.environ.get("PODH_HEARTBEAT_STOP_FILE") or "/tmp/podh-stop-heartbeat"
 
 
 def _cfg() -> tuple[str, str, str]:
@@ -93,6 +106,10 @@ def _verify_pin(sock, expected: str) -> None:
 
 #: Why the last request failed, for callers that need to report rather than retry.
 _LAST_ERROR = ""
+#: HTTP status of the last failed request (0 when it never got an answer). Kept apart from
+#: the message because "the server said 422" is a decision input — see `_post_tolerant` —
+#: while the message is only for humans.
+_LAST_STATUS = 0
 
 
 def last_error() -> str:
@@ -100,10 +117,12 @@ def last_error() -> str:
     return _LAST_ERROR
 
 
-def _post(path: str, body: dict, timeout: int = 10) -> dict | None:
+def _post(path: str, body: dict, timeout: float = 10) -> dict | None:
+    global _LAST_ERROR, _LAST_STATUS
     url, token, _ = _cfg()
     if not url:
         return None
+    _LAST_ERROR, _LAST_STATUS = "", 0
     req = urllib.request.Request(
         f"{url}{path}", data=json.dumps(body).encode(),
         headers={"Content-Type": "application/json", "User-Agent": _UA,
@@ -122,27 +141,62 @@ def _post(path: str, body: dict, timeout: int = 10) -> dict | None:
         # "the request failed", and podh-init reported a termination failure as
         # "no control url or pod id" while the url was plainly set. The one call
         # responsible for stopping the billing was the one whose reason was discarded.
-        global _LAST_ERROR
         _LAST_ERROR = f"{type(exc).__name__}: {exc}"
+        _LAST_STATUS = exc.code if isinstance(exc, urllib.error.HTTPError) else 0
         return None
+
+
+def _post_tolerant(path: str, body: dict, newer: tuple, timeout: float = 10) -> dict | None:
+    """POST `body`; if the server refuses it as malformed, resend without the `newer` keys.
+
+    The fields in `newer` were added after the control plane first shipped. One that
+    validates strictly answers 400/422 to a key it does not know, and that must not cost
+    the request itself — least of all /done, whose job is to stop the billing. So the
+    report degrades to what an older server understands, and says so once in the log
+    rather than failing quietly.
+    """
+    r = _post(path, body, timeout=timeout)
+    present = [k for k in newer if k in body]
+    if r is None and present and _LAST_STATUS in (400, 422):
+        print(f"  [heartbeat] control plane refused {path} with {_LAST_STATUS} — resending "
+              f"without {', '.join(present)} (an older server that does not know them)",
+              flush=True)
+        r = _post(path, {k: v for k, v in body.items() if k not in newer}, timeout=timeout)
+    return r
+
+
+def _clip(text, limit: int) -> str:
+    """One line, at most `limit` characters. A reason is a summary; the log has the rest."""
+    t = " ".join(str(text).split())
+    return t if len(t) <= limit else t[: limit - 1] + "…"
+
+
+def _identity() -> dict:
+    # job_id accompanies every call: the scoped token is bound to it, and pod-control
+    # checks that this job actually owns this pod.
+    return {"pod_id": _cfg()[2], "provider": "runpod",
+            "job_id": os.environ.get("PODH_CONTROL_JOB_ID")
+                      or os.environ.get("PODH_JOB_ID", "")}
 
 
 def alive(deadline_ts: float | None = None) -> dict | None:
     url, _, pod_id = _cfg()
     if not url or not pod_id:
         return None
-    # job_id accompanies every call: the scoped token is bound to it, and
-    # pod-control checks that this job actually owns this pod.
-    body = {"pod_id": pod_id, "provider": "runpod",
-            "job_id": os.environ.get("PODH_CONTROL_JOB_ID")
-                      or os.environ.get("PODH_JOB_ID", "")}
+    body = _identity()
     if deadline_ts:
         body["deadline_ts"] = deadline_ts
     return _post("/v1/alive", body)
 
 
-def done(rc: int = 0) -> dict | None:
+def done(rc: int = 0, reason: str | None = None, stage: str | None = None) -> dict | None:
     """Ask to be terminated now. Called when the job finishes, however it finishes.
+
+    `reason` and `stage` say WHY a pod ended, in words a person can act on: "nvidia-smi
+    lists 0 GPUs" at stage "gpu_check" is a bad machine to rent again elsewhere; "job spec
+    not found" at stage "spec" is a launcher bug. An exit code alone cannot tell those
+    apart, and before this the only way to learn the difference was to read a console
+    log that dies with the pod. Both are optional and clipped to the server's limits.
 
     The exit code travels with the request because the control plane otherwise has no way
     to record HOW the job ended. It used to terminate the pod and leave the job row saying
@@ -164,16 +218,45 @@ def done(rc: int = 0) -> dict | None:
     url, _, pod_id = _cfg()
     if not url or not pod_id:
         return None
-    body = {"pod_id": pod_id, "provider": "runpod", "rc": int(rc),
-            "job_id": os.environ.get("PODH_CONTROL_JOB_ID")
-                      or os.environ.get("PODH_JOB_ID", "")}
+    body = {**_identity(), "rc": int(rc)}
+    if reason:
+        body["reason"] = _clip(reason, MAX_REASON)
+    if stage:
+        body["stage"] = _clip(stage, MAX_STAGE)
     s = _status_summary()
     if s:
         body["status"] = s
     h = _handoff()
     if h:
         body["handoff"] = h
-    return _post("/v1/done", body)
+    return _post_tolerant("/v1/done", body, ("reason", "stage"))
+
+
+def boot(line: str, stage: str | None = None) -> dict | None:
+    """Tell the control plane what the pod is doing while it boots. Never raises.
+
+    The minutes between "pod created" and "job running" — mounting, fetching code, checking
+    the GPU — are otherwise invisible from outside: the job's own events do not exist yet,
+    and a pod stuck there looks exactly like one making progress. One short line per step
+    makes "stuck in mount for 9 minutes" a fact the control plane can show and act on.
+
+    `stage` names the step; "ready" means the workload is up. Best-effort and quick: a short
+    timeout, because a boot script calls this between steps and must not stall waiting on
+    a control plane that is down. Older control planes without /v1/boot answer 404, which
+    is swallowed like any other failure.
+    """
+    try:
+        url, _, pod_id = _cfg()
+        if not url or not pod_id or not str(line).strip():
+            return None
+        body = {**_identity(), "line": _clip(line, MAX_LINE)}
+        if stage:
+            body["stage"] = _clip(stage, MAX_STAGE)
+        return _post_tolerant("/v1/boot", body, ("stage",), timeout=4)
+    except Exception as exc:          # a progress line is never worth a crashed boot
+        global _LAST_ERROR
+        _LAST_ERROR = f"{type(exc).__name__}: {exc}"
+        return None
 
 
 def _handoff() -> dict | None:

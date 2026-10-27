@@ -12,7 +12,8 @@ What it does:
   - takes progress lines from the workload (POST /v1/progress) and serves them as events
   - reports disk and GPU state
   - lists and serves files under declared artifact roots, read-only, no escaping a root
-  - relays "terminate me" to pod-control (POST /v1/done)
+  - relays "terminate me" to pod-control (POST /v1/done), with the reason and stage
+  - relays boot progress lines to pod-control (POST /v1/boot), and keeps them as events
   - optionally heartbeats to pod-control, ONLY while a liveness URL answers
 
 What it deliberately does not do: run stages, own the entrypoint, or heartbeat by default.
@@ -113,7 +114,8 @@ def index() -> dict:
             "logs": sorted(_logs()), "artifact_roots": [str(r) for r in _roots()],
             "heartbeat": dict(_BEAT), "last_progress": last,
             "routes": ["/v1/health", "/v1/logs", "/v1/logs/{name}", "/v1/progress", "/v1/events",
-                       "/v1/system", "/v1/artifacts", "/v1/artifacts/file", "/v1/done"]}
+                       "/v1/system", "/v1/artifacts", "/v1/artifacts/file", "/v1/boot",
+                       "/v1/done"]}
 
 
 @app.get("/v1/logs", dependencies=[Depends(auth)])
@@ -157,20 +159,24 @@ def log(name: str, tail: int = Query(8192, ge=0, le=MAX_TAIL), offset: Optional[
             "from_byte": start, "next_offset": end, "truncated": end < size}
 
 
+def _record(step: str, detail=None) -> int:
+    with _EVENTS_LOCK:
+        seq = (_EVENTS[-1]["seq"] + 1) if _EVENTS else 1
+        ev = {"seq": seq, "at": time.time(), "step": step[:500],
+              "detail": detail if isinstance(detail, (dict, str)) else None}
+        _EVENTS.append(ev)
+        del _EVENTS[:-MAX_EVENTS]
+        _EVENTS_LOCK.notify_all()
+    return seq
+
+
 @app.post("/v1/progress", dependencies=[Depends(auth)])
 def progress(body: dict) -> dict:
     """A workload step, e.g. {"step": "model wan2.2_high (14.3G in 190s)"}."""
     step = str(body.get("step") or "").strip()
     if not step:
         raise HTTPException(422, detail={"error": "step is required"})
-    with _EVENTS_LOCK:
-        seq = (_EVENTS[-1]["seq"] + 1) if _EVENTS else 1
-        ev = {"seq": seq, "at": time.time(), "step": step[:500],
-              "detail": body.get("detail") if isinstance(body.get("detail"), (dict, str)) else None}
-        _EVENTS.append(ev)
-        del _EVENTS[:-MAX_EVENTS]
-        _EVENTS_LOCK.notify_all()
-    return {"seq": seq}
+    return {"seq": _record(step, body.get("detail"))}
 
 
 @app.get("/v1/events", dependencies=[Depends(auth)])
@@ -241,15 +247,49 @@ def artifact_file(path: str):
     return FileResponse(str(p))
 
 
+def _text(body: dict, key: str) -> Optional[str]:
+    v = body.get(key)
+    return str(v).strip() or None if v is not None else None
+
+
+@app.post("/v1/boot", dependencies=[Depends(auth)])
+def boot(body: dict) -> dict:
+    """Relay a boot line {"line", "stage"?} to pod-control, and keep it as a local event.
+
+    Kept locally as well because the workload's boot script is the one place that knows
+    what the pod is waiting on, and /v1/events is where a person watching THIS pod looks.
+    Relaying is best-effort: an unconfigured or unreachable control plane still records
+    the line here and says why it did not go further.
+    """
+    line, stage = _text(body, "line"), _text(body, "stage")
+    if not line:
+        raise HTTPException(422, detail={"error": "line is required"})
+    seq = _record(f"[{stage}] {line}" if stage else line)
+    url, _, pod_id = heartbeat._cfg()
+    if not url or not pod_id:
+        return {"seq": seq, "relayed": False, "error": "PODH_CONTROL_URL or RUNPOD_POD_ID is not set"}
+    r = heartbeat.boot(line, stage)
+    return {"seq": seq, "relayed": r is not None, "error": None if r else heartbeat.last_error()}
+
+
 @app.post("/v1/done", dependencies=[Depends(auth)])
 def done(body: Optional[dict] = None) -> dict:
-    """Ask pod-control to terminate this pod now, and stop heartbeating either way."""
-    Path("/tmp/podh-stop-heartbeat").touch()
+    """Ask pod-control to terminate this pod now, and stop heartbeating either way.
+
+    Body {"rc", "reason"?, "stage"?}. The reason and stage travel to pod-control unchanged
+    (clipped to its limits), so a workload that gives up can say why in words.
+    """
+    Path(heartbeat.STOP_FILE).touch()
     url, _, pod_id = heartbeat._cfg()
     if not url or not pod_id:
         raise HTTPException(503, detail={"error": "PODH_CONTROL_URL or RUNPOD_POD_ID is not set",
                                          "note": "heartbeat stopped; pod-control's sweep still bounds the pod"})
-    r = heartbeat.done(int((body or {}).get("rc", 0)))
+    body = body or {}
+    try:
+        rc = int(body.get("rc", 0))
+    except (TypeError, ValueError):
+        raise HTTPException(422, detail={"error": "rc must be an integer"})
+    r = heartbeat.done(rc, reason=_text(body, "reason"), stage=_text(body, "stage"))
     return {"requested": True, "response": r, "error": None if r else heartbeat.last_error()}
 
 
@@ -266,7 +306,7 @@ def _live() -> bool:
 
 
 def _beat_loop(interval: float) -> None:
-    while not os.path.exists("/tmp/podh-stop-heartbeat"):
+    while not os.path.exists(heartbeat.STOP_FILE):
         if _live():
             _BEAT["last_sent"] = time.time()
             if heartbeat.alive():

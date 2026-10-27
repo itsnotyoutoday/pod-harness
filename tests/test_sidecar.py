@@ -65,6 +65,33 @@ check("heartbeat stays off without a liveness URL", sidecar.start_heartbeat() is
 check("done without pod-control config says so", c.post("/v1/done", headers=A, json={}).status_code == 503)
 Path("/tmp/podh-stop-heartbeat").unlink(missing_ok=True)
 
+r = c.post("/v1/boot", headers=A, json={"line": "downloading models", "stage": "models"}).json()
+check("boot without pod-control config is kept locally and says it was not relayed",
+      r["relayed"] is False and "PODH_CONTROL_URL" in r["error"])
+ev = c.get("/v1/events", headers=A, params={"since_seq": r["seq"] - 1}).json()["events"]
+check("...and shows up as an event, tagged with its stage", ev[0]["step"] == "[models] downloading models")
+check("a boot line needs a line", c.post("/v1/boot", headers=A, json={"stage": "x"}).status_code == 422)
+
+# Relays, against a fake pod-control on 127.0.0.1.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _fake_control import FakeControl  # noqa: E402
+fc = FakeControl()
+os.environ.update(PODH_CONTROL_URL=fc.url, PODH_CONTROL_TOKEN="ct")
+r = c.post("/v1/boot", headers=A, json={"line": "ComfyUI listening", "stage": "ready"}).json()
+b = (fc.bodies("/v1/boot") or [{}])[-1]
+check("boot is relayed to pod-control with line and stage",
+      r["relayed"] is True and b.get("line") == "ComfyUI listening" and b.get("stage") == "ready"
+      and b.get("pod_id") == "pod1")
+r = c.post("/v1/done", headers=A, json={"rc": 7, "reason": "CUDA unknown error", "stage": "gpu_check"}).json()
+b = (fc.bodies("/v1/done") or [{}])[-1]
+check("done relays rc, reason and stage",
+      r["requested"] is True and (b.get("rc"), b.get("reason"), b.get("stage")) == (7, "CUDA unknown error", "gpu_check"))
+check("done with a non-numeric rc is a 422, not a 500",
+      c.post("/v1/done", headers=A, json={"rc": "seven"}).status_code == 422)
+fc.close()
+os.environ.pop("PODH_CONTROL_URL")
+Path("/tmp/podh-stop-heartbeat").unlink(missing_ok=True)
+
 os.environ["PODH_API_TOKEN"] = ""
 check("no token configured refuses rather than serving open", c.get("/v1/logs", headers=A).status_code == 503)
 

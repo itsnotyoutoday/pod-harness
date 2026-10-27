@@ -31,8 +31,12 @@ serve = ["fastapi>=0.110", "uvicorn[standard]>=0.29"]
 dev = ["pytest>=8"]
 
 [project.scripts]
-# Sidecar mode only: the full harness ships as its own image, not as a pip install.
+# Sidecar mode only: the full harness ships as its own image, not as a pip install. The
+# harness image runs the same modules as `python3 -m pod_harness.<name>` instead.
 podh-serve = "pod_harness.sidecar:main"
+# Boot progress and completion reports for a hot-installed image's own boot script. Imports
+# only the stdlib client, so it works without the [serve] extra.
+podh-report = "pod_harness.report:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

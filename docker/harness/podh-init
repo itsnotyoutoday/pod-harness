@@ -47,6 +47,14 @@
 # So a fatal error reports itself, asks to be terminated, and then holds the container
 # open so the message survives long enough to be read. The reaper stops the billing;
 # exiting only guarantees the problem repeats.
+#
+# It reports WHY as well as that: the message goes to the control plane as `reason` and the
+# step that failed as `stage` (STEP, set as each step begins). An exit code of 1 could mean
+# a bad GPU, a missing spec or a broken mount — three different next actions — and the
+# message that told them apart used to exist only in a console log that died with the pod.
+# FATAL_RC lets a step whose failure has its own code (the GPU check's 7) report it.
+STEP=boot
+FATAL_RC=1
 fatal() {
     echo "  ✗ $*"
     echo "    Idling rather than exiting — an exiting container is restarted by the"
@@ -54,7 +62,11 @@ fatal() {
     # Upload the log first: a fatal error is exactly when the console is the only record,
     # and this function then idles forever, so nothing else will ever send it.
     [ -x /usr/local/bin/podh-logs ] && python3 /usr/local/bin/podh-logs || true
-    python3 -c "from pod_harness import heartbeat; heartbeat.done(1)" 2>/dev/null || true
+    # `report done` also stops the heartbeat: the work is over, and a pod idling here must
+    # look finished-or-stuck to the control plane, never healthy. `--reason=` rather than
+    # `--reason "…"` so a message starting with a dash is not read as an option.
+    echo "  control: $(python3 -m pod_harness.report done "${FATAL_RC:-1}" \
+        --reason="$*" --stage="${STEP:-boot}" 2>&1 | tail -1)"
     while true; do sleep 300; done
 }
 set -e
@@ -338,6 +350,8 @@ print('  fetched', key)
             # The job succeeded but its product did not survive. That is a FAILED run, and
             # calling it anything else is how a green status comes to mean nothing.
             rc=$prc
+            FAIL_REASON="job stages passed but publishing their outputs failed"
+            FAIL_STAGE=publish
             echo "  ✗ job stages passed but publishing failed — treating the run as failed"
         fi
     fi
@@ -360,20 +374,21 @@ print('  fetched', key)
     # the one call whose failure was silenced. A finished pod then idled for 20 minutes at
     # $0.48/hr with nothing in the log to explain why, and the comment underneath claimed
     # the poll would catch it within a minute. It would not have: see below.
+    #
+    # A failed run says which part failed. `reason` is a summary, not the log: the control
+    # plane shows it beside the job so "publish failed" and "a stage failed" are told apart
+    # without fetching console.log. A clean run sends neither field.
+    dargs=()
+    if [ "$rc" -ne 0 ]; then
+        dargs=(--reason="${FAIL_REASON:-job exited $rc}" --stage="${FAIL_STAGE:-job}")
+    fi
     set +e
-    dmsg=$(python3 -c "
-import sys
-from pod_harness import heartbeat
-r = heartbeat.done(int(sys.argv[1]))
-if r:
-    print('terminate requested')
-else:
-    e = heartbeat.last_error()
-    print('NOT SENT — ' + (e if e else 'no control url or pod id configured'))
-" "$rc" 2>&1)
+    dmsg=$(python3 -m pod_harness.report done "$rc" "${dargs[@]}" 2>&1)
     drc=$?
     set -e
-    if [ "$drc" -eq 0 ]; then
+    dmsg=$(echo "$dmsg" | tail -1)
+    # 3 = no control plane configured (a local run): nothing to warn about.
+    if [ "$drc" -eq 0 ] || [ "$drc" -eq 3 ]; then
         echo "  control: $dmsg"
     else
         echo "  ! control: could not request termination — $(echo "$dmsg" | tail -2 | tr '\n' ' ')"
