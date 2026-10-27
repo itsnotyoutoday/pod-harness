@@ -58,7 +58,8 @@ RUN --mount=type=bind,from=insightface,source=/wheels,target=/tmp/wheels \
 # The checks are the base's (check_image.py, quick-test) plus the face and voice stacks,
 # run in this same layer, writing no bytecode, so they add nothing to it.
 ARG QUICK_TEST_STRICT=1
-RUN set -eux; \
+RUN --mount=type=bind,source=docker/comfyui,target=/tmp/ctx \
+    set -eux; \
     bake=/opt/podh/podh-bake-node; \
     $bake ComfyUI-LatentSyncWrapper https://github.com/ShmuelRonen/ComfyUI-LatentSyncWrapper 360d5283d7276aee68b4237b1387e594e4ce640e; \
     $bake ComfyUI_Fill-ChatterBox https://github.com/filliptm/ComfyUI_Fill-ChatterBox f7d7a16187430abcaf91a3039b9c83aa9960816a; \
@@ -73,6 +74,8 @@ RUN set -eux; \
         --ldd 'onnxruntime/capi/libonnxruntime_providers_cuda.so'; \
     python -c "import importlib.metadata as m; v = m.version('insightface'); assert v == '${INSIGHTFACE_VERSION}', v"; \
     python -c "import onnxruntime as o; print('onnxruntime', o.__version__, o.get_available_providers())"; \
+    install -m 0644 /tmp/ctx/00_podh_latentsync.py /opt/ComfyUI/custom_nodes/00_podh_latentsync.py; \
+    python /opt/ComfyUI/custom_nodes/00_podh_latentsync.py probe /opt/ComfyUI/custom_nodes/ComfyUI-LatentSyncWrapper; \
     sh /opt/podh/quick-test "$QUICK_TEST_STRICT"
 
 LABEL org.opencontainers.image.title="podh-comfyui-video" \
