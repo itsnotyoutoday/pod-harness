@@ -162,6 +162,16 @@ gpu_check → binaries → models → addons → app → workload → ready → 
 | `ready` | boot line with stage `ready` |
 | `app.serve` | the app's long-running process (for a task pool, `podh-worker`): one restart, exit 0 ends the pod (unless the pod is draining or parked), drain/park → SIGTERM then SIGKILL after `serve_grace_s` |
 
+Each stage's last boot line carries `stage_s` (how long it took: "done in Ns", or "failed
+after Ns"), and the binaries and models stages' also `bytes` and `files` (what they
+downloaded). The first `/v1/pod/facts` post, before the GPU check, says what image the pod
+runs and when its container started: `image` (`<name>:<version>` from
+`/opt/podh/manifest.json`), `image_digest` (from `$PODH_IMAGE_DIGEST` — an image cannot
+hold its own digest, so whoever starts the container passes it — else the manifest's
+`digest` if one was written there) and `container_started_at` (epoch of the container's
+PID 1 start), so the image pull can be told apart from the container's own start-up. Older
+servers that refuse any of these (400/422) get the report without them.
+
 A failure reports `done(rc, reason, stage, log_tail)` and idles (`--exit-on-fail` exits). A
 resumed pod skips what its disk already has. After ready a watcher fetches models added
 mid-life (`models_rev` on the heartbeat reply) without ever ending the pod.

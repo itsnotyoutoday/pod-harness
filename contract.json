@@ -423,9 +423,12 @@
         "optional": [
           "provider",
           "job_id",
-          "stage"
+          "stage",
+          "stage_s",
+          "bytes",
+          "files"
         ],
-        "note": "one line per boot step. stage \"ready\" means the workload is up. A server without this route answers 404 and the pod carries on."
+        "note": "one line per boot step. stage \"ready\" means the workload is up. A server without this route answers 404 and the pod carries on. Each stage's last line carries stage_s (seconds the stage took: \"done in Ns\" / \"failed after Ns\"; the ready line's own); binaries' and models' also bytes and files downloaded in it. A server that refuses those (400/422) gets the line without them, and later lines leave them out; one that refuses stage too gets the bare line."
       },
       {
         "method": "POST",
@@ -557,9 +560,12 @@
             "nvenc",
             "cuda",
             "driver",
-            "gpu"
+            "gpu",
+            "image",
+            "image_digest",
+            "container_started_at"
           ],
-          "note": "after gpu_check (vram_gb number, cuda, driver, gpu = first card's name) and again after the NVENC probe (nvenc bool). Best effort; any answer is ignored."
+          "note": "first before gpu_check (image = <name>:<version> from /opt/podh/manifest.json or $PODH_IMAGE_MANIFEST; image_digest from $PODH_IMAGE_DIGEST, else the manifest's digest when present — an image cannot hold its own; container_started_at = epoch of the container's PID 1 start, else podh-boot's), again after gpu_check (vram_gb number, cuda, driver, gpu = first card's name) and after the NVENC probe (nvenc bool); every post repeats what is known. Best effort; any answer is ignored; a 400/422 resends without image, image_digest, container_started_at."
         },
         {
           "method": "GET",

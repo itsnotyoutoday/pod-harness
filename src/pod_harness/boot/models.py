@@ -156,6 +156,7 @@ def fetch_one(ctx: Context, man: Manifest, path: str, deadline: Optional[float],
                                deadline=deadline)
                 _remember(ctx, path, m.get("sha256"))
                 size = dest.stat().st_size
+                ctx.count(size)
                 line(f"{path}: {size / 1e6:.0f} MB in {time.time() - t0:.0f}s")
                 report(ctx, path, "present", man.rev)
                 return None

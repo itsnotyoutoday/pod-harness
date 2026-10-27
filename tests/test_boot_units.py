@@ -276,5 +276,25 @@ with open(log, "a") as f:
     f.write("partial line with CUDA unknown")
 check("a half-written line waits for its end", w.scan() is None)
 
+# -- image identity ------------------------------------------------------------------------
+from pod_harness.boot import image  # noqa: E402
+import json as _json  # noqa: E402
+
+os.environ.pop("PODH_IMAGE_DIGEST", None)
+mf = tmp / "manifest.json"
+os.environ["PODH_IMAGE_MANIFEST"] = str(mf)
+check("no manifest, no digest: no identity, still a container start",
+      image.identity() == {} and image.facts()["container_started_at"] <= time.time() + 1)
+mf.write_text(_json.dumps({"image": "podh-x", "version": "v2", "digest": "sha256:" + "1" * 64}))
+check("the manifest names the image (name:version) and may carry a digest",
+      image.identity() == {"image": "podh-x:v2", "image_digest": "sha256:" + "1" * 64})
+os.environ["PODH_IMAGE_DIGEST"] = "reg/podh-x@sha256:" + "2" * 64
+check("PODH_IMAGE_DIGEST wins, a full reference reduced to its digest",
+      image.identity()["image_digest"] == "sha256:" + "2" * 64)
+os.environ.pop("PODH_IMAGE_DIGEST")
+mf.write_text("not json")
+check("an unreadable manifest is no manifest", image.identity() == {})
+os.environ.pop("PODH_IMAGE_MANIFEST")
+
 print(f"\n  {sum(ok)}/{len(ok)} passed")
 sys.exit(0 if all(ok) else 1)

@@ -348,7 +348,23 @@ def done(rc: int = 0, reason: str | None = None, stage: str | None = None,
     return _post_tolerant("/v1/done", body, ("reason", "stage", "log_tail"))
 
 
-def boot(line: str, stage: str | None = None) -> dict | None:
+#: Optional numbers a boot line may carry: `stage_s` on a stage's last line (how long the
+#: stage took), `bytes` and `files` on the binaries and models stages' (what they
+#: downloaded). Added after /v1/boot first shipped, so a server that refuses them gets the
+#: line without them — and, if it still refuses, without `stage` too, as before.
+BOOT_NUMBERS = ("stage_s", "bytes", "files")
+
+
+_BOOT_NUMBERS_REFUSED = False
+
+
+def _refuse_boot_numbers() -> None:
+    """This server refused the numbers once; later lines leave them out (one request each)."""
+    global _BOOT_NUMBERS_REFUSED
+    _BOOT_NUMBERS_REFUSED = True
+
+
+def boot(line: str, stage: str | None = None, **numbers) -> dict | None:
     """Tell the control plane what the pod is doing while it boots. Never raises.
 
     The minutes between "pod created" and "job running" — mounting, fetching code, checking
@@ -368,10 +384,43 @@ def boot(line: str, stage: str | None = None) -> dict | None:
         body = {**_identity(), "line": _clip(line, MAX_LINE)}
         if stage:
             body["stage"] = _clip(stage, MAX_STAGE)
+        for k in BOOT_NUMBERS:
+            v = numbers.get(k)
+            if isinstance(v, (int, float)) and not isinstance(v, bool) and v >= 0:
+                body[k] = round(float(v), 3) if k == "stage_s" else int(v)
+        extra = tuple(k for k in BOOT_NUMBERS if k in body)
+        if extra and _BOOT_NUMBERS_REFUSED:
+            body = {k: v for k, v in body.items() if k not in extra}
+        elif extra:
+            r = _post("/v1/boot", body, timeout=4)
+            if r is not None or _LAST_STATUS not in (400, 422):
+                return r
+            print(f"  [heartbeat] control plane refused /v1/boot with {_LAST_STATUS} — "
+                  f"leaving out {', '.join(BOOT_NUMBERS)} from now on (an older server)",
+                  flush=True)
+            _refuse_boot_numbers()
+            body = {k: v for k, v in body.items() if k not in extra}
         return _post_tolerant("/v1/boot", body, ("stage",), timeout=4)
     except Exception as exc:          # a progress line is never worth a crashed boot
         global _LAST_ERROR
         _LAST_ERROR = f"{type(exc).__name__}: {exc}"
+        return None
+
+
+#: /v1/pod/facts keys added after the route first shipped (image identity and container
+#: start). A server that validates strictly and refuses them gets the rest.
+FACTS_NEWER = ("image", "image_digest", "container_started_at")
+
+
+def facts(body: dict) -> dict | None:
+    """POST /v1/pod/facts, best effort. A server without the route answers 404 (ignored);
+    one that refuses the newer keys with 400/422 gets the body without them."""
+    url, _, _ = _cfg()
+    if not url or not body:
+        return None
+    try:
+        return _post_tolerant("/v1/pod/facts", body, FACTS_NEWER, timeout=5)
+    except Exception:
         return None
 
 

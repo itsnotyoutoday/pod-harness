@@ -53,7 +53,12 @@ print("— full boot")
 pod.expire_first = {"vae/b.safetensors"}
 n0 = len(fc.calls)
 bd = T / "boot1"
-p = pod.run(bd, FAKE_SERVE="ok0", FAKE_SERVE_SLEEP="4")
+bd.mkdir(parents=True, exist_ok=True)
+(bd / "image-manifest.json").write_text(json.dumps({"image": "podh-test", "version": "v1-abc"}))
+t_start = time.time()
+p = pod.run(bd, FAKE_SERVE="ok0", FAKE_SERVE_SLEEP="4",
+            PODH_IMAGE_MANIFEST=bd / "image-manifest.json",
+            PODH_IMAGE_DIGEST="ghcr.io/x/podh-test@sha256:" + "ab" * 32)
 show(p, "full")
 d = dones(fc, n0)
 check("a full boot whose app.serve exits 0 ends rc 0", p.returncode == 0 and d and d[-1]["rc"] == 0)
@@ -61,9 +66,30 @@ check("stages report in the contract's order",
       stages(fc, n0) == ["gpu_check", "binaries", "models", "addons", "app", "workload", "ready",
                          "app_serve"])
 facts = [b for pth, b, _ in fc.calls[n0:] if pth == "/v1/pod/facts"]
+check("facts: the image's identity and container start come first, before the GPU check",
+      facts and facts[0].get("image") == "podh-test:v1-abc"
+      and facts[0].get("image_digest") == "sha256:" + "ab" * 32
+      and "vram_gb" not in facts[0]
+      and isinstance(facts[0].get("container_started_at"), float)
+      and facts[0]["container_started_at"] <= time.time())
+gfacts = [f for f in facts if "vram_gb" in f]
 check("facts: vram_gb, cuda, driver and the card after the GPU check",
-      facts and facts[0].get("vram_gb") == 48 and facts[0].get("cuda") == "12.8"
-      and facts[0].get("driver") == "570.86.15" and facts[0].get("gpu") == "NVIDIA L40S")
+      gfacts and gfacts[0].get("vram_gb") == 48 and gfacts[0].get("image") == "podh-test:v1-abc"
+      and gfacts[0].get("cuda") == "12.8"
+      and gfacts[0].get("driver") == "570.86.15" and gfacts[0].get("gpu") == "NVIDIA L40S")
+last = {}
+for pth, b, _ in fc.calls[n0:]:
+    if pth == "/v1/boot" and b.get("stage"):
+        last[b["stage"]] = b
+check("every stage's last line carries stage_s",
+      all(isinstance(last.get(s_, {}).get("stage_s"), float) for s_ in
+          ("gpu_check", "binaries", "models", "addons", "app", "workload", "ready")))
+check("...binaries and models also say what they downloaded (bytes, files)",
+      last["models"].get("files", 0) >= 1 and last["models"].get("bytes", 0) > 0
+      and last["binaries"].get("files") == 1 and last["binaries"].get("bytes", 0) > 0
+      and "bytes" not in last["addons"])
+check("...and the ready line is said once", sum(1 for pth, b, _ in fc.calls[n0:]
+                                               if pth == "/v1/boot" and b.get("stage") == "ready") == 1)
 check("facts: nvenc once ffmpeg is installed", facts[-1].get("nvenc") is True)
 bindir = bd / "bin" / f"ffmpeg-{pod.ff_sha[:12]}"
 check("without bin_names, every executable in the release's bin/ is installed",

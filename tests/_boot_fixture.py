@@ -308,6 +308,7 @@ echo "ffmpeg version n8.1-fake"
             "FAKE_COMFY_MODEFILE": str(boot_dir / "comfy-mode"),
             "FAKE_COMFY_COUNT": str(boot_dir / "comfy-count"),
             "FAKE_COMFY_ENVOUT": str(boot_dir / "comfy-env.json"),
+            "PODH_IMAGE_MANIFEST": str(boot_dir / "no-image-manifest.json"),
         })
         env.update({k: str(v) for k, v in extra.items()})
         return env

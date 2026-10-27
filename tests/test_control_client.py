@@ -84,6 +84,53 @@ check("a server that refuses busy still gets the beat, without it",
 old.close()
 os.environ["PODH_CONTROL_URL"] = fc.url
 
+# -- boot numbers and facts, against servers of three ages ----------------------------------
+heartbeat.boot("models: done in 3.2s", stage="models", stage_s=3.21, bytes=1234, files=2)
+b = fc.bodies("/v1/boot")[-1]
+check("a boot line carries stage_s, bytes and files",
+      b.get("stage_s") == 3.21 and b.get("bytes") == 1234 and b.get("files") == 2
+      and b.get("stage") == "models")
+heartbeat.boot("x", stage="models", stage_s=True, bytes=-1, files="2")
+b = fc.bodies("/v1/boot")[-1]
+check("...and drops numbers that are not numbers", not {"stage_s", "bytes", "files"} & set(b))
+
+
+def picky(known):
+    def fn(req):
+        extra = set(req["body"]) - known
+        return (422, {"detail": f"unknown {sorted(extra)}"}) if extra else (200, {"ok": True})
+    return fn
+
+
+mid = FakeControl()
+mid.routes[("POST", "/v1/boot")] = picky({"pod_id", "provider", "job_id", "line", "stage"})
+mid.routes[("POST", "/v1/pod/facts")] = picky({"pod_id", "vram_gb", "gpu"})
+os.environ["PODH_CONTROL_URL"] = mid.url
+r = heartbeat.boot("ready", stage="ready", stage_s=0.01)
+sent = mid.bodies("/v1/boot")
+check("a server that knows stage but not stage_s keeps the STAGE (ready stays ready)",
+      r is not None and sent[-1].get("stage") == "ready" and "stage_s" not in sent[-1])
+r = heartbeat.facts({"vram_gb": 24, "image": "podh-x:1", "image_digest": "sha256:ab",
+                     "container_started_at": 1.0})
+sent = mid.bodies("/v1/pod/facts")
+check("a server that refuses image facts gets the rest",
+      r is not None and sent[-1] == {"vram_gb": 24})
+nb = len(mid.bodies("/v1/boot"))
+r = heartbeat.boot("models: done", stage="models", stage_s=2.0)
+check("...and later lines leave the numbers out at once (one request, not two)",
+      r is not None and len(mid.bodies("/v1/boot")) == nb + 1
+      and "stage_s" not in mid.bodies("/v1/boot")[-1])
+mid.close()
+older = FakeControl()
+older.routes[("POST", "/v1/boot")] = picky({"pod_id", "provider", "job_id", "line"})
+os.environ["PODH_CONTROL_URL"] = older.url
+r = heartbeat.boot("models: done", stage="models", stage_s=1.0, bytes=1, files=1)
+sent = older.bodies("/v1/boot")
+check("a server that knows neither still gets the line",
+      r is not None and set(sent[-1]) == {"pod_id", "provider", "job_id", "line"})
+older.close()
+os.environ["PODH_CONTROL_URL"] = fc.url
+
 # -- done: log_tail ---------------------------------------------------------------------------
 heartbeat.done(1, reason="workload died", stage="workload",
                log_tail="line\n" * 1000 + "Traceback: the end")

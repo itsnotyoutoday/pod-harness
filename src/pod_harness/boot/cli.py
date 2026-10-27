@@ -39,7 +39,7 @@ from typing import Optional
 from .. import heartbeat
 from ..local import LocalServer, LocalState, start_beat
 from . import addons, app, binaries, gpu, models, serve, workload
-from .core import BootFailure, Context, run_stage, say
+from .core import BootFailure, Context, run_stage, say, stage_numbers
 
 EXIT_USAGE = 2
 
@@ -105,7 +105,8 @@ def load_app_env(ctx: Context) -> None:
 def ready(ctx: Context) -> None:
     w = ctx.workload
     ctx.state.ready = True
-    ctx.line(f"ready{f' — {w.name} on {w.url}' if w and w.url else ''}", "ready")
+    ctx.line(f"ready{f' — {w.name} on {w.url}' if w and w.url else ''}", "ready",
+             **stage_numbers(ctx, "ready"))
 
 
 def _stages(ctx: Context) -> list:

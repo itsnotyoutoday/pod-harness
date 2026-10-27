@@ -273,6 +273,9 @@ class Context:
         self.manifest = None          # models.Manifest, kept for mid-life additions
         self.app_env: dict = {}       # the current job's app env, from GET /v1/pod/env
         self._markers = self.boot_dir / "markers.json"
+        self.dl_bytes = 0             # downloaded in the current stage (count())
+        self.dl_files = 0
+        self.stage_t0: Optional[float] = None
 
     # -- configuration --------------------------------------------------------------------
     def load(self, spec: dict) -> None:
@@ -332,11 +335,18 @@ class Context:
             return float(default or DEFAULT_LIMITS.get(stage, 600))
 
     # -- reporting --------------------------------------------------------------------------
-    def line(self, text: str, stage: Optional[str] = None) -> None:
+    def line(self, text: str, stage: Optional[str] = None, **numbers) -> None:
+        """One boot line. `numbers` (stage_s, bytes, files) ride along on /v1/boot."""
         stage = stage or self.stage
         say(f"{stage}: {text}" if stage else text)
         if heartbeat._cfg()[0]:
-            heartbeat.boot(text, stage)
+            heartbeat.boot(text, stage, **numbers)
+
+    def count(self, nbytes: int, files: int = 1) -> None:
+        """Downloaded bytes and files, totalled per stage for its last line."""
+        with self.procs_lock:
+            self.dl_bytes += int(nbytes or 0)
+            self.dl_files += int(files or 0)
 
     # -- time ---------------------------------------------------------------------------------
     def remaining(self) -> Optional[float]:
@@ -471,14 +481,45 @@ class Context:
         return self.finish(f.rc, f.reason, f.stage or self.stage, f.log_tail)
 
 
+#: Stages whose downloads are totalled on their last line (`bytes`, `files`).
+COUNTED = ("binaries", "models")
+#: Stages that report their own last line (with stage_s): "ready" is the line that says the
+#: workload is up, and a second "ready" line after it would say it twice.
+SELF_CLOSING = ("ready",)
+
+
+def stage_numbers(ctx: Context, name: str) -> dict:
+    """{stage_s, bytes?, files?} for the stage now running."""
+    out = {"stage_s": round(time.time() - (ctx.stage_t0 or time.time()), 3)}
+    if name in COUNTED:
+        out.update(bytes=ctx.dl_bytes, files=ctx.dl_files)
+    return out
+
+
 def run_stage(ctx: Context, name: str, fn, limit: Optional[float] = None) -> None:
-    """Run one stage under its time limit; translate any failure into a BootFailure."""
+    """Run one stage under its time limit; translate any failure into a BootFailure.
+
+    The stage's last boot line carries its duration (`stage_s`), and for binaries and
+    models what they downloaded (`bytes`, `files`): "done in Ns" when it succeeds,
+    "failed after Ns" when it does not.
+    """
     limit = limit if limit is not None else ctx.limit(name)
     ctx.stage = name
     ctx.state.stage = name
     ctx.deadline = time.time() + limit
-    t0 = time.time()
+    t0 = ctx.stage_t0 = time.time()
+    ctx.dl_bytes = ctx.dl_files = 0
     box: dict = {}
+
+    def close(ok: bool) -> None:
+        n = stage_numbers(ctx, name)
+        moved = (f" ({n['files']} file(s), {n['bytes'] / 1e6:.0f} MB downloaded)"
+                 if n.get("files") else "")
+        try:
+            ctx.line(f"{'done in' if ok else 'failed after'} {n['stage_s']:.1f}s{moved}",
+                     name, **n)
+        except Exception:
+            pass
 
     def target():
         try:
@@ -491,12 +532,17 @@ def run_stage(ctx: Context, name: str, fn, limit: Optional[float] = None) -> Non
     t.join(limit + 5)
     if t.is_alive():
         ctx.kill_procs()
+        close(False)
         raise BootFailure(f"{name} did not finish within {limit:.0f}s", stage=name)
     exc = box.get("exc")
     ctx.deadline = None
     if exc is None:
-        say(f"{name}: done in {time.time() - t0:.0f}s")
+        if name in SELF_CLOSING:
+            say(f"{name}: done in {time.time() - t0:.0f}s")
+        else:
+            close(True)
         return
+    close(False)
     if isinstance(exc, BootFailure):
         exc.stage = exc.stage or name
         raise exc

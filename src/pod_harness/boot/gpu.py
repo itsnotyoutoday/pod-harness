@@ -8,7 +8,9 @@ at stage gpu_check — the stage pod-control blocks the host for.
 It also records what the app needs to know about the card — vram_gb, cuda, driver — and,
 once binaries are installed, whether NVENC works (a one-frame h264_nvenc null encode). Those
 (and `gpu`, the first card's name) go to POST /v1/pod/facts, best effort: a server without the route answers 404 and the boot
-carries on. A missing ffmpeg or a failed encode is a fact (nvenc false/unknown), not a
+carries on. Every post also carries the image's identity and the container's start time
+(boot/image.py), and the first is sent before the GPU check, so a pod whose GPU check fails
+still says what image it ran. A missing ffmpeg or a failed encode is a fact (nvenc false/unknown), not a
 failed boot — the app decides whether it needs NVENC.
 """
 from __future__ import annotations
@@ -20,6 +22,7 @@ import subprocess
 from typing import Optional
 
 from .. import gpucheck, heartbeat
+from . import image
 from .core import BootFailure, Context
 
 # 320x240 and a few frames: at 64x64 x 1 frame an A40 (which has NVENC) reported "no" —
@@ -52,14 +55,27 @@ def smi_cuda() -> Optional[str]:
     return m.group(1) if m else None
 
 
+#: What POST /v1/pod/facts carries. The last three are the image's identity and the
+#: container's start (boot/image.py), sent from the first post on; a server that refuses
+#: them (400/422) gets the rest (heartbeat.facts).
+FACT_KEYS = ("vram_gb", "nvenc", "cuda", "driver", "gpu",
+             "image", "image_digest", "container_started_at")
+
+
 def post_facts(ctx: Context) -> None:
-    keys = ("vram_gb", "nvenc", "cuda", "driver", "gpu")
-    body = {k: ctx.facts[k] for k in keys if ctx.facts.get(k) is not None}
+    """POST "/v1/pod/facts" with what is known so far. Best effort."""
+    if not ctx.facts.get("container_started_at"):
+        try:
+            ctx.facts.update(image.facts())
+        except Exception:
+            pass
+    body = {k: ctx.facts[k] for k in FACT_KEYS if ctx.facts.get(k) is not None}
     if body and heartbeat._cfg()[0]:
-        heartbeat.request("POST", "/v1/pod/facts", body, timeout=5)
+        heartbeat.facts(body)
 
 
 def run(ctx: Context) -> None:
+    post_facts(ctx)                   # image identity first: known before any GPU is
     want = ctx.boot.get("gpu_check")
     count = gpucheck.requested()
     if want is False:

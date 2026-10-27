@@ -129,6 +129,7 @@ def install(ctx: Context, it: dict) -> Path:
     if heartbeat._cfg()[0]:
         try:
             if kits.get(kit, it["sha256"], d, kit_facts={}, deadline=ctx.deadline) and _installed(d, it):
+                ctx.count(sum(f.stat().st_size for f in d.iterdir() if f.is_file()))
                 ctx.line(f"{it['name']}: unpacked from kit")
                 return d
         except kits.KitError as e:
@@ -141,6 +142,7 @@ def install(ctx: Context, it: dict) -> Path:
             fetch.download(it["url"], arc, sha256=it["sha256"], deadline=ctx.deadline)
         except fetch.DownloadError as e:
             raise BootFailure(f"{it['name']}: {e}")
+        ctx.count(arc.stat().st_size)
         tree = work / "tree"
         try:
             if fetch.sniff(arc) == "raw":
