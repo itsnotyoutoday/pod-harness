@@ -202,7 +202,7 @@ check("artifact names: relative paths normalised",
       artifact_name("a/b/c.ext") == "a/b/c.ext" and artifact_name("./a/./b.txt") == "a/b.txt"
       and artifact_name("plain.png") == "plain.png")
 check("...and `..`, absolute, empty segments refused",
-      all(refused(n) for n in ("../x", "a/../b", "/abs/x", "a//b", "a/", "", ".", "a\\b", None)))
+      all(refused(n) for n in ("../x", "a/../b", "/abs/x", "a//b", "a/", "", ".", "a\\b", None, "x" * 513, "a\tb")))
 cf.outputs = ["c.txt"]
 ft.queue.append(task("t-noout", outputs={"keep": ["*.mp4"]}))
 run()

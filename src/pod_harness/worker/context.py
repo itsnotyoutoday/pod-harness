@@ -34,6 +34,8 @@ from .handlers import TaskFailed
 
 MAX_EVENT = 16 * 1024
 UPLOAD_ATTEMPTS = 4
+#: pod-control's limit on an artifact name.
+MAX_ARTIFACT_NAME = 512
 
 
 def _sha_size(path: Path) -> tuple:
@@ -64,9 +66,12 @@ def put_file(url: str, path: Path, timeout: float = 600) -> int:
 def artifact_name(name) -> str:
     """An artifact name: a file name, or a relative path `a/b/c.ext` (TASK-API: names may be
     relative paths). `./` segments are dropped; `..`, absolute paths, empty segments
-    (`a//b`, a trailing `/`), backslashes and control characters are refused."""
+    (`a//b`, a trailing `/`), backslashes, control characters and names over 512
+    characters (pod-control's limit) are refused."""
     if not isinstance(name, str) or not name:
         raise ValueError("artifact name is empty")
+    if len(name) > MAX_ARTIFACT_NAME:
+        raise ValueError(f"artifact name is longer than {MAX_ARTIFACT_NAME} characters")
     if name.startswith("/") or "\\" in name or any(ord(ch) < 32 for ch in name):
         raise ValueError(f"artifact name {name!r}: absolute, backslashed or control characters")
     parts = [p for p in name.split("/") if p != "."]
