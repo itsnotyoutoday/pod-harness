@@ -16,10 +16,10 @@ The control plane holds no bytes. It answers with presigned URLs:
 
     GET  /v1/pod/kits/{name}?key=&python=&torch=&cuda=&image=   200 {url, sha256, size} | 404
     POST /v1/pod/kits/{name} {key, sha256, size, format, python, torch, cuda, image}
-         → 200 {url, headers?}  (a presigned PUT; 409 = another pod holds the claim)
-    PUT  <url>  the archive
-    POST /v1/pod/kits/{name}/commit {key, sha256, size}   (a server that verifies on its own
-         may not have it; 404 is fine)
+         → 200 {claim_id, put_url}  (a presigned PUT; 409 = already published, or another
+         pod holds the claim)
+    PUT  <put_url>  the archive
+    POST /v1/pod/kits/{name}/commit {claim_id, sha256, key, size}   publishes it
 
 `get` checks the sha256 before unpacking, and unpacks atomically: the directory is either
 what it was or the whole kit, never half of one. Archives are tar.zst when zstd is
@@ -44,7 +44,7 @@ from typing import Optional
 
 from . import fetch, heartbeat
 
-NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 EXIT_ABSENT = 2
 EXIT_NOT_CONFIGURED = 3
 EXIT_CLAIMED = 4
@@ -171,20 +171,23 @@ def put(name: str, key: str, src, *, python: Optional[str] = None,
         st, obj = heartbeat.request("POST", _path(name), body)
         if st == 409:
             return None
-        if st != 200 or not (obj or {}).get("url"):
+        put_url = (obj or {}).get("put_url") or (obj or {}).get("url")
+        if st != 200 or not put_url:
             raise KitError(f"kit {name}: claim answered {st or 'nothing'} "
                            f"({heartbeat.last_error() or obj})")
         headers = {"Content-Length": str(size), **(obj.get("headers") or {})}
         with open(arc, "rb") as data:
-            req = urllib.request.Request(obj["url"], data=data, method="PUT", headers=headers)
+            req = urllib.request.Request(put_url, data=data, method="PUT", headers=headers)
             try:
                 with urllib.request.urlopen(req, timeout=timeout) as r:
                     r.read()
             except Exception as e:
                 raise KitError(f"kit {name}: upload failed: {type(e).__name__}: {e}")
-        st, _ = heartbeat.request("POST", _path(name) + "/commit",
-                                  {"key": key, "sha256": sha, "size": size})
-        if st not in (200, 201, 204, 404):
+        commit = {"key": key, "sha256": sha, "size": size}
+        if obj.get("claim_id"):
+            commit["claim_id"] = obj["claim_id"]
+        st, _ = heartbeat.request("POST", _path(name) + "/commit", commit)
+        if st not in (200, 201, 204):
             raise KitError(f"kit {name}: commit answered {st or 'nothing'} "
                            f"({heartbeat.last_error()})")
         return {"sha256": sha, "size": size, "format": fmt}

@@ -197,13 +197,16 @@ def kit_claim(req):
     if req["body"]["key"] == "busy":
         return 409, {"detail": "claimed"}
     blob = f"kit{len(store)}-{req['body']['key']}"
-    store[("pending", req["path"])] = (blob, req["body"])
-    return 200, {"url": f"{fc.url}/put/{blob}"}
+    cid = f"claim-{len(store)}"
+    store[("pending", cid)] = (blob, req["body"])
+    return 200, {"claim_id": cid, "put_url": f"{fc.url}/put/{blob}", "expires_s": 3600}
 
 
 def kit_commit(req):
     path = req["path"][: -len("/commit")]
-    blob, claim = store.pop(("pending", path))
+    if ("pending", req["body"].get("claim_id")) not in store:
+        return 404, {"error": "no such pending claim"}
+    blob, claim = store.pop(("pending", req["body"]["claim_id"]))
     got = fc.blobs[blob]
     if hashlib.sha256(got).hexdigest() != req["body"]["sha256"]:
         return 422, {"detail": "hash mismatch"}
