@@ -56,6 +56,10 @@ RUN --mount=type=bind,from=insightface,source=/wheels,target=/tmp/wheels \
 # flag file it writes after a successful check is written now, so a pod never runs pip from
 # inside a node.
 #
+# ChatterBox normalises loudness only when pyloudnorm imports ("pyloudnorm not available.
+# Loudness normalization disabled" otherwise), and its requirements do not list it, so it is
+# installed here at the lock's pin. Its Perth watermarker is deliberately NOT installed.
+#
 # The checks are the base's (check_image.py, quick-test) plus the face and voice stacks,
 # run in this same layer, writing no bytecode, so they add nothing to it.
 ARG QUICK_TEST_STRICT=1
@@ -64,13 +68,13 @@ RUN --mount=type=bind,source=docker/comfyui,target=/tmp/ctx \
     bake=/opt/podh/podh-bake-node; \
     $bake ComfyUI-LatentSyncWrapper https://github.com/ShmuelRonen/ComfyUI-LatentSyncWrapper 360d5283d7276aee68b4237b1387e594e4ce640e; \
     $bake ComfyUI_Fill-ChatterBox https://github.com/filliptm/ComfyUI_Fill-ChatterBox f7d7a16187430abcaf91a3039b9c83aa9960816a; \
-    pip install --no-input -c /opt/podh/lock.txt pytorch-lightning accelerate; \
+    pip install --no-input -c /opt/podh/lock.txt pytorch-lightning accelerate pyloudnorm; \
     echo "Dependencies installed at image build" > /root/.latentsync16_dependencies_installed; \
     rm -rf /root/.cache; \
     cat /opt/podh/baked/addons.json; \
     export PYTHONDONTWRITEBYTECODE=1; \
     python /opt/podh/check_image.py --pins /opt/podh/cuda.txt \
-        --import insightface onnxruntime decord librosa diffusers s3tokenizer \
+        --import insightface onnxruntime decord librosa diffusers s3tokenizer pyloudnorm \
         --dist onnxruntime-gpu transformers diffusers librosa \
         --ldd 'onnxruntime/capi/libonnxruntime_providers_cuda.so'; \
     python -c "import importlib.metadata as m; v = m.version('insightface'); assert v == '${INSIGHTFACE_VERSION}', v"; \

@@ -104,11 +104,12 @@ soundfile
 DeepCache
 pytorch-lightning
 accelerate
-# ComfyUI_Fill-ChatterBox
+# ComfyUI_Fill-ChatterBox (pyloudnorm: its loudness normalisation; not the Perth watermarker)
 resampy
 librosa
 s3tokenizer
 conformer
+pyloudnorm==0.2.0
 # onnxruntime-gpu and insightface 0.7.3's declared dependencies
 onnxruntime-gpu==1.24.1
 onnx
