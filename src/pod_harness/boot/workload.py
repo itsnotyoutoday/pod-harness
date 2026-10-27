@@ -1,6 +1,7 @@
 """workload: start ComfyUI (or a given command), wait until it answers, then supervise it.
 
-    "workload": {"comfyui": {"root"?, "python"?, "port": 8188, "args": [...], "up_timeout_s": 300},
+    "workload": {"comfyui": {"root"?, "python"?, "port": 8188, "args": [...], "up_timeout_s": 300,
+                             "fast_disk"?: true | false},
                  "env": {...},                       # merged into $PODH_WORKLOAD_ENV by binaries
                  "scan_log_for": ["…"]}
     or          {"command": [...] | "shell line", "port"?: n, "up_url"?: "http://…",
@@ -11,6 +12,15 @@ ComfyUI's root is `root`, else $PODH_COMFY_ROOT, else the first of /opt/ComfyUI,
 else $PODH_COMFY_PY, else the root's venv, else python3. Its model folders point at
 $PODH_MODELS_ROOT through a generated extra_model_paths.yaml, so models land in one place
 whatever image this is.
+
+`fast_disk` (else $PODH_COMFY_FAST_DISK = 1/0; unset = ComfyUI decides) passes
+`--fast-disk` / `--disable-fast-disk`. ComfyUI (v0.43.0, comfy/storage.py `model_fast_disk`)
+otherwise turns fast_disk on only when every model file sits on a block device it can trace
+in /sys to NVMe at PCIe ≥8 GT/s x4 (or ≥32 GT/s x2) — never true of a network volume or a container's
+overlay, which have no /sys/dev/block entry. With it on, dynamic loading streams weights from
+the (mmapped) file instead of first copying them into pinned RAM: faster from local NVMe,
+likely slower from a network volume, so it is opt-in. A ComfyUI whose cli_args.py has no
+--fast-disk is left alone (an unknown flag would stop it starting).
 
 Up means the port answers HTTP (any status below 500) within up_timeout_s. While waiting,
 and for the rest of its life, its log is scanned for fatal strings — podh-gpucheck's CUDA
@@ -227,6 +237,34 @@ def restart_for_api(ctx: Context) -> tuple:
     return 200, {"restarted": True, "after_s": round(time.time() - t0, 1), "url": w.url}
 
 
+def _flag(v) -> Optional[bool]:
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, str) and v.strip().lower() in ("1", "true", "yes", "on"):
+        return True
+    if isinstance(v, str) and v.strip().lower() in ("0", "false", "no", "off"):
+        return False
+    return None
+
+
+def fast_disk_args(ctx: Context, cfg: dict, args: list) -> list:
+    """`--fast-disk` / `--disable-fast-disk` for workload.comfyui.fast_disk (or
+    $PODH_COMFY_FAST_DISK); [] when neither is set, when `args` already says, or when this
+    ComfyUI does not know the flag."""
+    want = _flag(cfg.get("fast_disk")) if "fast_disk" in cfg else _flag(
+        os.environ.get("PODH_COMFY_FAST_DISK"))
+    if want is None or "--fast-disk" in args or "--disable-fast-disk" in args:
+        return []
+    try:
+        known = "--fast-disk" in (ctx.comfy_root / "comfy" / "cli_args.py").read_text()
+    except OSError:
+        known = False
+    if not known:
+        ctx.line("fast_disk: this ComfyUI has no --fast-disk flag; leaving it to decide")
+        return []
+    return ["--fast-disk" if want else "--disable-fast-disk"]
+
+
 def build(ctx: Context) -> Optional[Workload]:
     wl = ctx.boot.get("workload")
     if not wl:
@@ -253,6 +291,7 @@ def build(ctx: Context) -> Optional[Workload]:
             cmd += ["--port", str(port)]
         if "--extra-model-paths-config" not in args:
             cmd += ["--extra-model-paths-config", str(write_extra_model_paths(ctx))]
+        cmd += fast_disk_args(ctx, cfg, args)
         cmd += args
         ctx.exports["PODH_COMFY_URL"] = f"http://127.0.0.1:{port}"   # for podh-worker
         return Workload(ctx, cmd, cwd=str(ctx.comfy_root), env=env,

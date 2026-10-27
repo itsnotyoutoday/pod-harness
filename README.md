@@ -159,7 +159,7 @@ gpu_check → binaries → models → addons → app → workload → ready → 
 | `models` | the manifest's presigned files into `$PODH_MODELS_ROOT`, 2 at a time, resumable (aria2c if present), fresh links on expiry, size/sha checked, per-path state reported; a file the store lacks (`in_store: false`, with a `source`) is fetched from the source instead and put back into the store in the background (below) |
 | `addons` | git repos at full commits, validated again on the pod, `pip` into the workload's python, links (never outside their roots), import probes; `optional` items only warn; the set is kept as a kit |
 | `app` | the app's code fetched with ITS token (`Authorization: Bearer $<fetch.auth_env>`), or from a presigned `{url, sha256}` (no header; the archive must match the sha256), unpacked into `$PODH_APP_ROOT`, its `run` executed there (`{app}` in argv = that dir) — before the workload, so it can add files and `KEY=value` lines to `$PODH_WORKLOAD_ENV` |
-| `workload` | ComfyUI (models wired through `extra_model_paths.yaml`) or a command; up within `up_timeout_s`; log scanned for fatal strings; restarted once |
+| `workload` | ComfyUI (models wired through `extra_model_paths.yaml`; `fast_disk` → `--fast-disk`, below) or a command; up within `up_timeout_s`; log scanned for fatal strings; restarted once |
 | `ready` | boot line with stage `ready` |
 | `app.serve` | the app's long-running process (for a task pool, `podh-worker`): one restart, exit 0 ends the pod (unless the pod is draining or parked), drain/park → SIGTERM then SIGKILL after `serve_grace_s` |
 
@@ -383,6 +383,17 @@ defaults already point at the image: `PODH_COMFY_ROOT=/opt/ComfyUI`,
   `requirements.txt`; its `pip` extras, `links` and `probe` still run. Any other commit is
   cloned and installed as usual, beside or over it;
 - `workload.comfyui` starts the baked ComfyUI with its models wired to `PODH_MODELS_ROOT`.
+
+**`fast_disk`.** ComfyUI v0.43.0 logs `Model storage policy: fast_disk=…` per model. Unless
+told, it is true only when every model file is on a block device it can trace through
+`/sys` to NVMe at PCIe ≥8 GT/s x4 (`comfy/storage.py`); a network volume or a container's
+overlay has no such entry, so `/workspace` is always `False` — and moving models to the
+container disk (`PODH_MODELS_ROOT`) does not change that. With `False`, dynamic loading
+copies each model's weights into pinned RAM before they go to the GPU; with `True` it
+streams them from the file instead. `workload.comfyui.fast_disk: true` (or
+`PODH_COMFY_FAST_DISK=1`) passes `--fast-disk`, `false` passes `--disable-fast-disk`;
+unset leaves ComfyUI to decide. Opt in where the model files are on fast local disk —
+streaming from a network volume is likely slower than the RAM copy it saves.
 
 ```json
 {"boot": {"gpu_check": true,

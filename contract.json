@@ -49,6 +49,11 @@
       "PODH_LOCAL_URL": "set BY podh-boot for the app stage, the workload and app.serve: the local API (POST /busy, GET /state, POST /done). podh-report busy|idle|done use it.",
       "PODH_BOOT_SPEC": "podh-boot: read the boot spec from this JSON file instead of GET /v1/pod/spec",
       "PODH_BOOT_DIR": "podh-boot's state, logs and binaries; default $PODH_WORKSPACE/.podh-boot (PODH_WORKSPACE default /workspace), else ~/.podh-boot",
+      "PODH_LOGS_DIR": "where the pod's logs are (<name>.log each), for log requests and the end-of-pod upload (APP-API §9); default $PODH_BOOT_DIR/logs, else podh-init's $PODH_LOG_DIR",
+      "PODH_LOG_UPLOAD_S": "the end-of-pod log upload's overall budget in seconds (default 60): it runs before done and must never hold the ending up for long",
+      "PODH_LOG_UPLOAD_MAX_MB": "per log, at most this many of its newest MB are uploaded (default 256)",
+      "PODH_LOG_UPLOAD_TERM_S": "the log upload's budget on SIGTERM, inside the provider's stop grace (default 8)",
+      "PODH_COMFY_FAST_DISK": "1/0: pass ComfyUI --fast-disk / --disable-fast-disk when workload.comfyui.fast_disk does not say; unset = ComfyUI decides (fast only on local NVMe it can trace in /sys)",
       "PODH_BOOT_EXIT": "1 = podh-boot exits with the rc when the pod's work ends (as --exit-on-fail) instead of idling",
       "PODH_MODELS_ROOT": "where models land; ComfyUI's model folders point here. Default $PODH_WORKSPACE/models. Exported to the app and workload.",
       "PODH_WORKLOAD_ENV": "KEY=value file the binaries stage and the app stage write, loaded (with $VAR expansion) into the workload and app.serve. Default <boot dir>/workload.env. Exported.",
@@ -955,7 +960,8 @@
         "python?",
         "port",
         "args",
-        "up_timeout_s"
+        "up_timeout_s",
+        "fast_disk?  (true → --fast-disk, false → --disable-fast-disk; unset: ComfyUI decides)"
       ],
       "or": [
         "command",

@@ -296,5 +296,36 @@ mf.write_text("not json")
 check("an unreadable manifest is no manifest", image.identity() == {})
 os.environ.pop("PODH_IMAGE_MANIFEST")
 
+# -- workload.comfyui.fast_disk ----------------------------------------------------------------
+print("— fast_disk")
+fd = tmp / "fdcomfy"
+(fd / "comfy").mkdir(parents=True)
+(fd / "main.py").write_text("")
+(fd / "comfy" / "cli_args.py").write_text('parser.add_argument("--fast-disk", action="store_true")\n')
+fctx = Context(boot_dir=tmp / "fdboot")
+fctx.load({"workload": {"comfyui": {"root": str(fd), "fast_disk": True}}})
+w = workload.build(fctx)
+check("fast_disk: true passes --fast-disk", "--fast-disk" in w.cmd)
+fctx.load({"workload": {"comfyui": {"root": str(fd), "fast_disk": False}}})
+check("fast_disk: false passes --disable-fast-disk",
+      "--disable-fast-disk" in workload.build(fctx).cmd)
+fctx.load({"workload": {"comfyui": {"root": str(fd)}}})
+c0 = workload.build(fctx).cmd
+check("unset: neither flag (ComfyUI decides)",
+      "--fast-disk" not in c0 and "--disable-fast-disk" not in c0)
+os.environ["PODH_COMFY_FAST_DISK"] = "1"
+check("$PODH_COMFY_FAST_DISK=1 when the spec does not say", "--fast-disk" in workload.build(fctx).cmd)
+fctx.load({"workload": {"comfyui": {"root": str(fd), "fast_disk": False}}})
+check("...the spec wins over the env", "--fast-disk" not in workload.build(fctx).cmd)
+os.environ.pop("PODH_COMFY_FAST_DISK")
+fctx.load({"workload": {"comfyui": {"root": str(fd), "fast_disk": True,
+                                     "args": ["--disable-fast-disk"]}}})
+c1 = workload.build(fctx).cmd
+check("args that already say win, once", c1.count("--disable-fast-disk") == 1
+      and "--fast-disk" not in c1)
+(fd / "comfy" / "cli_args.py").write_text("# an older ComfyUI\n")
+fctx.load({"workload": {"comfyui": {"root": str(fd), "fast_disk": True}}})
+check("a ComfyUI without the flag is not given it", "--fast-disk" not in workload.build(fctx).cmd)
+
 print(f"\n  {sum(ok)}/{len(ok)} passed")
 sys.exit(0 if all(ok) else 1)
