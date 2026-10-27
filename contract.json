@@ -46,7 +46,20 @@
       "PODH_HEARTBEAT_STOP_FILE": "the flag that silences the heartbeat at done; default /tmp/podh-stop-heartbeat. Exists for tests.",
       "PODH_LOCAL_PORT": "podh-boot's local API port on 127.0.0.1; default ephemeral",
       "PODH_LOCAL_TOKEN": "token for the local API; default random. Exported to the app and workload.",
-      "PODH_LOCAL_URL": "set BY podh-boot for the app stage, the workload and app.serve: the local API (POST /busy, GET /state, POST /done). podh-report busy|idle|done use it."
+      "PODH_LOCAL_URL": "set BY podh-boot for the app stage, the workload and app.serve: the local API (POST /busy, GET /state, POST /done). podh-report busy|idle|done use it.",
+      "PODH_BOOT_SPEC": "podh-boot: read the boot spec from this JSON file instead of GET /v1/pod/spec",
+      "PODH_BOOT_DIR": "podh-boot's state, logs and binaries; default $PODH_WORKSPACE/.podh-boot (PODH_WORKSPACE default /workspace), else ~/.podh-boot",
+      "PODH_BOOT_EXIT": "1 = podh-boot exits with the rc when the pod's work ends (as --exit-on-fail) instead of idling",
+      "PODH_MODELS_ROOT": "where models land; ComfyUI's model folders point here. Default $PODH_WORKSPACE/models. Exported to the app and workload.",
+      "PODH_WORKLOAD_ENV": "KEY=value file the binaries stage and the app stage write, loaded (with $VAR expansion) into the workload and app.serve. Default <boot dir>/workload.env. Exported.",
+      "PODH_COMFY_ROOT": "the ComfyUI dir; default the first of /opt/ComfyUI, /workspace/runpod-slim/ComfyUI, /workspace/ComfyUI with main.py. Exported.",
+      "PODH_COMFY_PY": "the workload's python (addons install into it, probes run with it); default the ComfyUI venv, else python3. Exported.",
+      "PODH_ADDONS_ROOT": "where addons are cloned; default $PODH_COMFY_ROOT/custom_nodes, else <boot dir>/addons",
+      "PODH_APP_DIR": "where the app is unpacked; default boot.app.dir, else /opt/app. Exported.",
+      "PODH_IMAGE_DIGEST": "the image's digest, if the image knows it; part of every kit's key",
+      "PODH_KIT_FORMAT": "zst | gz for kits this pod publishes; default zst when the zstd binary exists",
+      "PODH_NO_ARIA2": "1 = never use aria2c for downloads, even when present",
+      "PODH_PIP_TIMEOUT": "seconds per addon pip install, default 1200"
     },
     "provider_supplied": {
       "RUNPOD_POD_ID": "set by RunPod; used only for labelling, never for logic"
@@ -439,7 +452,7 @@
       "log_tail": 1024
     },
     "stages": {
-      "_comment": "stage values podh-init sends. A sidecar workload may send its own.",
+      "_comment": "stage values podh-init and podh-boot send. A sidecar workload may send its own.",
       "values": [
         "boot",
         "gpu_check",
@@ -452,7 +465,13 @@
         "ready",
         "job",
         "publish",
-        "mode"
+        "mode",
+        "binaries",
+        "models",
+        "addons",
+        "app",
+        "workload",
+        "app_serve"
       ]
     },
     "exit_codes": {
@@ -465,6 +484,68 @@
         "`client` names the module that makes the call; assert_contract.py checks the path appears there."
       ],
       "calls": [
+        {
+          "method": "GET",
+          "path": "/v1/pod/spec",
+          "client": "boot/cli.py",
+          "reply": {
+            "200": [
+              "boot",
+              "policy",
+              "job_id?",
+              "models_rev?"
+            ],
+            "401/403/404": "fatal at stage spec; other answers are retried for boot.limits.spec (default 300 s)"
+          },
+          "note": "{boot, policy, ...} or a bare boot object. Keys podh-boot reads under boot: gpu_check, binaries, models, addons, app, workload, limits."
+        },
+        {
+          "method": "GET",
+          "path": "/v1/pod/models",
+          "client": "boot/models.py",
+          "reply": {
+            "200": [
+              "models_rev",
+              "files[]: path, url, sha256?, size?, boot?"
+            ]
+          },
+          "note": "presigned GETs, fetched WITHOUT the pod token. Asked again when a link is refused (401/403) and on a higher models_rev. boot:false files never fail the boot; they are fetched after ready."
+        },
+        {
+          "method": "POST",
+          "path": "/v1/pod/models/state",
+          "client": "boot/models.py",
+          "required": [
+            "models"
+          ],
+          "note": "{\"models\": {path: \"fetching\" | \"present\" | {\"state\": \"failed\", \"error\"}}}, one path per call, best effort"
+        },
+        {
+          "method": "GET",
+          "path": "/v1/pod/addons",
+          "client": "boot/addons.py",
+          "reply": {
+            "200": [
+              "set",
+              "version",
+              "items"
+            ]
+          },
+          "note": "items per APP-API §2 'Addon item schema'; validated again on the pod"
+        },
+        {
+          "method": "POST",
+          "path": "/v1/pod/facts",
+          "client": "boot/gpu.py",
+          "optional": [
+            "vram_gb",
+            "nvenc",
+            "cuda",
+            "driver",
+            "gpu"
+          ],
+          "note": "after gpu_check (vram_gb number, cuda, driver, gpu = first card's name) and again after the NVENC probe (nvenc bool). Best effort; any answer is ignored."
+        },
         {
           "method": "GET",
           "path": "/v1/pod/kits/{name}",
@@ -484,7 +565,7 @@
             ],
             "404": "no kit for this key and these facts yet"
           },
-          "note": "name ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$. The archive is verified against sha256 before it is unpacked; tar.zst or tar.gz, detected by magic bytes."
+          "note": "name ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$. The archive is verified against sha256 before it is unpacked; tar.zst or tar.gz, detected by magic bytes."
         },
         {
           "method": "POST",
@@ -504,10 +585,10 @@
           ],
           "reply": {
             "200": [
-              "url",
-              "headers?"
+              "claim_id",
+              "put_url"
             ],
-            "409": "another pod holds the claim; the caller does not publish"
+            "409": "already published, or another pod holds the claim; the caller does not publish"
           },
           "note": "claim the build and get a presigned PUT for the archive"
         },
@@ -516,15 +597,20 @@
           "path": "/v1/pod/kits/{name}/commit",
           "client": "kits.py",
           "required": [
-            "key",
-            "sha256",
-            "size"
+            "claim_id",
+            "sha256"
           ],
           "reply": {
-            "200": [],
-            "404": "tolerated: a server that verifies uploads on its own"
+            "200": [
+              "published"
+            ],
+            "other": "the kit is not published; not fatal to a boot"
           },
-          "note": "sent after the PUT succeeds"
+          "note": "sent after the PUT succeeds",
+          "optional": [
+            "key",
+            "size"
+          ]
         }
       ]
     }
@@ -590,5 +676,80 @@
         "note": "the only exit: reported to the control plane, and podh-boot stops what it supervises"
       }
     ]
+  },
+  "boot": {
+    "_comment": "podh-boot: the job's boot spec as ordered, time-limited stages. APP-API §4.",
+    "stages": [
+      "gpu_check",
+      "binaries",
+      "models",
+      "addons",
+      "app",
+      "workload",
+      "ready"
+    ],
+    "after_ready": "app_serve",
+    "default_limits_s": {
+      "spec": 300,
+      "gpu_check": 300,
+      "binaries": 1200,
+      "models": 5400,
+      "addons": 2700,
+      "app": 1800,
+      "workload": "up_timeout_s + 60",
+      "ready": 60
+    },
+    "limits_from": "boot.limits.<stage>, boot.models.timeout_s, workload up_timeout_s",
+    "resume": "binaries, models, addons and app are skipped when the disk already has them (per sha / commit / definition); gpu_check always runs; --fresh ignores the disk",
+    "binary_item": [
+      "name",
+      "url",
+      "sha256",
+      "archive_path?",
+      "bin_names?",
+      "env?  ({bin} and {bindir} = the install dir)"
+    ],
+    "workload": {
+      "comfyui": [
+        "root?",
+        "python?",
+        "port",
+        "args",
+        "up_timeout_s"
+      ],
+      "or": [
+        "command",
+        "port?",
+        "up_url?",
+        "up_timeout_s?",
+        "cwd?"
+      ],
+      "both": [
+        "env",
+        "scan_log_for"
+      ]
+    },
+    "app": [
+      "fetch {url, auth_env}",
+      "run",
+      "dir?",
+      "serve",
+      "serve_env",
+      "serve_grace_s"
+    ],
+    "kits": {
+      "binary": "binary-<name>-<sha16>, key = full sha256",
+      "addons": "addons-<set slug>, key = v<version> (+ python/torch/cuda/image)"
+    },
+    "endings": {
+      "stage failure": "done(rc, reason, stage, log_tail), then idle (exit with --exit-on-fail)",
+      "workload": "fatal CUDA string → rc 7 stage gpu_check; scan_log_for hit, or a second crash → stage workload",
+      "app.serve": "exit 0 → done(0); a second crash → stage app_serve; drain/park → SIGTERM, serve_grace_s, SIGKILL, and the pod stays up",
+      "local POST /done": "done(rc, reason, stage) as given"
+    },
+    "exit_codes": {
+      "7": "GPU unusable (gpu_check, or a fatal CUDA string in the workload log)",
+      "other": "the failing step's own rc where it has one, else 1"
+    }
   }
 }

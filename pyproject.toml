@@ -41,6 +41,10 @@ podh-report = "pod_harness.report:main"
 podh-gpucheck = "pod_harness.gpucheck:main"
 # Cached tarballs (a venv, a binary, an addon set): get exits 2 when there is none yet.
 podh-kit = "pod_harness.kits:main"
+# Run the job's boot spec (gpu_check → binaries → models → addons → app → workload → ready
+# → app.serve). The entrypoint of images built for it, or a catalog image's start command
+# after `pip install`.
+podh-boot = "pod_harness.boot:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

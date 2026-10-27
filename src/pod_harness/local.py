@@ -85,7 +85,19 @@ class LocalServer:
         outer = self
         self.on_done, self.on_busy = on_done, on_busy
 
+        self.active = 0
+        self.active_lock = threading.Lock()
+
         class H(BaseHTTPRequestHandler):
+            def handle_one_request(self):
+                with outer.active_lock:
+                    outer.active += 1
+                try:
+                    super().handle_one_request()
+                finally:
+                    with outer.active_lock:
+                        outer.active -= 1
+
             def _authed(self) -> bool:
                 got = self.headers.get("X-Podh-Token") or ""
                 auth = self.headers.get("Authorization") or ""
@@ -158,6 +170,16 @@ class LocalServer:
         threading.Thread(target=self.server.serve_forever, daemon=True,
                          name="podh-local-api").start()
         return self
+
+    def drain(self, timeout: float = 3.0) -> None:
+        """Wait (briefly) for requests in flight — the /done that ended the pod must get its
+        answer before the process exits."""
+        end = time.time() + timeout
+        while time.time() < end:
+            with self.active_lock:
+                if self.active == 0:
+                    return
+            time.sleep(0.05)
 
     def env(self) -> dict:
         return {"PODH_LOCAL_URL": self.url, "PODH_LOCAL_TOKEN": self.token}
