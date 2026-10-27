@@ -45,6 +45,11 @@ podh-kit = "pod_harness.kits:main"
 # → app.serve). The entrypoint of images built for it, or a catalog image's start command
 # after `pip install`.
 podh-boot = "pod_harness.boot:main"
+# The generic task worker (TASK-API §4): claim, fetch, run via a handler, upload, done. The
+# default app.serve of a task pool.
+podh-worker = "pod_harness.worker:main"
+# Do these ComfyUI workflows' node types exist in this ComfyUI? Exit 1 if not.
+podh-catalogue = "pod_harness.comfy:catalogue_main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

@@ -13,7 +13,13 @@ For podh-boot it also plays the parts outside pod-control:
             for presigned bucket URLs. `expired` sigs answer 403; `truncate[name] = n`
             sends n bytes of the first response and then drops the connection;
             `ignore_range` answers 200 with the whole body to a ranged request.
-  PUT /put/<name> stores the body in blobs (a presigned PUT).
+  PUT /put/<name> stores the body in blobs (a presigned PUT); `put_fail[name] = n` answers
+            the first n PUTs of that name with 500, `put_refuse[name] = n` with 403.
+  prefix_routes [(METHOD, path prefix, fn(req) -> (code, obj))] — for routes with ids in
+            them (/v1/pod/tasks/{id}/beat); tried after `routes`.
+
+The task routes (/v1/pod/tasks/*) are tests/_fake_tasks.py, built on prefix_routes with
+the control plane's own reply shapes.
 
 Not a test itself (no test_ prefix), so CI's `tests/test_*.py` loop does not run it.
 """
@@ -41,6 +47,9 @@ class FakeControl:
         self.truncate: dict = {}
         self.ignore_range = False
         self.blob_gets: list = []
+        self.put_fail: dict = {}
+        self.put_refuse: dict = {}
+        self.prefix_routes: list = []
         self.lock = threading.Lock()
         outer = self
 
@@ -60,6 +69,9 @@ class FakeControl:
             def _route(self, req):
                 r = outer.routes.get((req["method"], req["path"]))
                 if r is None:
+                    for m, prefix, fn in outer.prefix_routes:
+                        if m == req["method"] and req["path"].startswith(prefix):
+                            return fn(req)
                     return None
                 return r(req) if callable(r) else r
 
@@ -80,7 +92,17 @@ class FakeControl:
                 with outer.lock:
                     outer.requests.append(req)
                 if req["path"].startswith("/put/"):
-                    outer.blobs[req["path"][len("/put/"):]] = data
+                    name = req["path"][len("/put/"):]
+                    with outer.lock:
+                        if outer.put_fail.get(name):
+                            outer.put_fail[name] -= 1
+                            return self._send(500, {"detail": "try again"})
+                        if outer.put_refuse.get(name):
+                            outer.put_refuse[name] -= 1
+                            return self._send(403, {"detail": "Request has expired"})
+                    if req["headers"].get("x-podh-token"):
+                        return self._send(400, {"detail": "a bucket must never see the pod token"})
+                    outer.blobs[name] = data
                     return self._send(200, {"ok": True})
                 self._send(404, {"detail": "not found"})
 

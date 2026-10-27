@@ -626,6 +626,161 @@
             "key",
             "size"
           ]
+        },
+        {
+          "method": "POST",
+          "path": "/v1/pod/tasks/claim",
+          "client": "worker/api.py",
+          "required": [
+            "capacity",
+            "have",
+            "nvenc"
+          ],
+          "optional": [
+            "kinds",
+            "window_s"
+          ],
+          "reply": {
+            "200": [
+              "tasks",
+              "lease_s"
+            ],
+            "200 draining": "draining: true, no tasks: no more claims; unstarted tasks are released",
+            "409": "this pod was not launched for a task pool: polled again"
+          },
+          "note": "have = {models: [paths under the models root], loaded: [the last task's needs.loads]}. kinds only with --kinds; window_s only when known (pod-control ignores both today). Each task (claim_view): task_id, kind, lane, pool, state (claimed|held), attempt, lease_s, lease_until, timeout_s (null: none), needs {models [{path, size?, sha256?}], loads, …}, workflow, payload, labels, inputs {name: {url, ref?} (presigned at claim) | {value} (a dependency's result path)}, outputs {to?, keep, put_url?, put? {name: url} (only for outputs.names), sign?}, held_reason (pod_fetch), missing_models [path]. No model links: pod-control adds a held task's models to the pod's job and podh-boot fetches them by path (GET /v1/pod/models). Source: pod-control src/pod_control/taskapi.py, tasks.py; TASK-API §3, §8, §9"
+        },
+        {
+          "method": "POST",
+          "path": "/v1/pod/tasks/{id}/beat",
+          "client": "worker/api.py",
+          "required": [
+            "progress",
+            "message"
+          ],
+          "reply": {
+            "200": [
+              "cancel",
+              "state",
+              "lease_until"
+            ],
+            "200 cancel": "state cancelled: cancel (interrupt, report cancelled); any other state: the lease is gone (requeued or another pod's) — work stops, nothing is reported",
+            "404/409/410": "not ours: work stops, nothing is reported"
+          },
+          "note": "every lease_s/3 (lease_s 15–3600) from claim to report, held and prefetched tasks too"
+        },
+        {
+          "method": "POST",
+          "path": "/v1/pod/tasks/{id}/start",
+          "client": "worker/api.py",
+          "reply": {
+            "200": [
+              "state"
+            ],
+            "404/409": "not ours any more (409 {detail: {error, cancel: true}}): dropped",
+            "other": "retried 4 times, then released"
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/v1/pod/tasks/{id}/done",
+          "client": "worker/api.py",
+          "required": [
+            "ok",
+            "artifacts"
+          ],
+          "optional": [
+            "result",
+            "error",
+            "usage",
+            "retryable"
+          ],
+          "reply": {
+            "200": [
+              "accepted",
+              "state"
+            ]
+          },
+          "note": "artifacts [{name, size?, sha256?, url?}] — pod-control makes each ref (outputs.to + name); url only when there is no store prefix (put_url). result is finish()'s JSON (≤ 256 KB); error {stage, reason, log_tail}, stage cancelled for a cancel; retryable: true for stages inputs, upload, stall (or TaskFailed(retryable=True)) → requeued attempt + 1, failed at max_attempts. usage: pod-control reads phases {fetch_s, run_s, upload_s} and vram_peak_mb and computes the rest (cost_usd, wall_s, held_s, prefetched). accepted false (cancelled or lost) is final. Retried on no answer or 5xx."
+        },
+        {
+          "method": "POST",
+          "path": "/v1/pod/tasks/{id}/release",
+          "client": "worker/api.py",
+          "required": [
+            "reason"
+          ],
+          "reply": {
+            "200": [
+              "released",
+              "state"
+            ]
+          },
+          "note": "\"no handler\" (the only reason counted toward max_releases), \"draining\", \"models: …\", \"failed on pod: …\" (fallback: app → returned). Never offered to this pod again."
+        },
+        {
+          "method": "POST",
+          "path": "/v1/pod/tasks/{id}/outputs",
+          "client": "worker/api.py",
+          "required": [
+            "names"
+          ],
+          "reply": {
+            "200": [
+              "put"
+            ],
+            "409": "not running here, or outputs are not a store prefix"
+          },
+          "note": "presigned PUTs {name: url} under outputs.to for names chosen at run time; asked again for a link refused with 401/403"
+        },
+        {
+          "method": "POST",
+          "path": "/v1/pod/tasks/{id}/sign",
+          "client": "worker/api.py",
+          "required": [
+            "refs"
+          ],
+          "reply": {
+            "200": [
+              "urls",
+              "expires_s"
+            ],
+            "403": "not an input, not under outputs.to, not in a lane-bound store"
+          },
+          "note": "ctx.fetch(store://…): presigned GETs {ref: url}"
+        },
+        {
+          "method": "POST",
+          "path": "/v1/pod/tasks/{id}/event",
+          "client": "worker/api.py",
+          "required": [
+            "data"
+          ],
+          "reply": {
+            "200": [
+              "emitted",
+              "cancel"
+            ]
+          },
+          "note": "ctx.emit → task.event; at most 1/s per task (the worker waits out the gap; pod-control drops extras with emitted: false), ≤ 16 KB"
+        },
+        {
+          "method": "POST",
+          "path": "/v1/pod/tasks/{id}/artifacts",
+          "client": "worker/api.py",
+          "optional": [
+            "name",
+            "size",
+            "sha256",
+            "url"
+          ],
+          "reply": {
+            "200": [
+              "cancel",
+              "artifacts"
+            ]
+          },
+          "note": "after each upload, mid-run included (task.artifact); best effort"
         }
       ]
     }
@@ -663,6 +818,7 @@
           "drain",
           "park",
           "extend_until",
+          "window_until",
           "models_rev",
           "models",
           "busy",
@@ -670,7 +826,7 @@
           "stage",
           "ready"
         ],
-        "note": "drain/park/extend_until/models_rev are the last /alive reply's; models is {path: present|fetching|failed}"
+        "note": "drain/park/extend_until/window_until/models_rev are the last /alive reply's (window_until: end of the paid keep-warm/idle window, when the control plane sends it); models is {path: present|fetching|failed}"
       },
       {
         "method": "POST",
@@ -699,6 +855,20 @@
           "url"
         ],
         "note": "stop and start the workload; 200 once it answers again (within up_timeout_s); 409 no workload / pod ended; 503 {error, log_tail} when it does not come back. Does not count as a crash."
+      },
+      {
+        "method": "POST",
+        "path": "/models/fetch",
+        "body": {
+          "optional": [
+            "files",
+            "paths"
+          ]
+        },
+        "reply": [
+          "fetching"
+        ],
+        "note": "fetch models now, mid-life (a held task's): files [{path, url, sha256?, size?}] carry their links, bare paths are looked up in a fresh GET /v1/pod/models. 202 at once; each path's state then shows in /state models. 422 bad path, 503 no models machinery."
       }
     ]
   },
@@ -770,13 +940,67 @@
     "endings": {
       "stage failure": "done(rc, reason, stage, log_tail), then idle (exit with --exit-on-fail)",
       "workload": "fatal CUDA string → rc 7 stage gpu_check; scan_log_for hit, or a second crash → stage workload",
-      "app.serve": "exit 0 → done(0); a second crash → stage app_serve; drain/park → SIGTERM, serve_grace_s, SIGKILL, and the pod stays up",
+      "app.serve": "exit 0 → done(0), except under drain/park (the pod idles); a second crash → stage app_serve; drain/park → SIGTERM, serve_grace_s, SIGKILL, and the pod stays up",
       "local POST /done": "done(rc, reason, stage) as given"
     },
     "exit_codes": {
       "7": "GPU unusable (gpu_check, or a fatal CUDA string in the workload log)",
       "other": "the failing step's own rc where it has one, else 1"
     },
-    "app_env": "GET /v1/pod/env, over the container env, for app.run and app.serve"
+    "app_env": "GET /v1/pod/env, over the container env, for app.run and app.serve",
+    "exports": {
+      "PODH_COMFY_URL": "the ComfyUI workload's base URL (http://127.0.0.1:<port>)",
+      "PODH_NVENC": "1|0 after the NVENC probe",
+      "PODH_FFMPEG_ENCODER": "h264_nvenc|libx264 after the NVENC probe",
+      "_also": "PODH_MODELS_ROOT, PODH_WORKLOAD_ENV, PODH_BOOT_DIR, PODH_COMFY_ROOT, PODH_COMFY_PY, PODH_APP_ROOT, PODH_LOCAL_URL, PODH_LOCAL_TOKEN"
+    }
+  },
+  "worker": {
+    "_comment": "podh-worker (pod_harness.worker): the generic task worker, a task pool's app.serve. TASK-API §4, §5, §8.",
+    "cli": [
+      "--capacity N (PODH_WORKER_CAPACITY, 1)",
+      "--prefetch N (PODH_WORKER_PREFETCH, 1)",
+      "--once",
+      "--kinds a,b (PODH_WORKER_KINDS)",
+      "--poll S (PODH_WORKER_POLL_S, 5)",
+      "--stall-s S (PODH_WORKER_STALL_S, 600)",
+      "--interrupt-grace S (20)",
+      "--app-root (PODH_APP_ROOT)",
+      "--workdir (PODH_WORKER_DIR, else $PODH_BOOT_DIR/tasks)"
+    ],
+    "env": {
+      "PODH_INPUT_CACHE_GB": "input cache budget across tasks (default 2)",
+      "PODH_COMFY_URL": "ComfyUI (podh-boot exports it)",
+      "PODH_NVENC": "claimed as nvenc"
+    },
+    "handlers_file": "$PODH_APP_ROOT/podh-handlers.json: {\"handlers\": {kind: \"module:Class\"}}; built in: comfy",
+    "handler": [
+      "prepare(task, ctx) → prepared",
+      "run(task, ctx, prepared) → out",
+      "finish(task, ctx, out) → result dict | None"
+    ],
+    "ctx": [
+      "task",
+      "task_id",
+      "payload",
+      "models_root",
+      "app_root",
+      "workdir",
+      "inputs",
+      "comfy",
+      "progress(f, msg)",
+      "log(msg)",
+      "emit(dict)",
+      "fetch(url|store://ref, dest)",
+      "upload(path, name) → {name, ref}",
+      "restart_workload()",
+      "cancelled()",
+      "check()"
+    ],
+    "exits": {
+      "0": "--once done, or drained",
+      "1": "a handler did not stop after a cancel/timeout (podh-boot restarts app.serve)",
+      "2": "no PODH_CONTROL_URL"
+    }
   }
 }

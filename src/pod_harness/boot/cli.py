@@ -157,7 +157,8 @@ def main(argv: Optional[list] = None) -> int:
             pass
 
     srv = LocalServer(state, on_done=lambda rc, reason, stage: ctx.finish(rc, reason, stage),
-                      on_restart=lambda: workload.restart_for_api(ctx))
+                      on_restart=lambda: workload.restart_for_api(ctx),
+                      on_models=lambda files, paths: models.ensure(ctx, files, paths))
     srv.start()
     ctx.exports.update(srv.env())
     os.environ.update(srv.env())                # podh-report in our own children finds it

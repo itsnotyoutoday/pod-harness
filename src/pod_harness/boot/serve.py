@@ -54,6 +54,13 @@ class Serve:
             if self.stopping or ctx.finished.is_set() or proc is not self.proc:
                 return
             if rc == 0:
+                snap = ctx.state.snapshot()
+                if snap["drain"] or snap["park"]:
+                    # A worker that saw the drain on /state and exited 0 before our own
+                    # drain() ran: the pod idles for pod-control, it is not finished.
+                    self.drained = True
+                    ctx.line("app serve exited 0 on drain; the pod idles", "app_serve")
+                    return
                 ctx.finish(0, "app serve finished")
                 return
             if self.restarts >= 1:

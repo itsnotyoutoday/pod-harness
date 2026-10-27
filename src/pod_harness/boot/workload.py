@@ -248,6 +248,7 @@ def build(ctx: Context) -> Optional[Workload]:
         if "--extra-model-paths-config" not in args:
             cmd += ["--extra-model-paths-config", str(write_extra_model_paths(ctx))]
         cmd += args
+        ctx.exports["PODH_COMFY_URL"] = f"http://127.0.0.1:{port}"   # for podh-worker
         return Workload(ctx, cmd, cwd=str(ctx.comfy_root), env=env,
                         url=f"http://127.0.0.1:{port}/",
                         up_timeout=float(cfg.get("up_timeout_s") or 300),
