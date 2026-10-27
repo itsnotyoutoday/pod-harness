@@ -20,6 +20,10 @@ import subprocess
 import sys
 import sysconfig
 
+# LD_LIBRARY_PATH as the image set it, read before anything is imported: importing cv2
+# appends its own (possibly absent) cv2/../../lib64 to os.environ for the rest of the process.
+_IMAGE_LD_LIBRARY_PATH = os.environ.get("LD_LIBRARY_PATH", "")
+
 ALWAYS_IMPORT = ["torch", "torchvision", "torchaudio", "cv2", "numpy", "pod_harness.boot"]
 ALWAYS_DIST = ["torch", "torchvision", "torchaudio", "numpy", "opencv-python",
                "opencv-python-headless", "opencv-contrib-python"]
@@ -82,7 +86,7 @@ def main() -> int:
                 bad.append(f"{dist}: {have} installed, {path} pins {want}")
 
     venv = sys.prefix
-    for d in filter(None, os.environ.get("LD_LIBRARY_PATH", "").split(":")):
+    for d in filter(None, _IMAGE_LD_LIBRARY_PATH.split(":")):
         if d.startswith(venv + "/") and not os.path.isdir(d):
             bad.append(f"LD_LIBRARY_PATH names {d}, which does not exist")
 
