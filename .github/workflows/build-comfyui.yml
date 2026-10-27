@@ -7,6 +7,9 @@ name: Build ComfyUI images
 # that rebuilds the base must rebuild the video image on top of it, and a failed base must
 # stop the video build rather than leave it on an older base.
 #
+# Layers are pushed zstd-compressed (outputs: below), which a pulling host must support:
+# Docker >= 23 or containerd >= 1.5.
+#
 # Tags: <comfyui tag>-cu128-<short sha> and latest. The ComfyUI tag is read from the
 # Dockerfile, so the tag cannot claim a release the image does not contain.
 #
@@ -77,7 +80,7 @@ jobs:
           fi
           echo "tags=$TAGS" >> $GITHUB_OUTPUT
 
-      # A CUDA image with torch is ~15 GB unpacked; the runner starts with ~20 GB free.
+      # The image is over 10 GB unpacked; the runner starts with ~20 GB free.
       - name: Free disk space
         run: |
           sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /opt/hostedtoolcache/CodeQL \
@@ -108,12 +111,17 @@ jobs:
           context: .
           file: docker/comfyui.Dockerfile
           platforms: linux/amd64        # RunPod is x86; an arm64 image fails there opaquely
-          push: true
           tags: ${{ steps.meta.outputs.tags }}
+          # Pushed to every tag above, every layer zstd: smaller than gzip and several times
+          # faster to decompress, which is most of a pod's pull. force-compression recompresses
+          # layers that arrive as gzip (Ubuntu's, a gzip cache). Pulling needs Docker >= 23 /
+          # containerd >= 1.5 — see the README.
+          outputs: type=image,push=true,compression=zstd,compression-level=3,force-compression=true,oci-mediatypes=true
           # Registry cache, as build-harness.yml explains: the Actions cache is 10 GB per
-          # repository, less than this image alone.
+          # repository, less than this image alone. Also zstd, so a cached layer is pushed
+          # as-is instead of being recompressed.
           cache-from: type=registry,ref=ghcr.io/${{ steps.meta.outputs.owner }}/podh-comfyui:buildcache,ignore-error=true
-          cache-to: type=registry,ref=ghcr.io/${{ steps.meta.outputs.owner }}/podh-comfyui:buildcache,mode=max,ignore-error=true
+          cache-to: type=registry,ref=ghcr.io/${{ steps.meta.outputs.owner }}/podh-comfyui:buildcache,mode=max,ignore-error=true,compression=zstd,compression-level=3,force-compression=true,oci-mediatypes=true
 
       - name: Digest
         run: echo "::notice::podh-comfyui ${{ steps.meta.outputs.version }} = ${{ steps.build.outputs.digest }}"
@@ -169,9 +177,10 @@ jobs:
           context: .
           file: docker/comfyui-video.Dockerfile
           platforms: linux/amd64
-          push: true
           build-args: |
             BASE_IMAGE=${{ steps.meta.outputs.base }}
           tags: ${{ steps.meta.outputs.tags }}
+          # As the base's: zstd throughout (the base's own layers already are).
+          outputs: type=image,push=true,compression=zstd,compression-level=3,force-compression=true,oci-mediatypes=true
           cache-from: type=registry,ref=ghcr.io/${{ steps.meta.outputs.owner }}/podh-comfyui-video:buildcache,ignore-error=true
-          cache-to: type=registry,ref=ghcr.io/${{ steps.meta.outputs.owner }}/podh-comfyui-video:buildcache,mode=max,ignore-error=true
+          cache-to: type=registry,ref=ghcr.io/${{ steps.meta.outputs.owner }}/podh-comfyui-video:buildcache,mode=max,ignore-error=true,compression=zstd,compression-level=3,force-compression=true,oci-mediatypes=true

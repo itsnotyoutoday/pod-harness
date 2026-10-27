@@ -1,0 +1,6 @@
+#!/bin/sh
+# The ComfyUI images' entrypoint: sshd first, when the pod asked for it, then the usual
+# `tini -- podh-boot`. exec, so tini is PID 1 from here on and reaps sshd's children too.
+# An sshd that cannot start is reported and skipped: a job never fails over a debug door.
+/opt/podh/start-sshd || echo "podh entry: sshd not started (continuing without it)" >&2
+exec /usr/bin/tini -- /opt/venv/bin/podh-boot "$@"

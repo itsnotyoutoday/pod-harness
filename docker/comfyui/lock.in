@@ -2,7 +2,8 @@
 # ONE set of versions and the video image never moves a package the base image put there.
 #
 # Regenerate (resolution only, nothing is installed; torch resolves against PyPI's metadata,
-# whose nvidia-*/cuda-*/triton lines are then dropped — the cu128 wheels bring their own):
+# whose nvidia-*/cuda-*/triton lines are then dropped — torch's CUDA wheels are pinned,
+# from the cu128 build's own metadata, in cuda.txt):
 #
 #   uv pip compile docker/comfyui/lock.in --python-version 3.12 \
 #       --python-platform x86_64-manylinux_2_28 --no-header --no-annotate \

@@ -55,8 +55,8 @@ it did not create is reported `unverified`, never `ok`.
 |---|---|---|
 | `ghcr.io/itsnotyoutoday/pod-harness` | ~240 MB | anything that is not machine learning |
 | `ghcr.io/itsnotyoutoday/lingua-pipeline` | ~6 GB | forced alignment + audio measurement |
-| `ghcr.io/itsnotyoutoday/podh-comfyui` | ~7 GB | ComfyUI on CUDA 12.8, booted by `podh-boot` ([below](#images-podh-comfyui-and-podh-comfyui-video)) |
-| `ghcr.io/itsnotyoutoday/podh-comfyui-video` | ~8 GB | the same plus lip-sync and voice node packs |
+| `ghcr.io/itsnotyoutoday/podh-comfyui` | ~6 GB (zstd) | ComfyUI on CUDA 12.8, booted by `podh-boot` ([below](#images-podh-comfyui-and-podh-comfyui-video)) |
+| `ghcr.io/itsnotyoutoday/podh-comfyui-video` | ~6.5 GB (zstd) | the same plus lip-sync and voice node packs |
 
 Both are public, so pods pull without registry auth and without hitting Docker Hub's
 anonymous rate limit.
@@ -197,21 +197,23 @@ the python, torch, CUDA and image the build is for. The exact routes and fields 
 
 ### Images: podh-comfyui and podh-comfyui-video
 
-GPU images whose entrypoint is `podh-boot` (`tini -- podh-boot`, port 8188), built by
+GPU images whose entrypoint is `podh-boot` (`/opt/podh/entry` → `tini -- podh-boot`, ports 8188 and 22), built by
 `.github/workflows/build-comfyui.yml` from `docker/comfyui.Dockerfile` and
 `docker/comfyui-video.Dockerfile`. They are the stages above with the slow parts done.
 
 | | podh-comfyui | podh-comfyui-video |
 |---|---|---|
-| base | `nvidia/cuda:12.8.1-cudnn-runtime-ubuntu24.04` | podh-comfyui, by digest |
+| base | `ubuntu:24.04` (by digest); CUDA 12.8 + cuDNN 9 are torch's own `nvidia-*-cu12` wheels | podh-comfyui, by digest |
 | python | 3.12 (Ubuntu's, one interpreter), venv `/opt/venv` | same |
 | torch | 2.11.0+cu128, torchvision 0.26.0, torchaudio 2.11.0 | same |
 | ComfyUI | v0.43.0 in `/opt/ComfyUI`, no ComfyUI-Manager | same |
 | ffmpeg | BtbN n8.1.3 static GPL (NVENC), sha256-pinned | same |
+| ssh | `sshd` on :22, key-only, only when `PUBLIC_KEY` is set | same |
 | node packs | VideoHelperSuite, Frame-Interpolation, Impact-Pack (+ sam2), Impact-Subpack, rgthree-comfy, KJNodes | + LatentSyncWrapper, Fill-ChatterBox, onnxruntime-gpu 1.24.1, insightface 0.7.3 |
 
 Exact commits are in the Dockerfiles; every python package version is in
-`docker/comfyui/lock.txt` (regenerated from `lock.in`).
+`docker/comfyui/lock.txt` (regenerated from `lock.in`), and torch's CUDA wheels in
+`docker/comfyui/cuda.txt`.
 
 **How a job uses one.** Launch the image with a boot spec, as for any `podh-boot` pod. The
 defaults already point at the image: `PODH_COMFY_ROOT=/opt/ComfyUI`,
@@ -244,6 +246,27 @@ it looks (LatentSyncWrapper's `checkpoints/`) should be given them with addon `l
 **pip is guarded.** `PIP_CONSTRAINT=/opt/podh/guard.txt` pins the torch trio and numpy for
 every pip run in the container, the addons stage's included: an addon that asks for another
 torch or `numpy<2` fails with pip's resolution error instead of replacing the CUDA build.
+
+**CUDA comes from pip, not from the base image.** There is no system CUDA: the
+`nvidia-*-cu12` wheels torch 2.11.0+cu128 requires are installed at exactly its versions,
+and `LD_LIBRARY_PATH` names their `site-packages/nvidia/*/lib` directories, so anything else
+that links CUDA or cuDNN by soname (onnxruntime-gpu in the video image, or a package an
+addon installs) finds the same libraries. The driver's libraries (libcuda, NVENC's
+libnvidia-encode) come from the host through the NVIDIA container runtime, which the image
+asks for with `NVIDIA_DRIVER_CAPABILITIES=compute,utility,video`. triton ships (torch
+requires it), but there is no C compiler in the image, which triton needs at run time to
+build its kernel launchers: expect `torch.compile` and Triton kernels to fail until one is
+added. SageAttention is not included: no prebuilt SageAttention 2 wheel exists for torch
+2.11/cu128/py3.12 (PyPI has only the Triton-only 1.x, which would need that compiler too).
+
+**Layers.** Eight, of up to ~1.2 GB each, ordered rarely-changed first (system and ffmpeg;
+the CUDA wheels in three; torch; ComfyUI; the node packs; pod-harness), so a pull downloads
+them in parallel and a harness change ships as a layer of a few hundred KB. All
+layers are **zstd**-compressed: pulling needs Docker ≥ 23 or containerd ≥ 1.5 on the host.
+
+**SSH.** Set `PUBLIC_KEY` (one or more `authorized_keys` lines) and the entrypoint starts
+`sshd` on :22 before `podh-boot`: root, key-only (no password or keyboard-interactive
+logins), host keys generated per container. Without `PUBLIC_KEY` nothing listens on 22.
 
 **Tags.** `<registry>/<owner>/podh-comfyui:<comfyui tag>-cu128-<short sha>` (e.g.
 `v0.43.0-cu128-1a2b3c4`) and `:latest`; the same for `podh-comfyui-video`. Always on GHCR;

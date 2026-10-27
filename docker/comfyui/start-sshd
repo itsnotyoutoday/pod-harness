@@ -1,0 +1,33 @@
+#!/bin/sh
+# start-sshd: run sshd on :22 when $PUBLIC_KEY is set (the convention GPU clouds use to hand
+# a container the user's key), and do nothing otherwise.
+#
+# Key-only: password and keyboard-interactive logins are off (sshd_config.d/podh.conf, written
+# at build). Host keys are generated here, per container, never baked: every container
+# started from a public image would otherwise share one host key.
+[ -n "${PUBLIC_KEY:-}" ] || exit 0
+set -eu
+[ "$(id -u)" = 0 ] || { echo "start-sshd: not root, sshd skipped" >&2; exit 1; }
+umask 077
+mkdir -p /root/.ssh
+touch /root/.ssh/authorized_keys
+printf '%s\n' "$PUBLIC_KEY" | while IFS= read -r k; do
+    [ -n "$k" ] || continue
+    grep -qxF "$k" /root/.ssh/authorized_keys || printf '%s\n' "$k" >> /root/.ssh/authorized_keys
+done
+chmod 700 /root/.ssh; chmod 600 /root/.ssh/authorized_keys
+ssh-keygen -A >/dev/null
+mkdir -p /run/sshd; chmod 0755 /run/sshd
+# An ssh login gets a fresh environment; give it the image's (PATH to the venv, the CUDA
+# library path, the pip guard, PODH_* settings) — but no secret-looking names.
+umask 022
+/opt/venv/bin/python -I - > /etc/profile.d/podh-env.sh <<'PY'
+import os, re, shlex
+keep = re.compile(r"^(PATH|VIRTUAL_ENV|LD_LIBRARY_PATH|PIP_CONSTRAINT|IMAGEIO_FFMPEG_EXE|NVIDIA_\w+|PODH_\w+)$")
+secret = re.compile(r"TOKEN|SECRET|KEY|PASSW|CREDENTIAL", re.I)
+for k, v in sorted(os.environ.items()):
+    if keep.match(k) and not secret.search(k):
+        print(f"export {k}={shlex.quote(v)}")
+PY
+/usr/sbin/sshd
+echo "start-sshd: sshd listening on :22 (key auth only)"
