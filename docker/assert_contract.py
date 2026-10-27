@@ -84,7 +84,8 @@ def _check_control_plane(c: dict) -> list[str]:
     try:
         from pod_harness import gpucheck, heartbeat
         mine = {"reason": heartbeat.MAX_REASON, "stage": heartbeat.MAX_STAGE,
-                "line": heartbeat.MAX_LINE}
+                "line": heartbeat.MAX_LINE, "detail": heartbeat.MAX_DETAIL,
+                "log_tail": heartbeat.MAX_LOG_TAIL}
         if mine != cp["limits"]:
             out.append(f"control_plane limits disagree: code {mine}, contract {cp['limits']}.\n"
                        f"    A client that sends more than the server stores loses the report.")

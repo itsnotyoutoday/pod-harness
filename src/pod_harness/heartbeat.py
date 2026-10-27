@@ -28,7 +28,9 @@ import os
 import threading
 import time
 import ssl
+import http.client
 import urllib.error
+import urllib.parse
 import urllib.request
 
 #: RunPod's proxy sits behind Cloudflare, which rejects urllib's default agent with
@@ -47,6 +49,8 @@ _MAX_REPORT_BYTES = 64 * 1024
 MAX_REASON = 500
 MAX_STAGE = 64
 MAX_LINE = 300
+#: ~1 KB of the workload's log on a failure's /done.
+MAX_LOG_TAIL = 1024
 
 #: Touched when the work is over. Every heartbeat loop — this module's and the sidecar's —
 #: checks it and goes quiet. See `start` for why a finished pod must stop reporting.
@@ -117,33 +121,98 @@ def last_error() -> str:
     return _LAST_ERROR
 
 
-def _post(path: str, body: dict, timeout: float = 10) -> dict | None:
+class _PinnedHTTPSConnection(http.client.HTTPSConnection):
+    """Checks the pin straight after the TLS handshake — BEFORE a byte of the request.
+
+    The pin used to be checked on the response, by which time the request, token in its
+    headers, had already gone to whoever answered. A pin that is checked after the secret
+    is sent protects nothing.
+    """
+    podh_expected = ""
+
+    def connect(self):
+        super().connect()
+        _verify_pin(self.sock, self.podh_expected)
+
+
+class _PinnedHTTPSHandler(urllib.request.HTTPSHandler):
+    def __init__(self, ctx, expected: str):
+        super().__init__(context=ctx)
+        self._podh_ctx, self._podh_expected = ctx, expected
+
+    def https_open(self, req):
+        expected = self._podh_expected
+
+        def conn(host, **kw):
+            c = _PinnedHTTPSConnection(host, **kw)
+            c.podh_expected = expected
+            return c
+        return self.do_open(conn, req, context=self._podh_ctx)
+
+
+def _open(req, timeout: float):
+    """urlopen, with the certificate pin enforced before the request is written."""
+    ctx = _ssl_context()
+    if ctx is None:
+        return urllib.request.urlopen(req, timeout=timeout)
+    opener = urllib.request.build_opener(_PinnedHTTPSHandler(ctx, ctx._podh_expected))
+    return opener.open(req, timeout=timeout)
+
+
+def request(method: str, path: str, body: dict | None = None, query: dict | None = None,
+            timeout: float = 10) -> tuple:
+    """One call to the control plane: (status, parsed JSON or None). Never raises.
+
+    status 0 means no answer (not configured, unreachable, refused by the pin). The routes
+    under /v1/pod/ are asked through this; a 404 from a server that predates one is an
+    answer like any other, and the caller decides what absence means.
+    """
     global _LAST_ERROR, _LAST_STATUS
     url, token, _ = _cfg()
     if not url:
-        return None
+        _LAST_ERROR, _LAST_STATUS = "no PODH_CONTROL_URL", 0
+        return 0, None
     _LAST_ERROR, _LAST_STATUS = "", 0
-    req = urllib.request.Request(
-        f"{url}{path}", data=json.dumps(body).encode(),
-        headers={"Content-Type": "application/json", "User-Agent": _UA,
-                 "X-Podh-Token": token}, method="POST")
-    ctx = _ssl_context()
+    full = f"{url}{path}"
+    if query:
+        q = urllib.parse.urlencode({k: v for k, v in query.items() if v is not None})
+        if q:
+            full += ("&" if "?" in full else "?") + q
+    headers = {"User-Agent": _UA, "X-Podh-Token": token, "Accept": "application/json"}
+    data = None
+    if body is not None:
+        data = json.dumps(body).encode()
+        headers["Content-Type"] = "application/json"
+    req = urllib.request.Request(full, data=data, headers=headers, method=method)
     try:
-        with urllib.request.urlopen(req, timeout=timeout, context=ctx) as r:
-            if ctx is not None and hasattr(r, "fp"):
-                sock = getattr(getattr(r.fp, "raw", None), "_sock", None)
-                if sock is not None:
-                    _verify_pin(sock, ctx._podh_expected)
-            return json.loads(r.read())
+        with _open(req, timeout) as r:
+            raw = r.read()
+            return r.status, (json.loads(raw) if raw.strip() else None)
+    except urllib.error.HTTPError as exc:
+        _LAST_ERROR, _LAST_STATUS = f"HTTPError: {exc}", exc.code
+        try:
+            raw = exc.read()
+            return exc.code, (json.loads(raw) if raw.strip() else None)
+        except Exception:
+            return exc.code, None
     except Exception as exc:
-        # Never fatal — the sweep still holds the deadline — but never SILENT either.
-        # This returned a bare None, so a caller could not tell "not configured" from
-        # "the request failed", and podh-init reported a termination failure as
-        # "no control url or pod id" while the url was plainly set. The one call
-        # responsible for stopping the billing was the one whose reason was discarded.
         _LAST_ERROR = f"{type(exc).__name__}: {exc}"
-        _LAST_STATUS = exc.code if isinstance(exc, urllib.error.HTTPError) else 0
+        return 0, None
+
+
+def _post(path: str, body: dict, timeout: float = 10) -> dict | None:
+    # Never fatal — the sweep still holds the deadline — but never SILENT either.
+    # This returned a bare None, so a caller could not tell "not configured" from
+    # "the request failed", and podh-init reported a termination failure as
+    # "no control url or pod id" while the url was plainly set. The one call
+    # responsible for stopping the billing was the one whose reason was discarded.
+    url, _, _ = _cfg()
+    if not url:
         return None
+    status, obj = request("POST", path, body, timeout=timeout)
+    if 200 <= status < 300:
+        return obj if obj is not None else {}
+    return None
 
 
 def _post_tolerant(path: str, body: dict, newer: tuple, timeout: float = 10) -> dict | None:
@@ -179,17 +248,59 @@ def _identity() -> dict:
                       or os.environ.get("PODH_JOB_ID", "")}
 
 
-def alive(deadline_ts: float | None = None) -> dict | None:
+#: The last /alive reply, and who wants to hear about each one. The reply is how
+#: pod-control talks back to a pod that has no inbound route: drain, park, a moved
+#: extend_until, a higher models_rev. podh-boot reads it for its local /state and to act on
+#: drain and mid-life models; anything else may subscribe with `on_reply`.
+_REPLY: dict = {}
+_REPLY_HOOKS: list = []
+MAX_DETAIL = 200
+
+
+def on_reply(fn) -> None:
+    """Call `fn(reply: dict)` after every /alive that got an answer. Exceptions are eaten."""
+    _REPLY_HOOKS.append(fn)
+
+
+def last_reply() -> dict:
+    """The fields of the most recent /alive reply ({} before the first)."""
+    return dict(_REPLY)
+
+
+def _take_reply(r) -> None:
+    if not isinstance(r, dict):
+        return
+    _REPLY.clear()
+    _REPLY.update(r)
+    for fn in list(_REPLY_HOOKS):
+        try:
+            fn(dict(r))
+        except Exception as exc:          # a subscriber never breaks the heartbeat
+            print(f"  [heartbeat] reply hook failed: {type(exc).__name__}: {exc}", flush=True)
+
+
+def alive(deadline_ts: float | None = None, busy: bool | None = None,
+          detail: str | None = None) -> dict | None:
+    """One /alive. `busy`/`detail` say whether the app's work is running right now — the
+    control plane's idle clock runs only while busy is false. Omitted, the server keeps
+    whatever it believed (older callers never sent it)."""
     url, _, pod_id = _cfg()
     if not url or not pod_id:
         return None
     body = _identity()
     if deadline_ts:
         body["deadline_ts"] = deadline_ts
-    return _post("/v1/alive", body)
+    if busy is not None:
+        body["busy"] = bool(busy)
+        if detail:
+            body["detail"] = _clip(detail, MAX_DETAIL)
+    r = _post_tolerant("/v1/alive", body, ("busy", "detail"))
+    _take_reply(r)
+    return r
 
 
-def done(rc: int = 0, reason: str | None = None, stage: str | None = None) -> dict | None:
+def done(rc: int = 0, reason: str | None = None, stage: str | None = None,
+         log_tail: str | None = None) -> dict | None:
     """Ask to be terminated now. Called when the job finishes, however it finishes.
 
     `reason` and `stage` say WHY a pod ended, in words a person can act on: "nvidia-smi
@@ -223,13 +334,18 @@ def done(rc: int = 0, reason: str | None = None, stage: str | None = None) -> di
         body["reason"] = _clip(reason, MAX_REASON)
     if stage:
         body["stage"] = _clip(stage, MAX_STAGE)
+    if log_tail:
+        # The END of the workload's log, kept multi-line: it is read by a person, and the
+        # line that names the failure is nearly always among the last.
+        t = str(log_tail)
+        body["log_tail"] = t if len(t) <= MAX_LOG_TAIL else "…" + t[-(MAX_LOG_TAIL - 1):]
     s = _status_summary()
     if s:
         body["status"] = s
     h = _handoff()
     if h:
         body["handoff"] = h
-    return _post_tolerant("/v1/done", body, ("reason", "stage"))
+    return _post_tolerant("/v1/done", body, ("reason", "stage", "log_tail"))
 
 
 def boot(line: str, stage: str | None = None) -> dict | None:

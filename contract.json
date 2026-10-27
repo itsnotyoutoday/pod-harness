@@ -378,7 +378,7 @@
       "a server that answers 400/422 to a key it does not know is sent the request again without them.",
       "Extra keys beyond these lists may be present and must be ignored, not rejected."
     ],
-    "auth": "X-Podh-Token: $PODH_CONTROL_TOKEN; TLS pinned to $PODH_CONTROL_FINGERPRINT when set",
+    "auth": "X-Podh-Token: $PODH_CONTROL_TOKEN; TLS pinned to $PODH_CONTROL_FINGERPRINT when set, checked after the handshake and before the request is written",
     "calls": [
       {
         "method": "POST",
@@ -389,9 +389,11 @@
         "optional": [
           "provider",
           "job_id",
-          "deadline_ts"
+          "deadline_ts",
+          "busy",
+          "detail"
         ],
-        "note": "sent every PODH_HEARTBEAT_SEC only while the pod produces output; quiet means stuck or finished"
+        "note": "sent every PODH_HEARTBEAT_SEC only while the pod produces output; quiet means stuck or finished. busy/detail: is the app's work running now (podh-boot sends them; the idle clock runs only while busy is false). Reply {extend_until, drain, park, models_rev}; extra reply keys are ignored."
       },
       {
         "method": "POST",
@@ -420,15 +422,18 @@
           "reason",
           "stage",
           "status",
-          "handoff"
+          "handoff",
+          "log_tail"
         ],
-        "note": "terminate me. rc is how it ended; reason/stage say why and where, for a failure."
+        "note": "terminate me. rc is how it ended; reason/stage say why and where, for a failure. log_tail: the end of the workload's log (≤1 KB, newlines kept) on a failure."
       }
     ],
     "limits": {
       "reason": 500,
       "stage": 64,
-      "line": 300
+      "line": 300,
+      "detail": 200,
+      "log_tail": 1024
     },
     "stages": {
       "_comment": "stage values podh-init sends. A sidecar workload may send its own.",
