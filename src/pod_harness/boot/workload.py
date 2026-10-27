@@ -53,6 +53,12 @@ def write_extra_model_paths(ctx: Context) -> Path:
     lines = ["# written by podh-boot: ComfyUI's model folders live under PODH_MODELS_ROOT",
              "podh:", f"  base_path: {root}", "  is_default: true"]
     lines += [f"  {n}: {n}/" for n in names]
+    # Model paths that mirror ComfyUI's own tree ("models/checkpoints/x.safetensors", the
+    # common convention for a bucket of ComfyUI models) land one level deeper, under
+    # <root>/models/. Mapped too — always, so models added after start are seen as well.
+    # (Found by a real-pod profile: an SDXL checkpoint downloaded fine and ComfyUI listed none.)
+    lines += ["podh_models:", f"  base_path: {root / 'models'}"]
+    lines += [f"  {n}: {n}/" for n in names]
     out = ctx.boot_dir / "extra_model_paths.yaml"
     out.write_text("\n".join(lines) + "\n")
     return out

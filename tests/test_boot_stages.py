@@ -140,6 +140,9 @@ check("the worker's `podh-report busy` rides on /alive", any(b.get("busy") is Tr
 check("ready is reported before app.serve starts",
       [b["stage"] for pth, b, _ in fc.calls[n0:] if pth == "/v1/boot"].index("ready")
       < [b.get("stage") for pth, b, _ in fc.calls[n0:] if pth == "/v1/boot"].index("app_serve"))
+check("extra_model_paths.yaml also maps <root>/models/ (paths like models/checkpoints/x)",
+      "podh_models:" in emp and "/models/models" not in emp.split("podh_models:")[0]
+      and "base_path:" in emp.split("podh_models:")[1] and "checkpoints: checkpoints/" in emp.split("podh_models:")[1])
 
 # == 2. resume ===================================================================================
 print("— resume on the same disk")
