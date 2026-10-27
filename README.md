@@ -444,6 +444,29 @@ base.name}` and `io.podh.manifest` (`image=…;version=…;revision=…;comfyui=
 python=3.12;manifest=/opt/podh/manifest.json;catalogue=/opt/podh/catalogue.json`), so
 `docker buildx imagetools inspect` answers without a pull.
 
+**Read it without a pod.** After each push, CI (`docker/comfyui/publish-identity`)
+fetches just the identity layer's blob from the registry, takes the two files out, adds
+`digest` and `refs` (`image`: the Docker Hub reference by digest; `mirror`: GHCR's) to the
+manifest and the digest to the catalogue, and publishes them as GitHub release assets:
+
+```
+# one release per image build, by short commit
+https://github.com/itsnotyoutoday/pod-harness/releases/download/images-<image>-<short sha>/manifest.json
+https://github.com/itsnotyoutoday/pod-harness/releases/download/images-<image>-<short sha>/catalogue.json
+
+# the newest of each image, always at the same URLs
+https://github.com/itsnotyoutoday/pod-harness/releases/download/images-latest/index.json
+https://github.com/itsnotyoutoday/pod-harness/releases/download/images-latest/<image>.manifest.json
+https://github.com/itsnotyoutoday/pod-harness/releases/download/images-latest/<image>.catalogue.json
+```
+
+`index.json` is `{format: 1, updated_at, images: {<image>: {name, image, mirror?, tag,
+digest, revision, release, manifest_url, catalogue_url, published_at, tags {image,
+mirror?}}}}` — `image` is the Docker Hub reference by digest (`docker.io/itsnotyoutoday/
+<image>@sha256:…`), `mirror` the GHCR one. An app can check a workflow against an image
+before renting anything: `podh-catalogue check wf.json --object-info <image>.catalogue.json`
+reads the published catalogue (its `nodes` keys are the class names `check` looks for).
+
 ### Submit a job
 
 ```bash

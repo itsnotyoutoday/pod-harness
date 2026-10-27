@@ -1,0 +1,150 @@
+#!/usr/bin/env bash
+# publish-identity — CI only: publish an image's /opt/podh/manifest.json and catalogue.json
+# so an app can read them WITHOUT a pod.
+#
+#   publish-identity --name podh-comfyui --version <tag> --digest sha256:… --revision <sha> \
+#       --mirror ghcr.io/<owner>/podh-comfyui [--primary docker.io/<user>/podh-comfyui] \
+#       --repo <owner>/<repo> [--work DIR]
+#
+# 1. Extract. The two files are in the image's LAST layer (the identity layer), so only that
+#    blob is fetched from the registry — kilobytes, not the 6 GB image — with `crane`
+#    (docker's login is reused). Earlier layers are tried in turn if a build ever moves them.
+# 2. Publish as GitHub release assets (`gh`, GITHUB_TOKEN with contents: write):
+#      images-<name>-<short sha>   manifest.json, catalogue.json — this build, by digest; the
+#                                  published manifest adds digest, refs and published_at
+#      images-latest               index.json {updated_at, images: {<name>: {image, mirror,
+#                                  name, tag, digest, revision, manifest_url, catalogue_url,
+#                                  release}}}, plus <name>.manifest.json and
+#                                  <name>.catalogue.json — the newest of each image
+#    `image` is the primary (Docker Hub) reference by digest, `mirror` the GHCR one.
+#
+# CRANE and GH name the tools (tests point them at fakes). Needs python3, tar, gzip, zstd.
+set -euo pipefail
+
+name=; version=; digest=; revision=; mirror=; primary=; repo=${GITHUB_REPOSITORY:-}; work=
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --name) name=$2; shift 2;;
+        --version) version=$2; shift 2;;
+        --digest) digest=$2; shift 2;;
+        --revision) revision=$2; shift 2;;
+        --mirror) mirror=$2; shift 2;;
+        --primary) primary=$2; shift 2;;
+        --repo) repo=$2; shift 2;;
+        --work) work=$2; shift 2;;
+        *) echo "publish-identity: unknown argument $1" >&2; exit 2;;
+    esac
+done
+for v in name version digest revision mirror repo; do
+    [[ -n ${!v} ]] || { echo "publish-identity: --$v is required" >&2; exit 2; }
+done
+[[ $digest =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "publish-identity: bad digest $digest" >&2; exit 2; }
+CRANE=${CRANE:-crane}
+GH=${GH:-gh}
+work=${work:-$(mktemp -d)}
+mkdir -p "$work/files" "$work/out"
+short=${revision:0:7}
+
+# -- 1. extract ---------------------------------------------------------------------------
+"$CRANE" manifest --platform linux/amd64 "$mirror@$digest" > "$work/image-manifest.json"
+layers=()
+while IFS= read -r l; do layers+=("$l"); done < <(python3 -c '
+import json, sys
+m = json.load(open(sys.argv[1]))
+for l in reversed(m.get("layers") or []):
+    print(l["digest"])' "$work/image-manifest.json")
+[[ ${#layers[@]} -gt 0 ]] || { echo "publish-identity: $mirror@$digest has no layers" >&2; exit 1; }
+found=
+for l in "${layers[@]}"; do
+    "$CRANE" blob "$mirror@$l" > "$work/layer"
+    magic=$(head -c 4 "$work/layer" | od -An -tx1 | tr -d ' \n')
+    case $magic in
+        28b52ffd) dec=(zstd -dc);;
+        1f8b*) dec=(gzip -dc);;
+        *) dec=(cat);;
+    esac
+    rm -rf "$work/files"; mkdir -p "$work/files"
+    "${dec[@]}" "$work/layer" | tar -x -C "$work/files" opt/podh/manifest.json opt/podh/catalogue.json \
+        2>/dev/null || true
+    if [[ -s $work/files/opt/podh/manifest.json && -s $work/files/opt/podh/catalogue.json ]]; then
+        found=$l; break
+    fi
+done
+rm -f "$work/layer"
+[[ -n $found ]] || { echo "publish-identity: no layer of $mirror@$digest holds both files" >&2; exit 1; }
+echo "publish-identity: manifest and catalogue found in layer ${found:7:12}"
+
+tag="images-$name-$short"
+base="https://github.com/$repo/releases/download"
+manifest_url="$base/$tag/manifest.json"
+catalogue_url="$base/$tag/catalogue.json"
+
+# -- 2. the published copies ----------------------------------------------------------------
+python3 - "$work" "$name" "$version" "$digest" "$revision" "$mirror" "$primary" "$tag" \
+    "$manifest_url" "$catalogue_url" <<'PY'
+import json, sys, time
+work, name, version, digest, revision, mirror, primary, tag, murl, curl = sys.argv[1:]
+m = json.load(open(f"{work}/files/opt/podh/manifest.json"))
+if m.get("image") != name or m.get("version") != version:
+    sys.exit(f"publish-identity: the image says {m.get('image')}:{m.get('version')}, "
+             f"CI built {name}:{version}")
+image = f"{primary or mirror}@{digest}"
+refs = {"image": image, "mirror": f"{mirror}@{digest}"}
+if not primary:
+    refs.pop("mirror")
+now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+m.update(digest=digest, refs=refs, published_at=now, catalogue_url=curl)
+json.dump(m, open(f"{work}/out/manifest.json", "w"), indent=1, sort_keys=True)
+c = json.load(open(f"{work}/files/opt/podh/catalogue.json"))
+c["digest"] = digest
+json.dump(c, open(f"{work}/out/catalogue.json", "w"), separators=(",", ":"), sort_keys=True)
+entry = {"name": name, "image": image, "tag": version, "digest": digest,
+         "revision": revision, "release": tag, "manifest_url": murl, "catalogue_url": curl,
+         "published_at": now, "tags": {"image": f"{primary or mirror}:{version}"}}
+if primary:
+    entry["mirror"] = f"{mirror}@{digest}"
+    entry["tags"]["mirror"] = f"{mirror}:{version}"
+json.dump(entry, open(f"{work}/entry.json", "w"))
+PY
+
+ensure_release() {   # TAG TITLE NOTES
+    if ! "$GH" release view "$1" --repo "$repo" >/dev/null 2>&1; then
+        "$GH" release create "$1" --repo "$repo" --title "$2" --notes "$3" \
+            --target "${GITHUB_SHA:-$revision}" --latest=false
+    fi
+}
+
+ensure_release "$tag" "$name $version" \
+    "Identity of $name $version ($digest): manifest.json (what is in the image) and catalogue.json (its ComfyUI node classes)."
+"$GH" release upload "$tag" --repo "$repo" --clobber "$work/out/manifest.json" "$work/out/catalogue.json"
+
+ensure_release images-latest "images: latest" \
+    "The newest published image of each name: index.json, <name>.manifest.json, <name>.catalogue.json. Rewritten by every image build."
+rm -rf "$work/latest"; mkdir -p "$work/latest"
+if ! "$GH" release download images-latest --repo "$repo" --pattern index.json --dir "$work/latest" \
+        >/dev/null 2>&1; then
+    echo '{"images": {}}' > "$work/latest/index.json"
+fi
+python3 - "$work" "$name" <<'PY'
+import json, sys, time
+work, name = sys.argv[1:]
+try:
+    idx = json.load(open(f"{work}/latest/index.json"))
+except ValueError:
+    idx = {}
+if not isinstance(idx.get("images"), dict):
+    idx["images"] = {}
+idx["format"] = 1
+idx["images"][name] = json.load(open(f"{work}/entry.json"))
+idx["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+json.dump(idx, open(f"{work}/latest/index.json", "w"), indent=1, sort_keys=True)
+PY
+cp "$work/out/manifest.json" "$work/latest/$name.manifest.json"
+cp "$work/out/catalogue.json" "$work/latest/$name.catalogue.json"
+"$GH" release upload images-latest --repo "$repo" --clobber "$work/latest/index.json" \
+    "$work/latest/$name.manifest.json" "$work/latest/$name.catalogue.json"
+
+echo "publish-identity: $name $version"
+echo "  manifest   $manifest_url"
+echo "  catalogue  $catalogue_url"
+echo "  index      $base/images-latest/index.json"

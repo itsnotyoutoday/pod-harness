@@ -742,7 +742,8 @@ def catalogue_main(argv: Optional[list] = None) -> int:
     c = sub.add_parser("check", help="do these workflows' node types exist in this ComfyUI?")
     c.add_argument("workflows", nargs="+")
     c.add_argument("--url", help="ComfyUI (default $PODH_COMFY_URL, else 127.0.0.1:8188)")
-    c.add_argument("--object-info", help="a saved /object_info JSON instead of asking ComfyUI")
+    c.add_argument("--object-info", help="a saved /object_info JSON, or a catalogue from "
+                                         "`dump`, instead of asking ComfyUI")
     d = sub.add_parser("dump", help="write this ComfyUI's node catalogue (compact object_info)")
     d.add_argument("--out", required=True, help="the catalogue JSON to write")
     src = d.add_mutually_exclusive_group()
@@ -764,6 +765,8 @@ def catalogue_main(argv: Optional[list] = None) -> int:
         return _dump(a)
     if a.object_info:
         info = json.loads(Path(a.object_info).read_text())
+        if isinstance(info, dict) and info.get("format") and isinstance(info.get("nodes"), dict):
+            info = info["nodes"]          # a podh-catalogue dump, not a raw /object_info
     else:
         try:
             info = ComfyClient(a.url).object_info()

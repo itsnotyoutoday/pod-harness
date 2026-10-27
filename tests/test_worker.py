@@ -526,6 +526,13 @@ check("podh-catalogue dump --object-info writes the compact catalogue",
 p = dump("--object-info", str(saved), "--require-pack", "ComfyUI-Missing")
 check("...--require-pack fails when no node comes from that pack", p.returncode == 1
       and "ComfyUI-Missing" in p.stdout)
+wf2 = T / "wf2.json"
+wf2.write_text(json.dumps({"1": {"class_type": "KSampler"}, "2": {"class_type": "Nope"}}))
+p = subprocess.run([sys.executable, "-c", "from pod_harness.comfy import catalogue_main as m; "
+                    "raise SystemExit(m())", "check", str(wf2), "--object-info", str(out)],
+                   env=env, capture_output=True, text=True)
+check("podh-catalogue check reads a published catalogue too", p.returncode == 1
+      and "Nope" in p.stdout and "KSampler" not in p.stdout)
 p = dump("--url", cf.url, "--min-nodes", "3")
 check("...from a running ComfyUI (--url)", p.returncode == 0
       and set(json.loads(out.read_text())["nodes"]) == set(cf.node_types))

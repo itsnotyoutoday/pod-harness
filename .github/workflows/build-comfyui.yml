@@ -13,9 +13,14 @@ name: Build ComfyUI images
 # Tags: <comfyui tag>-cu128-<short sha> and latest. The ComfyUI tag is read from the
 # Dockerfile, so the tag cannot claim a release the image does not contain.
 #
-# Published to GHCR always. Also to Docker Hub when DOCKERHUB_USER/DOCKERHUB_TOKEN exist:
-# RunPod's pulls from GHCR are unpredictable (see build-harness.yml), and these are the
-# largest images in the repo.
+# Published to Docker Hub (the primary pull source: measured faster from RunPod, 137 s
+# against 158 s for the same image in the same data centre) when DOCKERHUB_USER/
+# DOCKERHUB_TOKEN exist, and to GHCR always, as the mirror.
+#
+# After each push, the image's /opt/podh/manifest.json and catalogue.json are published as
+# GitHub release assets (docker/comfyui/publish-identity): release images-<image>-<short sha>
+# for this build, and the rolling images-latest with index.json — so an app can read what an
+# image holds without a pod. Only the identity layer's blob is fetched, not the image.
 
 on:
   push:
@@ -35,7 +40,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write       # release assets: the images' manifest and catalogue
   packages: write
 
 concurrency:
@@ -112,6 +117,11 @@ jobs:
           file: docker/comfyui.Dockerfile
           platforms: linux/amd64        # RunPod is x86; an arm64 image fails there opaquely
           tags: ${{ steps.meta.outputs.tags }}
+          # Only the last (identity) layer reads these: the manifest's version and revision.
+          build-args: |
+            IMAGE_VERSION=${{ steps.meta.outputs.version }}
+            GIT_SHA=${{ github.sha }}
+            SOURCE_URL=${{ github.server_url }}/${{ github.repository }}
           # Pushed to every tag above, every layer zstd: smaller than gzip and several times
           # faster to decompress, which is most of a pod's pull. force-compression recompresses
           # layers that arrive as gzip (Ubuntu's, a gzip cache). Pulling needs Docker >= 23 /
@@ -125,6 +135,20 @@ jobs:
 
       - name: Digest
         run: echo "::notice::podh-comfyui ${{ steps.meta.outputs.version }} = ${{ steps.build.outputs.digest }}"
+
+      - uses: imjasonh/setup-crane@v0.4
+
+      - name: Publish manifest and catalogue
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          OWNER=$(echo '${{ github.repository_owner }}' | tr A-Z a-z)
+          PRIMARY=""
+          if [ -n "$DOCKERHUB_USER" ]; then PRIMARY="docker.io/$DOCKERHUB_USER/podh-comfyui"; fi
+          bash docker/comfyui/publish-identity --name podh-comfyui \
+            --version '${{ steps.meta.outputs.version }}' --digest '${{ steps.build.outputs.digest }}' \
+            --revision '${{ github.sha }}' --mirror "ghcr.io/$OWNER/podh-comfyui" \
+            ${PRIMARY:+--primary "$PRIMARY"} --repo '${{ github.repository }}'
 
   video:
     needs: base
@@ -172,6 +196,7 @@ jobs:
       - uses: docker/setup-buildx-action@v3
 
       - name: Build and push podh-comfyui-video
+        id: build
         uses: docker/build-push-action@v5
         with:
           context: .
@@ -179,8 +204,28 @@ jobs:
           platforms: linux/amd64
           build-args: |
             BASE_IMAGE=${{ steps.meta.outputs.base }}
+            IMAGE_VERSION=${{ needs.base.outputs.version }}
+            GIT_SHA=${{ github.sha }}
+            SOURCE_URL=${{ github.server_url }}/${{ github.repository }}
           tags: ${{ steps.meta.outputs.tags }}
           # As the base's: zstd throughout (the base's own layers already are).
           outputs: type=image,push=true,compression=zstd,compression-level=3,force-compression=true,oci-mediatypes=true
           cache-from: type=registry,ref=ghcr.io/${{ steps.meta.outputs.owner }}/podh-comfyui-video:buildcache,ignore-error=true
           cache-to: type=registry,ref=ghcr.io/${{ steps.meta.outputs.owner }}/podh-comfyui-video:buildcache,mode=max,ignore-error=true,compression=zstd,compression-level=3,force-compression=true,oci-mediatypes=true
+
+      - name: Digest
+        run: echo "::notice::podh-comfyui-video ${{ needs.base.outputs.version }} = ${{ steps.build.outputs.digest }}"
+
+      - uses: imjasonh/setup-crane@v0.4
+
+      - name: Publish manifest and catalogue
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          OWNER=$(echo '${{ github.repository_owner }}' | tr A-Z a-z)
+          PRIMARY=""
+          if [ -n "$DOCKERHUB_USER" ]; then PRIMARY="docker.io/$DOCKERHUB_USER/podh-comfyui-video"; fi
+          bash docker/comfyui/publish-identity --name podh-comfyui-video \
+            --version '${{ needs.base.outputs.version }}' --digest '${{ steps.build.outputs.digest }}' \
+            --revision '${{ github.sha }}' --mirror "ghcr.io/$OWNER/podh-comfyui-video" \
+            ${PRIMARY:+--primary "$PRIMARY"} --repo '${{ github.repository }}'
