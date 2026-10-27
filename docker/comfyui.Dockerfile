@@ -263,6 +263,7 @@ RUN --mount=type=bind,source=pyproject.toml,target=/tmp/ph-src/pyproject.toml \
     rm -rf /tmp/ph; \
     install -m 0755 /tmp/ctx/podh-bake-node /tmp/ctx/quick-test /tmp/ctx/entry /tmp/ctx/start-sshd /opt/podh/; \
     install -m 0644 /tmp/ctx/check_image.py /tmp/ctx/standalone.json /opt/podh/; \
+    install -m 0644 /tmp/ctx/00_podh_compat.py /opt/ComfyUI/custom_nodes/00_podh_compat.py; \
     export PYTHONDONTWRITEBYTECODE=1; \
     test "$(command -v python3)" = /opt/venv/bin/python3; \
     test "$(command -v python)" = /opt/venv/bin/python; \
