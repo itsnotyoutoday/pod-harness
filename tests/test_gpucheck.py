@@ -172,7 +172,7 @@ check("podh-init runs the GPU check, without double-reporting",
 check("...before the data view is mounted",
       init.index("-m pod_harness.gpucheck") < init.index("/usr/local/bin/podh-mount; then"))
 check("...and a failure is fatal at stage gpu_check with rc 7",
-      "STEP=gpu_check" in init and "FATAL_RC=7" in init)
+      "step gpu_check" in init and "FATAL_RC=7" in init)
 
 print(f"\n  {sum(ok)}/{len(ok)} passed")
 sys.exit(0 if all(ok) else 1)

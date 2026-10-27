@@ -69,6 +69,21 @@ fatal() {
         --reason="$*" --stage="${STEP:-boot}" 2>&1 | tail -1)"
     while true; do sleep 300; done
 }
+
+# step <name> <line> — enter a boot step: fatal() will name it, and the control plane hears
+# what the pod is doing now.
+#
+# The minutes between "pod created" and "job running" were invisible from outside: no job
+# events exist yet, so a pod nine minutes into a stuck mount looked like one making
+# progress. One line per step, stage "ready" once the workload is up. Best-effort: the
+# report never fails the boot, and is skipped outright when no control plane is set. The
+# `--` keeps a line starting with a dash from being read as an option.
+step() {
+    STEP="$1"
+    if [ -n "${PODH_CONTROL_URL:-}" ]; then
+        python3 -m pod_harness.report boot --stage="$1" -- "$2" >/dev/null 2>&1 || true
+    fi
+}
 set -e
 
 : "${PODH_WORKSPACE:=/workspace}"
@@ -197,7 +212,7 @@ fi
 # failure lands in fatal(), which reports with the reason and this stage; reporting twice
 # would race two /done calls. Any exit other than 0/7 is the check itself breaking — a
 # harness fault, not a GPU verdict — so that is loud but not fatal.
-STEP=gpu_check
+step gpu_check "checking the GPU (PODH_GPU_COUNT=${PODH_GPU_COUNT:-unset})"
 set +e
 gline=$(python3 -m pod_harness.gpucheck --no-report 2>&1)
 grc=$?
@@ -222,6 +237,7 @@ esac
 # Fatal, but now VISIBLE: the log server above is already serving, so the reason is
 # readable over HTTP instead of dying with the pod.
 if [ -x /usr/local/bin/podh-mount ]; then
+    step mount "establishing the data view (${PODH_MOUNT_KIND:-volume})"
     if ! /usr/local/bin/podh-mount; then
         fatal "data view could not be established. Set PODH_MOUNT_KIND=object for the strategy that needs no host capabilities."
     fi
@@ -253,11 +269,13 @@ echo "==========================================================================
 : "${PODH_MODE:=serve}"
 
 if [ "$#" -gt 0 ]; then
+    step ready "exec: $*"
     exec "$@"
 fi
 
 case "$PODH_MODE" in
   batch)
+    step spec "reading the job spec"
     : "${PODH_JOB_SPEC:=}"
     if [ -z "$PODH_JOB_SPEC" ]; then
         fatal "PODH_MODE=batch needs PODH_JOB_SPEC=/path/to/spec.json"
@@ -300,6 +318,7 @@ print('  fetched', key)
     # parent's environment — the reason the values were previously computed, printed and
     # then thrown away.
     if [ -x /usr/local/bin/podh-roots ]; then
+        STEP=roots
         if python3 /usr/local/bin/podh-roots > /tmp/podh-roots.env 2>/tmp/podh-roots.err; then
             set -a
             . /tmp/podh-roots.env
@@ -323,6 +342,7 @@ print('  fetched', key)
     # nothing. The manifest never landed. Three runs read that as a path bug, because a
     # correct path over a missing file and a wrong path raise the identical error.
     if [ -x /usr/local/bin/podh-prepare ]; then
+        step prepare "materialising the job's working set"
         set +e
         python3 /usr/local/bin/podh-prepare
         prc=$?
@@ -349,6 +369,9 @@ print('  fetched', key)
     # — every second of it billed. podh-code reads the job pointer, pulls ONE packed
     # object, and verifies the rebuild against the tree manifest. It falls back to the old
     # per-object layout so revisions published before the pack store stay launchable.
+    if [ -n "${PODH_CODE_ROOT:-}" ]; then
+        step code "resolving workload code ($PODH_CODE_ROOT)"
+    fi
     if [ -n "${PODH_CODE_ROOT:-}" ] && [ ! -d "$PODH_CODE_ROOT" ]; then
         set +e
         python3 /usr/local/bin/podh-code
@@ -370,6 +393,7 @@ print('  fetched', key)
         fi
     fi
 
+    step preflight "preflight"
     [ -x /usr/local/bin/podh-preflight ] && /usr/local/bin/podh-preflight
     # The GENERIC engine, not a workload's module. This said runners.execute_job until a
     # pod spent 13 minutes proving the module no longer exists — the third time today a
@@ -391,6 +415,10 @@ print('  fetched', key)
     # The result was the exact loop the idle loop was written to prevent, and worse than
     # the original: 19 boots in five minutes, 58 identical acquire failures, still billing.
     # A failing job is precisely when the container must stay up to be read.
+    #
+    # "ready" for a batch pod means the harness has handed over: everything after this
+    # line is the job's own progress, reported through its events rather than boot lines.
+    step ready "job started: ${PODH_ENTRY:-pod_harness.execute_job} (${PODH_JOB_ID:-no job id})"
     set +e
     python3 -u -m "${PODH_ENTRY:-pod_harness.execute_job}" --spec "$PODH_JOB_SPEC"
     rc=$?
@@ -408,6 +436,7 @@ print('  fetched', key)
     # Before the heartbeat, deliberately: done() asks the control plane to terminate this
     # pod, and terminating before the outputs are pushed destroys them.
     if [ -x /usr/local/bin/podh-publish ]; then
+        step publish "job exited $rc — publishing outputs"
         set +e
         python3 /usr/local/bin/podh-publish
         prc=$?
@@ -490,15 +519,18 @@ print('  fetched', key)
     # command returns immediately leaves a pod that bills, reports no runtime and opens no
     # port — it looks broken in the console. See batch_pod.py on why this matters.
     echo "  mode: serve — idling. Drive this container through the /v1 API."
+    step ready "serve mode: /v1 up"
     exec tail -f /dev/null
     ;;
 
   shell)
     echo "  mode: shell"
+    step ready "shell mode"
     exec /bin/bash
     ;;
 
   *)
+    STEP=mode
     fatal "unknown PODH_MODE=$PODH_MODE (want batch|serve|shell)"
     ;;
 esac

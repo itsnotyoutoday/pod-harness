@@ -5,6 +5,7 @@ the clipping, the fallback for a control plane that predates reason/stage, the `
 CLI's exit codes, and podh-init's fatal() carrying its message and failing step.
 """
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -109,6 +110,29 @@ check("fatal() reports its message as the reason",
 check("fatal() reports the failing step as the stage, with its rc",
       b.get("stage") == "gpu_check" and b.get("rc") == 7)
 check("fatal() still prints the message to the console", "✗ GPU check failed" in p.stdout)
+
+# -- podh-init's step(): boot lines -------------------------------------------------------------
+start = src.index("step() {")
+end = src.index("\n}\n", start) + 3
+script = src[start:end] + '\nstep mount "establishing the data view (object)"\nstep code "-weird line"\necho "$STEP"\n'
+n = len(fc.bodies("/v1/boot"))
+p = subprocess.run(["bash", "-c", script], env=env, capture_output=True, text=True, timeout=60)
+got = fc.bodies("/v1/boot")[n:]
+check("step() sends a boot line with its stage",
+      got[:1] and got[0]["line"] == "establishing the data view (object)" and got[0]["stage"] == "mount")
+check("step() survives a line that starts with a dash", len(got) == 2 and got[1]["line"] == "-weird line")
+check("step() sets STEP for fatal()", p.stdout.strip() == "code")
+env_off = {k: v for k, v in env.items() if k != "PODH_CONTROL_URL"}
+n = len(fc.calls)
+subprocess.run(["bash", "-c", script], env=env_off, capture_output=True, text=True, timeout=60)
+check("step() reports nothing without a control plane", len(fc.calls) == n)
+
+# The order podh-init walks its steps in is the progress a control plane shows.
+names = re.findall(r'^\s*step (\w+) ', src, re.M)
+want = ["gpu_check", "mount", "ready", "spec", "prepare", "code", "preflight", "ready", "publish",
+        "ready", "ready"]
+check("podh-init reports gpu_check → mount → spec → prepare → code → preflight → ready → publish",
+      names == want)
 
 fc.close()
 print(f"\n  {sum(ok)}/{len(ok)} passed")
