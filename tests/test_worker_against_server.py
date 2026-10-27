@@ -5,7 +5,10 @@ fake provider (no RunPod) and a presigner that points at a local bucket stand-in
 A pool and a pod are made the way pod-control's own tests make them (pools.launch +
 dispatch, the pod's token captured from queue.pod_env, /v1/boot ready); tasks are
 submitted through /v1/tasks; then podh-worker's loop (--once) claims and runs each against
-the fake ComfyUI, with the pod's token, over HTTP. Nothing leaves the machine.
+the fake ComfyUI, with the pod's token, over HTTP. Last, pod logs (APP-API §9): an app's
+log request carried on the pod's /v1/alive reply and answered with POST /v1/pod/logs, then
+the end-of-pod upload — skipped with no LOG_STORE (404), and through presigned PUTs once
+LOG_STORE is set. Nothing leaves the machine.
 
     POD_CONTROL_SRC=/path/to/pod-control/src  (default: ../pod-control/src beside this repo)
     /path/to/pod-control/.venv/bin/python tests/test_worker_against_server.py
@@ -336,6 +339,74 @@ check("...and the pod put it back into the store through the presigned put_url",
       and ("models", "PUT", MODEL) in SIGNED)
 s3sign.head = _orig_head
 lsrv.close(); src.shutdown()
+
+# -- pod logs (APP-API §9): a request round-trip, then the end-of-pod upload ---------------------
+print("— pod logs: a request on the heartbeat reply, the full logs at the end")
+import gzip  # noqa: E402
+from pod_harness import podlogs  # noqa: E402
+from pod_harness.boot import core  # noqa: E402
+
+pctx = Context(boot_dir=T / "pod", state=local.LocalState())
+LD = pctx.logs_dir
+(LD / "workload.log").write_text("".join(f"step {i}\n" for i in range(50))
+                                 + "\x1b[31mERROR\x1b[0m out of memory\n")
+(LD / "worker.log").write_text("[podh-worker] claimed t-1\n")
+resp = podlogs.watch(LD, say=lambda s: None)
+r = app.post(f"/v1/jobs/{jid}/logs/request", json={"names": ["workload"], "lines": 3}, headers=A)
+req_id = r.json().get("req_id") if r.status_code == 202 else None
+check(f"the app asks for the pod's logs ({r.status_code})", r.status_code == 202 and req_id)
+reply = heartbeat.alive() or {}
+check("the pod's next /v1/alive reply carries the request",
+      (reply.get("logs") or {}).get("req_id") == req_id
+      and reply["logs"]["names"] == ["workload"] and reply["logs"]["lines"] == 3)
+
+
+def tails():
+    g = app.get(f"/v1/jobs/{jid}/logs", headers=A).json()
+    return g if g.get("logs") else None
+
+
+check("the pod pushed the tail; the request is answered (no longer pending)",
+      wait_for(lambda: tails() is not None and not tails()["pending"], 15))
+g = tails() or {"logs": [{}]}
+check(f"the app reads the last 3 lines, colour codes stripped ({g['logs'][0].get('lines')})",
+      g["logs"][0].get("name") == "workload"
+      and g["logs"][0].get("lines") == ["step 48", "step 49", "ERROR out of memory"]
+      and g["logs"][0].get("truncated") is False)
+heartbeat.alive()
+check("the answered request is gone from the next reply", "logs" not in heartbeat.last_reply())
+heartbeat._REPLY_HOOKS.remove(resp)
+
+res = podlogs.upload_all(LD, say=lambda s: None)
+check(f"no LOG_STORE: the server answers 404 and the upload is skipped ({res.get('skipped')})",
+      res.get("skipped") == "no log store" and not res["uploaded"])
+
+
+def gunzip(key):
+    try:
+        return gzip.decompress(fc.blobs.get(key, b""))
+    except OSError:
+        return b""
+
+
+CFG.log_store = "art"
+n_signed = len(SIGNED)
+pctx.fail(core.BootFailure("addons: a node pack would not import", stage="addons"))
+lane_key = f"logs/media/{jid}"
+check("with LOG_STORE: a failed stage uploads every log through presigned PUTs",
+      {("art", "PUT", f"{lane_key}/{n}.log.gz") for n in ("boot", "workload", "worker")}
+      <= set(SIGNED[n_signed:]))
+check("…the bytes are each whole log, gzipped",
+      gunzip(f"art/{lane_key}/workload.log.gz") == (LD / "workload.log").read_bytes()
+      and b"addons: a node pack would not import" in gunzip(f"art/{lane_key}/boot.log.gz"))
+d = app.get(f"/v1/jobs/{jid}/logs/workload/download", headers=A)
+dj = d.json() if d.status_code == 200 else {}
+check(f"the app gets the uploaded log's ref, size and a presigned GET ({d.status_code})",
+      dj.get("ref") == f"store://art/{lane_key}/workload.log.gz"
+      and dj.get("size") == len(fc.blobs.get(f"art/{lane_key}/workload.log.gz", b""))
+      and dj.get("url"))
+check(f"…and the pod reported done after the upload (job {REG.job(jid).get('state')})",
+      REG.job(jid).get("state") not in ("running", "booting"))
 
 server.should_exit = True
 cf.close(); fc.close()
