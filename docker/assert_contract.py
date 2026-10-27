@@ -66,6 +66,46 @@ def _env_read_anywhere() -> set[str]:
     return names
 
 
+def _check_control_plane(c: dict) -> list[str]:
+    """heartbeat.py sends what `control_plane` says, within its limits, and podh-init only
+    names stages the contract lists."""
+    cp = c.get("control_plane")
+    if not cp:
+        return []
+    out: list[str] = []
+    hb_src = (ROOT / "src" / "pod_harness" / "heartbeat.py").read_text()
+    for call in cp["calls"]:
+        if f'"{call["path"]}"' not in hb_src:
+            out.append(f"control_plane: heartbeat.py never posts to {call['path']}")
+        for key in call["required"] + call["optional"]:
+            if f'"{key}"' not in hb_src:
+                out.append(f"control_plane {call['path']}: field {key!r} never appears in "
+                           f"heartbeat.py")
+    try:
+        from pod_harness import gpucheck, heartbeat
+        mine = {"reason": heartbeat.MAX_REASON, "stage": heartbeat.MAX_STAGE,
+                "line": heartbeat.MAX_LINE}
+        if mine != cp["limits"]:
+            out.append(f"control_plane limits disagree: code {mine}, contract {cp['limits']}.\n"
+                       f"    A client that sends more than the server stores loses the report.")
+        if str(gpucheck.EXIT_GPU) not in cp.get("exit_codes", {}):
+            out.append(f"gpucheck exits {gpucheck.EXIT_GPU}, which control_plane.exit_codes "
+                       f"does not document")
+    except Exception as e:
+        out.append(f"could not import the control-plane client to compare limits: {e}")
+    init = ROOT / "docker" / "harness" / "podh-init"
+    if init.is_file():
+        text = init.read_text()
+        used = set(re.findall(r"^\s*step (\w+) ", text, re.M)) | \
+            set(re.findall(r"^\s*STEP=(\w+)", text, re.M)) | \
+            set(re.findall(r'FAIL_STAGE(?::-|=)(\w+)', text))
+        unknown = used - set(cp["stages"]["values"])
+        if unknown:
+            out.append(f"podh-init reports stage(s) the contract does not list: "
+                       f"{', '.join(sorted(unknown))}")
+    return out
+
+
 def main() -> int:
     if not CONTRACT.is_file():
         print(f"contract.json missing at {CONTRACT}")
@@ -129,6 +169,11 @@ def main() -> int:
                     failures.append(
                         f"{ep}: contract promises key {key!r}, which serve/api.py never "
                         f"emits")
+
+    # -- the pod's calls TO the control plane --------------------------------------------
+    # The other direction of the interface. A field renamed on one side only is the
+    # job_state/state bug again: the control plane reads None and records nothing wrong.
+    failures += _check_control_plane(c)
 
     if failures:
         print("CONTRACT CHECK FAILED\n")

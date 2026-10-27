@@ -33,7 +33,17 @@
       "PODH_API_TOKEN": "bearer token for /v1. Absent disables the API.",
       "PODH_API_PORT": "default 8000",
       "PODH_ENTRY": "override the batch entry module (default pod_harness.execute_job)",
-      "PODH_SERVE_API": "0 to skip the control surface"
+      "PODH_SERVE_API": "0 to skip the control surface",
+      "PODH_CONTROL_URL": "control plane base URL. Absent: no /alive, /boot or /done is sent, and nothing else changes.",
+      "PODH_CONTROL_TOKEN": "pod-scoped token sent as X-Podh-Token on every control call. It speaks for this pod only.",
+      "PODH_CONTROL_FINGERPRINT": "SHA-256 of the control plane's DER certificate (openssl's colon form). Pins TLS; absent leaves default verification, under which a self-signed endpoint simply fails.",
+      "PODH_CONTROL_JOB_ID": "job id the scoped token is bound to; defaults to PODH_JOB_ID",
+      "PODH_GPU_COUNT": "GPUs the job asked for. >0: the GPU check runs and expects at least this many; 0: CPU pod, check skipped; unset (older launchers): checked only if nvidia-smi exists and lists a GPU.",
+      "PODH_GPUCHECK_PYTHON": "comma-separated interpreters to run the CUDA probe with; the first that imports torch is used. Default python3.",
+      "PODH_GPUCHECK_TIMEOUT": "CUDA probe timeout in seconds, default 120",
+      "PODH_HEARTBEAT_SEC": "seconds between /alive beats, default 60",
+      "PODH_HEARTBEAT_STALE_SEC": "beats stop once console output and job events have been still this long (default 1800), so a hung workload goes quiet. 0 disables the gate.",
+      "PODH_HEARTBEAT_STOP_FILE": "the flag that silences the heartbeat at done; default /tmp/podh-stop-heartbeat. Exists for tests."
     },
     "provider_supplied": {
       "RUNPOD_POD_ID": "set by RunPod; used only for labelling, never for logic"
@@ -358,6 +368,87 @@
         ],
         "auth": false
       }
+    }
+  },
+  "control_plane": {
+    "_comment": [
+      "Calls the POD makes TO the control plane — the reverse direction of `api`.",
+      "Every one is best-effort: the control plane polls the provider and is the authority, so a lost",
+      "call costs money, never correctness. Optional fields were added after the first servers shipped;",
+      "a server that answers 400/422 to a key it does not know is sent the request again without them.",
+      "Extra keys beyond these lists may be present and must be ignored, not rejected."
+    ],
+    "auth": "X-Podh-Token: $PODH_CONTROL_TOKEN; TLS pinned to $PODH_CONTROL_FINGERPRINT when set",
+    "calls": [
+      {
+        "method": "POST",
+        "path": "/v1/alive",
+        "required": [
+          "pod_id"
+        ],
+        "optional": [
+          "provider",
+          "job_id",
+          "deadline_ts"
+        ],
+        "note": "sent every PODH_HEARTBEAT_SEC only while the pod produces output; quiet means stuck or finished"
+      },
+      {
+        "method": "POST",
+        "path": "/v1/boot",
+        "required": [
+          "pod_id",
+          "line"
+        ],
+        "optional": [
+          "provider",
+          "job_id",
+          "stage"
+        ],
+        "note": "one line per boot step. stage \"ready\" means the workload is up. A server without this route answers 404 and the pod carries on."
+      },
+      {
+        "method": "POST",
+        "path": "/v1/done",
+        "required": [
+          "pod_id",
+          "rc"
+        ],
+        "optional": [
+          "provider",
+          "job_id",
+          "reason",
+          "stage",
+          "status",
+          "handoff"
+        ],
+        "note": "terminate me. rc is how it ended; reason/stage say why and where, for a failure."
+      }
+    ],
+    "limits": {
+      "reason": 500,
+      "stage": 64,
+      "line": 300
+    },
+    "stages": {
+      "_comment": "stage values podh-init sends. A sidecar workload may send its own.",
+      "values": [
+        "boot",
+        "gpu_check",
+        "mount",
+        "spec",
+        "roots",
+        "prepare",
+        "code",
+        "preflight",
+        "ready",
+        "job",
+        "publish",
+        "mode"
+      ]
+    },
+    "exit_codes": {
+      "7": "the GPU is unusable (podh-gpucheck; podh-init reports it as done rc 7, stage gpu_check)"
     }
   }
 }

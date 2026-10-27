@@ -91,11 +91,53 @@ Routes (all but health need `X-Podh-Token`): `GET /v1/health`, `GET /v1/`, `GET 
 `GET /v1/logs/{name}?tail=&offset=&wait=` (bounded, followable), `POST /v1/progress
 {"step"}` and `GET /v1/events?since_seq=&wait=`, `GET /v1/system` (disk, GPU),
 `GET /v1/artifacts?path=` and `/v1/artifacts/file?path=` (read-only, never outside a
-root), `POST /v1/done` (ask pod-control to terminate this pod).
+root), `POST /v1/boot {"line", "stage"?}` (relay a boot line to pod-control, and keep it as
+an event), `POST /v1/done {"rc", "reason"?, "stage"?}` (ask pod-control to terminate this
+pod, saying why).
 
 It runs no stages and does not heartbeat by default: a sidecar that heartbeats on its own
 keeps a hung pod looking alive. `PODH_SIDECAR_HEARTBEAT=1` plus `PODH_SIDECAR_LIVENESS=<url
 the workload answers>` heartbeats only while the workload does. See `pod_harness/sidecar.py`.
+
+Two commands come with the install for the image's own boot script, which is the only
+thing that knows what the pod is waiting on. Neither needs the sidecar to be running — they
+talk to pod-control directly with the same `PODH_CONTROL_*` environment:
+
+- `podh-report boot "<line>" [--stage S]` — one progress line per step; `--stage ready`
+  once the workload is up. Always exits 0: a progress line never aborts a boot.
+- `podh-report done <rc> [--reason R] [--stage S]` — ask to be terminated, saying why.
+  Exits 0 sent, 1 failed, 3 not configured. Stops the heartbeat either way.
+- `podh-gpucheck` — is the GPU usable? Runs when `PODH_GPU_COUNT>0` (or, if unset, when
+  `nvidia-smi` lists a GPU); checks `nvidia-smi -L` and a `torch.cuda.init()` probe with a
+  timeout; exits 7 and reports `done(7, stage=gpu_check)` when it is not. `--json` for
+  machines, `--no-report` to report yourself.
+- `podh-gpucheck --scan-log FILE` — exit 7 if a log holds a fatal CUDA error ("CUDA unknown
+  error", "No CUDA GPUs are available", …). Reports nothing; a supervisor decides.
+
+```bash
+#!/bin/bash
+# boot script for a hot-installed image — generic shape
+podh-report boot "checking the GPU" --stage gpu_check
+podh-gpucheck || { sleep infinity; }        # already reported done(7); idle, don't restart
+
+podh-report boot "downloading models" --stage models
+if ! ./fetch-models.sh; then
+    podh-report done 1 --reason "model download failed" --stage models
+    sleep infinity
+fi
+
+./start-workload.sh > /workspace/workload.log 2>&1 &
+until curl -sf "$WORKLOAD_URL" >/dev/null; do sleep 2; done
+podh-report boot "workload listening" --stage ready
+
+# supervise: a CUDA error in the log means this machine is done
+while sleep 60; do
+    podh-gpucheck --scan-log /workspace/workload.log >/dev/null
+    [ $? -eq 7 ] || continue                 # 0 clean, 2 unreadable: not a GPU verdict
+    podh-report done 7 --reason "fatal CUDA error in workload log" --stage gpu_check
+    break
+done
+```
 
 ### Submit a job
 
@@ -140,8 +182,20 @@ remove.
 ### Reporting to a control plane
 
 If the launcher supplies `PODH_CONTROL_URL`, `PODH_CONTROL_TOKEN` and
-`PODH_CONTROL_FINGERPRINT`, the harness reports `/alive` while working and `/done` when it
-finishes — so a finished pod stops billing in a second rather than at the next poll.
+`PODH_CONTROL_FINGERPRINT`, the harness reports `/alive` while working, a `/boot` line per
+boot step (GPU check, mount, spec, code, preflight, then `ready`), and `/done` when it
+finishes — so a finished pod stops billing in a second rather than at the next poll. A
+failure's `/done` carries a short `reason` and the `stage` that failed, so "bad GPU",
+"missing spec" and "publish failed" are told apart without the console log. The exact
+calls and field limits are in `contract.json` under `control_plane`.
+
+`/alive` is sent only while the pod produces output — console lines or job events within
+`PODH_HEARTBEAT_STALE_SEC` (default 1800). A hung workload therefore goes quiet and looks
+stuck, which is the signal the control plane reaps on. A long stage that prints nothing
+should call `ctx.progress()`.
+
+On a GPU job (`PODH_GPU_COUNT>0`) the harness checks the GPU before mounting or downloading
+anything, and a broken one ends the pod with `rc` 7 at stage `gpu_check`.
 
 Three properties worth knowing:
 
