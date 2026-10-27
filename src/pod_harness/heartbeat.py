@@ -316,8 +316,54 @@ def _status_summary() -> dict | None:
         return None
 
 
-def start(interval_sec: float = 60.0) -> threading.Thread | None:
-    """Begin heartbeating in the background. Returns None when not configured."""
+def newest_activity(paths) -> float:
+    """The latest mtime among `paths` that exist, or 0.0 when none do."""
+    newest = 0.0
+    for p in paths:
+        try:
+            newest = max(newest, os.stat(p).st_mtime)
+        except OSError:
+            continue
+    return newest
+
+
+def activity_live(paths, stale_after_sec: float):
+    """A liveness predicate: True while any of `paths` changed within `stale_after_sec`.
+
+    ## Why liveness is judged by output and not by the process
+
+    "The process exists" is true of a hung job. A daemon thread inside the job is worse:
+    it keeps beating while the main thread is wedged in a CUDA call or a dead socket, so
+    the pod reports healthy for exactly as long as it is useless. The control plane's
+    primary reaper is "was heartbeating, went quiet", and anything that beats regardless
+    of progress switches that reaper off.
+
+    A working job writes: console output, events, status. A hung one stops. So the beat is
+    gated on the newest mtime of those files, and a job silent for longer than the window
+    is reported the only way a heartbeat can report it — by going quiet. A stage that is
+    legitimately silent for longer should call ctx.progress(), which writes events; the
+    window is configurable for the job that cannot.
+
+    `stale_after_sec <= 0` disables the gate (always live). With no file present at all
+    the answer is False: no evidence of work is not evidence of work.
+    """
+    paths = [str(p) for p in paths]
+
+    def live() -> bool:
+        if stale_after_sec <= 0:
+            return True
+        newest = newest_activity(paths)
+        return newest > 0 and (time.time() - newest) <= stale_after_sec
+    return live
+
+
+def start(interval_sec: float = 60.0, live=None) -> threading.Thread | None:
+    """Begin heartbeating in the background. Returns None when not configured.
+
+    `live`, when given, is asked before every beat; a beat is sent only when it returns
+    True. Skipped beats print nothing — the console is itself an activity file, and a
+    heartbeat that logged "skipping" would refresh the very signal it is judging.
+    """
     url, token, pod_id = _cfg()
     if not url:
         return None
@@ -330,7 +376,6 @@ def start(interval_sec: float = 60.0) -> threading.Thread | None:
               "every heartbeat will be rejected", flush=True)
 
     def loop():
-        import os as _os
         while True:
             # A finished pod must go QUIET, not keep insisting it is healthy.
             #
@@ -338,14 +383,51 @@ def start(interval_sec: float = 60.0) -> threading.Thread | None:
             # that heartbeats forever is by definition never stuck, so a finished-but-alive
             # pod was invisible to the one mechanism meant to bound it — leaving only the
             # 8-hour budget, which is a ceiling and not a reaper.
-            if _os.path.exists("/tmp/podh-stop-heartbeat"):
+            if os.path.exists(STOP_FILE):
                 print("  [heartbeat] job finished — going quiet so the watchdog can "
                       "reap this pod if termination did not take", flush=True)
                 return
-            alive()
+            try:
+                if live is None or live():
+                    alive()
+            except Exception:
+                pass                    # a broken predicate must not kill the loop
             time.sleep(interval_sec)
 
     t = threading.Thread(target=loop, daemon=True, name="podh-heartbeat")
     t.start()
     print(f"  [heartbeat] reporting to {url} every {interval_sec:.0f}s", flush=True)
     return t
+
+
+def main(argv: list | None = None) -> int:
+    """`python3 -m pod_harness.heartbeat --activity FILE ...` — beat until the work is done.
+
+    Run by podh-init as its own background process for the container's working life, and
+    ended by STOP_FILE when the job finishes or fails. A separate process rather than a
+    thread in the job, so it covers the boot steps before the job exists and the publish
+    after it, and so a job that wedges the interpreter cannot take the evidence with it.
+    """
+    import argparse
+    ap = argparse.ArgumentParser(prog="python3 -m pod_harness.heartbeat")
+    ap.add_argument("--activity", action="append", default=[],
+                    help="file whose changes count as work (repeatable)")
+    ap.add_argument("--stale-after", type=float,
+                    default=float(os.environ.get("PODH_HEARTBEAT_STALE_SEC") or 1800),
+                    help="seconds without activity before beats stop (0 = never gate)")
+    ap.add_argument("--interval", type=float,
+                    default=float(os.environ.get("PODH_HEARTBEAT_SEC") or 60))
+    a = ap.parse_args(argv)
+    live = activity_live(a.activity, a.stale_after) if a.activity else None
+    if live is None:
+        print("  [heartbeat] no --activity files: beating unconditionally until stopped",
+              flush=True)
+    t = start(a.interval, live)
+    if t is None:
+        return 0
+    t.join()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

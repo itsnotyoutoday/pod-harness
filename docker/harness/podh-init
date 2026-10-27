@@ -144,6 +144,45 @@ else
     echo "  api      disabled (PODH_SERVE_API=$PODH_SERVE_API)"
 fi
 
+# -- heartbeat ------------------------------------------------------------------------
+# Report /alive to the control plane for the container's working life; stop at done.
+#
+# heartbeat.start() existed and was called by nothing, so a harness-image pod never sent a
+# single /alive while the comments here described one being stopped. The control plane saw
+# every such pod as "never reported", which disables the reaper that matters most: "was
+# reporting, went quiet".
+#
+# Started HERE — after the log endpoints, before the mount — so the slow boot steps are
+# covered too: a pod wedged in a FUSE mount is as stuck as one wedged in a stage. Its own
+# process, so it outlives the job and covers publish; output to heartbeat.log, NOT the
+# console, because console.log is one of the files it judges liveness by.
+#
+# Liveness is OUTPUT, not existence (see heartbeat.activity_live): beats stop once nothing
+# has written to the console or the job's events for PODH_HEARTBEAT_STALE_SEC (default
+# 1800). A hung workload therefore goes quiet and looks stuck, which is what gets it reaped.
+# A serve/shell pod also counts API traffic, because there a person using the API IS the
+# work; a batch pod does not, or a dashboard polling a hung job would keep it alive.
+#
+# The stop flag is cleared first: it lives in /tmp, which can survive a container restart,
+# and a stale flag would make a fresh boot silently never report.
+HB_STOP="${PODH_HEARTBEAT_STOP_FILE:-/tmp/podh-stop-heartbeat}"
+if [ -n "${PODH_CONTROL_URL:-}" ]; then
+    rm -f "$HB_STOP"
+    hb_args=(--activity "$CONSOLE")
+    if [ -n "${PODH_JOB_ID:-}" ]; then
+        hb_args+=(--activity "$LOG_DIR/$PODH_JOB_ID/events.jsonl"
+                  --activity "$LOG_DIR/$PODH_JOB_ID/status.json")
+    fi
+    if [ "$#" -gt 0 ] || [ "${PODH_MODE:-serve}" != "batch" ]; then
+        hb_args+=(--activity "$LOG_DIR/api.log")
+    fi
+    python3 -u -m pod_harness.heartbeat "${hb_args[@]}" > "$LOG_DIR/heartbeat.log" 2>&1 &
+    disown $! 2>/dev/null || true
+    echo "  heartbeat every ${PODH_HEARTBEAT_SEC:-60}s while there is output (quiet after ${PODH_HEARTBEAT_STALE_SEC:-1800}s without) → heartbeat.log"
+else
+    echo "  heartbeat off (no PODH_CONTROL_URL)"
+fi
+
 # -- 4. data view ----------------------------------------------------------------------
 # The container is TOLD how its data arrives (PODH_MOUNT_KIND) and arranges it: a bind
 # mount or network volume needs only verifying, FUSE needs mounting before anything can
@@ -396,17 +435,18 @@ print('  fetched', key)
         echo "    heartbeat below is what lets that happen."
     fi
 
-    # Stop heartbeating now that the work is done.
+    # Stop heartbeating now that the work is done. (`report done` above has already done
+    # it; this stays so the guarantee does not depend on that call having run.)
     #
-    # The heartbeat thread ran for the container's whole life, so an idling FINISHED pod
-    # kept reporting itself healthy — and the watchdog's primary signal is "was reporting,
+    # A heartbeat that runs for the container's whole life makes an idling FINISHED pod
+    # keep reporting itself healthy — and the watchdog's primary signal is "was reporting,
     # went quiet". A pod that never goes quiet is never stuck, so the safety net could not
     # fire and the only remaining backstop was the 8-hour budget.
     #
     # Going quiet deliberately is what turns the watchdog from a formality into a bound:
     # if the terminate request above failed, the pod now looks stuck within
     # stale_after_sec and gets reaped for it.
-    touch /tmp/podh-stop-heartbeat
+    touch "$HB_STOP"
 
     # Then hold the container open. Idling costs pennies a minute and is bounded by the
     # reaper; restarting costs a whole job every time and is bounded by nothing.
