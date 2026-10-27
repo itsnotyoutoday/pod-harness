@@ -51,15 +51,16 @@ it did not create is reported `unverified`, never `ok`.
 
 ### The images
 
-| image | size | for |
-|---|---|---|
-| `ghcr.io/itsnotyoutoday/pod-harness` | ~240 MB | anything that is not machine learning |
-| `ghcr.io/itsnotyoutoday/lingua-pipeline` | ~6 GB | forced alignment + audio measurement |
-| `ghcr.io/itsnotyoutoday/podh-comfyui` | ~6 GB (zstd) | ComfyUI on CUDA 12.8, booted by `podh-boot` ([below](#images-podh-comfyui-and-podh-comfyui-video)) |
-| `ghcr.io/itsnotyoutoday/podh-comfyui-video` | ~6.5 GB (zstd) | the same plus lip-sync and voice node packs |
+| image (Docker Hub, the primary) | mirror | size | for |
+|---|---|---|---|
+| `docker.io/itsnotyoutoday/pod-harness` | `ghcr.io/itsnotyoutoday/pod-harness` | ~240 MB | anything that is not machine learning |
+| `docker.io/itsnotyoutoday/lingua-pipeline` | `ghcr.io/itsnotyoutoday/lingua-pipeline` | ~6 GB | forced alignment + audio measurement |
+| `docker.io/itsnotyoutoday/podh-comfyui` | `ghcr.io/itsnotyoutoday/podh-comfyui` | ~6 GB (zstd) | ComfyUI on CUDA 12.8, booted by `podh-boot` ([below](#images-podh-comfyui-and-podh-comfyui-video)) |
+| `docker.io/itsnotyoutoday/podh-comfyui-video` | `ghcr.io/itsnotyoutoday/podh-comfyui-video` | ~6.5 GB (zstd) | the same plus lip-sync and voice node packs |
 
-Both are public, so pods pull without registry auth and without hitting Docker Hub's
-anonymous rate limit.
+Pull from Docker Hub: measured from RunPod, it is the faster of the two (137 s against
+158 s for the same image in the same data centre). GHCR carries the same tags and digests
+as the mirror and the fallback. All are public, so pods pull without registry auth.
 
 Most jobs want the small one. It carries the harness, the API and boto3 — nothing else.
 
@@ -71,7 +72,7 @@ docker run -d -p 8000:8000 \
   -e PODH_WORKSPACE=/workspace \
   -e PODH_LOG_ROOT=/workspace/runs \
   -v "$PWD/work:/workspace" \
-  ghcr.io/itsnotyoutoday/pod-harness:latest
+  docker.io/itsnotyoutoday/pod-harness:latest     # or ghcr.io/itsnotyoutoday/pod-harness:latest
 
 curl -s localhost:8000/v1/health
 ```
@@ -402,9 +403,10 @@ build its kernel launchers: expect `torch.compile` and Triton kernels to fail un
 added. SageAttention is not included: no prebuilt SageAttention 2 wheel exists for torch
 2.11/cu128/py3.12 (PyPI has only the Triton-only 1.x, which would need that compiler too).
 
-**Layers.** Eight, of up to ~1.2 GB each, ordered rarely-changed first (system and ffmpeg;
-the CUDA wheels in three; torch; ComfyUI; the node packs; pod-harness), so a pull downloads
-them in parallel and a harness change ships as a layer of a few hundred KB. All
+**Layers.** Nine, of up to ~1.2 GB each, ordered rarely-changed first (system and ffmpeg;
+the CUDA wheels in three; torch; ComfyUI; the node packs; pod-harness; the identity files),
+so a pull downloads them in parallel and a harness change ships as a layer of a few hundred
+KB. All
 layers are **zstd**-compressed: pulling needs Docker ≥ 23 or containerd ≥ 1.5 on the host.
 
 **SSH.** Set `PUBLIC_KEY` (one or more `authorized_keys` lines) and the entrypoint starts
@@ -412,10 +414,35 @@ layers are **zstd**-compressed: pulling needs Docker ≥ 23 or containerd ≥ 1.
 logins), host keys generated per container. Without `PUBLIC_KEY` nothing listens on 22.
 
 **Tags.** `<registry>/<owner>/podh-comfyui:<comfyui tag>-cu128-<short sha>` (e.g.
-`v0.43.0-cu128-1a2b3c4`) and `:latest`; the same for `podh-comfyui-video`. Always on GHCR;
-also on Docker Hub as `docker.io/$DOCKERHUB_USER/…` when the repository has the
-`DOCKERHUB_USER`/`DOCKERHUB_TOKEN` secrets. Pin the versioned tag, or better the digest,
-in a job; `latest` moves.
+`v0.43.0-cu128-1a2b3c4`) and `:latest`; the same for `podh-comfyui-video`. Docker Hub
+(`docker.io/itsnotyoutoday/…`, pushed when the repository has the
+`DOCKERHUB_USER`/`DOCKERHUB_TOKEN` secrets) is the one to pull; GHCR always gets the same
+push and is the mirror. Pin the versioned tag, or better the digest, in a job; `latest`
+moves.
+
+**What is in it, without running it.** Each image carries `/opt/podh/manifest.json`
+(written at build by `docker/comfyui/write_manifest.py`) and `/opt/podh/catalogue.json`
+(`podh-catalogue dump --start`, after the image's checks):
+
+```
+manifest.json   {format: 1, image, version, revision (git sha), source, built_at,
+                 base (ubuntu ref by digest), python, torch {torch, torchvision, torchaudio},
+                 cuda {cuda, cudnn, wheels {cuda_runtime, cudnn, cublas}},
+                 comfyui {tag, commit}, node_packs [{name, repo, commit}],
+                 binaries [{name, sha256, bins, version}],
+                 features {nvenc_capable_ffmpeg, insightface, onnxruntime_gpu,
+                           latentsync_fixes, compat_shim, sshd, triton_cc},
+                 pod_harness, catalogue, parent? {image, version, revision} (the video image)}
+catalogue.json  {format: 1, image, version, count, packs {module: n},
+                 nodes {class: {in, opt?, out, out_names?, cat?, pack?, output_node?}}}
+```
+
+The digest cannot be inside the image it hashes: the published copies carry it (below),
+and a pod reports it when its launcher sets `PODH_IMAGE_DIGEST`. The OCI labels say the
+same in brief: `org.opencontainers.image.{title,description,version,revision,source,
+base.name}` and `io.podh.manifest` (`image=…;version=…;revision=…;comfyui=…;cuda=12.8;
+python=3.12;manifest=/opt/podh/manifest.json;catalogue=/opt/podh/catalogue.json`), so
+`docker buildx imagetools inspect` answers without a pull.
 
 ### Submit a job
 

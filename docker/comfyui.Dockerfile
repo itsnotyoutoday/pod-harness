@@ -54,8 +54,9 @@
 #
 # ## Layers
 #
-# Eight, of a few hundred MB to ~1.2 GB each (compressed), so a pull downloads them
-# side by side instead of waiting on one giant, ordered by how rarely they change:
+# Nine, of a few hundred MB to ~1.2 GB each (compressed) and one tiny last one, so a pull
+# downloads them side by side instead of waiting on one giant, ordered by how rarely they
+# change:
 #
 #   1  apt (python, git, aria2, sshd, …), the venv, ffmpeg          ~0.3 GB
 #   2  cuDNN + NCCL                                                 ~1.0 GB
@@ -65,13 +66,15 @@
 #   6  ComfyUI, its requirements, pod-harness's dependencies        ~0.5–1 GB
 #   7  the node packs (+ sam2)                                      ~0.5–1 GB
 #   8  pod-harness, the small files, and the build's own checks     < 1 MB
+#   9  identity: /opt/podh/manifest.json and catalogue.json         < 1 MB
 #
 # Everything else is metadata (ENV, EXPOSE, ENTRYPOINT: no filesystem layer). Build-only
 # inputs come in through `RUN --mount=type=bind`, never COPY, so they are not layers; each
 # RUN mounts only the files it reads, so editing one does not invalidate the layers below
 # it. The checks run inside layer 8 (a RUN of its own, changing nothing, would still make
 # an empty layer) with PYTHONDONTWRITEBYTECODE, so they add nothing to it.
-FROM --platform=linux/amd64 ubuntu:24.04@sha256:24737cef17f4e22b1977df7d9a05e77c4e28b7da5b8911f8d8ccda136bf3573c
+ARG BASE_IMAGE_REF=ubuntu:24.04@sha256:24737cef17f4e22b1977df7d9a05e77c4e28b7da5b8911f8d8ccda136bf3573c
+FROM --platform=linux/amd64 ${BASE_IMAGE_REF}
 
 ARG COMFYUI_TAG=v0.43.0
 ARG COMFYUI_COMMIT=426f5eea52a7ece1dd599fff4cb6cd1f352ddd24
@@ -275,10 +278,45 @@ RUN --mount=type=bind,source=pyproject.toml,target=/tmp/ph-src/pyproject.toml \
     podh-boot --help >/dev/null; \
     sh /opt/podh/quick-test "$QUICK_TEST_STRICT"
 
+# --- 9. identity: what this image is, readable without running it ------------------------
+# /opt/podh/manifest.json (write_manifest.py: name, version, revision, base, python, torch,
+# CUDA/cuDNN, ComfyUI tag+commit, baked node packs and binaries, feature flags) and
+# /opt/podh/catalogue.json (podh-catalogue dump --start: every node class ComfyUI loads, with
+# its input/output types — ComfyUI started --cpu just long enough to answer /object_info).
+# Podh-boot reports the manifest's image:version as a pod fact; CI publishes both files per
+# digest (build-comfyui.yml) so an app can read them without a pod.
+#
+# Its own layer, last, and the only one that sees the per-build ARGs (version, revision):
+# declaring them earlier would rebuild every layer after the declaration on every commit.
+# What the catalogue run writes into the ComfyUI tree is cleaned, as after the quick test.
+ARG BASE_IMAGE_REF
+ARG IMAGE_VERSION=dev
+ARG GIT_SHA=unknown
+ARG SOURCE_URL=
+RUN --mount=type=bind,source=docker/comfyui/write_manifest.py,target=/tmp/write_manifest.py \
+    set -eux; \
+    export PYTHONDONTWRITEBYTECODE=1; \
+    podh-catalogue dump --start --out /opt/podh/catalogue.json --timeout 900 \
+        --image podh-comfyui --version "$IMAGE_VERSION" --min-nodes 300 \
+        --require-pack ComfyUI-VideoHelperSuite --require-pack ComfyUI-KJNodes \
+        --require-pack ComfyUI-Impact-Pack; \
+    git -C /opt/ComfyUI clean -fdxq -e custom_nodes; \
+    rm -rf /root/.cache; \
+    python /tmp/write_manifest.py --image podh-comfyui --version "$IMAGE_VERSION" \
+        --revision "$GIT_SHA" --source "$SOURCE_URL" --base "$BASE_IMAGE_REF" \
+        --comfyui-tag "$COMFYUI_TAG" --catalogue /opt/podh/catalogue.json \
+        --out /opt/podh/manifest.json; \
+    chmod 0644 /opt/podh/catalogue.json
+
 ENV PODH_STANDALONE_SPEC=/opt/podh/standalone.json
 WORKDIR /workspace
 EXPOSE 8188 22
 LABEL org.opencontainers.image.title="podh-comfyui" \
-      org.opencontainers.image.description="ComfyUI on CUDA 12.8 (torch's CUDA wheels on Ubuntu 24.04), booted by podh-boot"
+      org.opencontainers.image.description="ComfyUI on CUDA 12.8 (torch's CUDA wheels on Ubuntu 24.04), booted by podh-boot" \
+      org.opencontainers.image.version="${IMAGE_VERSION}" \
+      org.opencontainers.image.revision="${GIT_SHA}" \
+      org.opencontainers.image.source="${SOURCE_URL}" \
+      org.opencontainers.image.base.name="${BASE_IMAGE_REF}" \
+      io.podh.manifest="image=podh-comfyui;version=${IMAGE_VERSION};revision=${GIT_SHA};comfyui=${COMFYUI_TAG};cuda=12.8;python=3.12;manifest=/opt/podh/manifest.json;catalogue=/opt/podh/catalogue.json"
 ENTRYPOINT ["/opt/podh/entry"]
 CMD []

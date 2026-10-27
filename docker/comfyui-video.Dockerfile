@@ -12,8 +12,9 @@
 # the guard as PIP_CONSTRAINT, packs baked the addons stage's way and recorded in
 # $PODH_BAKED_ROOT/addons.json, models never baked, CUDA from torch's pip wheels.
 #
-# Two layers on top of the base's, ordered as there: the face stack (changes rarely), then
-# the packs and the checks, which leave nothing behind.
+# Three layers on top of the base's, ordered as there: the face stack (changes rarely), then
+# the packs and the checks, which leave nothing behind, then the image's identity (manifest
+# and node catalogue, < 1 MB).
 ARG BASE_IMAGE=podh-comfyui:latest
 
 # --- insightface: the one package with no wheel ----------------------------------------------
@@ -78,5 +79,31 @@ RUN --mount=type=bind,source=docker/comfyui,target=/tmp/ctx \
     python /opt/ComfyUI/custom_nodes/00_podh_latentsync.py probe /opt/ComfyUI/custom_nodes/ComfyUI-LatentSyncWrapper; \
     sh /opt/podh/quick-test "$QUICK_TEST_STRICT"
 
+# --- 3. identity: the manifest and the node catalogue, this image's own ---------------------
+# As the base's layer 9: the catalogue re-dumped with this image's packs loaded, and the
+# manifest re-written from what is installed, extending the base's (kept as `parent`).
+ARG IMAGE_VERSION=dev
+ARG GIT_SHA=unknown
+ARG SOURCE_URL=
+RUN --mount=type=bind,source=docker/comfyui/write_manifest.py,target=/tmp/write_manifest.py \
+    set -eux; \
+    export PYTHONDONTWRITEBYTECODE=1; \
+    podh-catalogue dump --start --out /opt/podh/catalogue.json --timeout 900 \
+        --image podh-comfyui-video --version "$IMAGE_VERSION" --min-nodes 300 \
+        --require-pack ComfyUI-VideoHelperSuite --require-pack ComfyUI-LatentSyncWrapper \
+        --require-pack ComfyUI_Fill-ChatterBox; \
+    git -C /opt/ComfyUI clean -fdxq -e custom_nodes; \
+    rm -rf /root/.cache; \
+    python /tmp/write_manifest.py --image podh-comfyui-video --version "$IMAGE_VERSION" \
+        --revision "$GIT_SHA" --source "$SOURCE_URL" --extends /opt/podh/manifest.json \
+        --catalogue /opt/podh/catalogue.json --out /opt/podh/manifest.json; \
+    chmod 0644 /opt/podh/catalogue.json
+
+ARG BASE_IMAGE
 LABEL org.opencontainers.image.title="podh-comfyui-video" \
-      org.opencontainers.image.description="podh-comfyui plus lip-sync and voice node packs"
+      org.opencontainers.image.description="podh-comfyui plus lip-sync and voice node packs" \
+      org.opencontainers.image.version="${IMAGE_VERSION}" \
+      org.opencontainers.image.revision="${GIT_SHA}" \
+      org.opencontainers.image.source="${SOURCE_URL}" \
+      org.opencontainers.image.base.name="${BASE_IMAGE}" \
+      io.podh.manifest="image=podh-comfyui-video;version=${IMAGE_VERSION};revision=${GIT_SHA};parent=podh-comfyui;cuda=12.8;python=3.12;manifest=/opt/podh/manifest.json;catalogue=/opt/podh/catalogue.json"
