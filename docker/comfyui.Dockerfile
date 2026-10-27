@@ -184,7 +184,9 @@ RUN --mount=type=bind,source=docker/comfyui/guard.txt,target=/tmp/guard.txt \
 # builds on the pod (an app's own worker venv with its own numpy pin failed to resolve,
 # 2026-10-27), and a guard for one venv has no business there.
 
-# --- 6. ComfyUI at its release tag, and pod-harness's dependencies ------------------------
+# --- 6. ComfyUI at its release tag, pod-harness's dependencies, and a worker's common needs
+# (ImageHash, cryptography, PyWavelets): an app's pod worker runs in THIS venv, with these
+# versions, instead of building a second environment at boot. ------------------------
 # Cloned by tag and then held to the commit the tag named when this was written: a moved
 # tag fails the build rather than shipping something else under the same name.
 # ComfyUI-Manager is deliberately absent: what a pod runs is decided by its boot spec.
@@ -205,7 +207,8 @@ RUN --mount=type=bind,source=docker/comfyui/lock.txt,target=/tmp/lock.txt \
     pip install --no-input -c /opt/podh/lock.txt -c /opt/podh/cuda.txt \
         $(grep -E '^(torch|torchvision|torchaudio)==' /opt/podh/guard.txt) \
         -r /opt/ComfyUI/requirements.txt \
-        "boto3>=1.34" "fastapi>=0.110" "uvicorn[standard]>=0.29"; \
+        "boto3>=1.34" "fastapi>=0.110" "uvicorn[standard]>=0.29" \
+        ImageHash cryptography PyWavelets; \
     rm -rf /root/.cache; \
     python -B -c "import torch, torchvision, torchaudio; print('torch', torch.__version__, 'cuda', torch.version.cuda, 'cudnn', torch.backends.cudnn.version())"
 
@@ -278,7 +281,8 @@ RUN --mount=type=bind,source=pyproject.toml,target=/tmp/ph-src/pyproject.toml \
     test "$(command -v podh-boot)" = /opt/venv/bin/podh-boot; \
     if ls /etc/ssh/ssh_host_* 2>/dev/null; then echo "FAIL: an ssh host key is baked"; exit 1; fi; \
     python /opt/podh/check_image.py --pins /opt/podh/cuda.txt \
-        --dist transformers comfy-kitchen comfyui-frontend-package; \
+        --dist transformers comfy-kitchen comfyui-frontend-package \
+        --import imagehash cryptography pywt httpx boto3 pydantic; \
     ffmpeg -hide_banner -version | head -1; ffprobe -hide_banner -version | head -1; \
     podh-boot --help >/dev/null; \
     python -m pip config list | grep -q "install.constraint='/opt/podh/guard.txt'" \

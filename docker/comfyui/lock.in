@@ -118,3 +118,8 @@ scikit-learn
 easydict
 albumentations
 prettytable
+
+# What an app's pod worker commonly needs beyond ComfyUI (it runs in this venv)
+ImageHash==4.3.2
+cryptography==50.0.2
+PyWavelets==1.10.0
