@@ -14,6 +14,11 @@ Only the boot set can fail the boot: a file marked `"boot": false` (added mid-li
 listed when a parked pod resumes) is fetched without holding up ready. After ready, a watcher follows `models_rev` on the
 heartbeat reply; a higher one fetches the manifest again and downloads what is new, while
 the workload keeps running. A failed addition is reported and never ends the pod.
+
+The worker can also ask for models directly, through the local POST /models/fetch
+(`ensure`): a task held until its models are on the pod names them, with links when the
+claim carried them, else by path (the manifest is asked again for those). The same
+download, verify and report path runs; the worker watches GET /state for the outcome.
 """
 from __future__ import annotations
 
@@ -268,3 +273,64 @@ class Watcher:
             line(f"{p}: FAILED (pod keeps working): {e}")
         ctx.models_rev = max(ctx.models_rev, man.rev)
         return failed
+
+
+def ensure(ctx: Context, files: list, paths: list, deadline_s: float = 6 * 3600) -> tuple:
+    """(status, body) for the local POST /models/fetch: fetch these now, in the background.
+
+    `files` carry their own links ({path, url, sha256?, size?}) and are merged into the
+    manifest; bare `paths` are looked up in a fresh manifest. Paths already present are
+    reported present at once. Each path's state lands in ctx.state.models.
+    """
+    want: list = []
+    given: dict = {}
+    for m in files:
+        if not isinstance(m, dict) or not isinstance(m.get("path"), str) or not m.get("url"):
+            return 422, {"error": f"bad file {m!r}: needs path and url"}
+        given[m["path"]] = m
+    for p in list(given) + list(paths):
+        try:
+            inside(ctx.models_root, p, "model path")
+        except ValueError as e:
+            return 422, {"error": str(e)}
+        if p not in want:
+            want.append(p)
+    if not want:
+        return 202, {"fetching": []}
+    ctx.models_root.mkdir(parents=True, exist_ok=True)
+    man = getattr(ctx, "manifest", None) or Manifest(ctx)
+    ctx.manifest = man
+    for p in want:
+        ctx.state.set_model(p, "fetching")
+
+    def work():
+        try:
+            if any(p not in given and p not in man.items for p in want):
+                try:
+                    man.refresh()
+                except BootFailure as e:
+                    say(f"models: manifest for a fetch request failed: {e.reason}")
+            with man.lock:
+                man.items.update(given)
+            todo = []
+            for p in want:
+                m = man.items.get(p)
+                if m and present(ctx, m):
+                    report(ctx, p, "present", man.rev)
+                elif m is None and (ctx.models_root / p).is_file():
+                    report(ctx, p, "present", man.rev)
+                else:
+                    todo.append(p)
+
+            def line(t):
+                ctx.line(t, "models")
+            if todo:
+                line(f"fetching {len(todo)} model(s) for the worker")
+            fetch_all(ctx, man, todo, time.time() + deadline_s, line)
+        except Exception as e:             # never leave a path "fetching" forever
+            for p in want:
+                if ctx.state.models.get(p) == "fetching":
+                    report(ctx, p, "failed", man.rev, f"{type(e).__name__}: {e}")
+
+    threading.Thread(target=work, daemon=True, name="podh-models-ensure").start()
+    return 202, {"fetching": want}

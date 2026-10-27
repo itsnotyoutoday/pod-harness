@@ -1,10 +1,15 @@
 """The pod-local API: how the app's worker talks to the harness that booted it.
 
     POST /busy  {"busy": bool, "detail"?}   flip at each step's start and end
-    GET  /state → {drain, park, extend_until, models_rev, models, busy, detail, stage, ready}
+    GET  /state → {drain, park, extend_until, window_until, models_rev, models, busy, detail,
+                   stage, ready}
     POST /done  {"rc", "reason"?, "stage"?}  the only exit
     POST /workload/restart                   restart the workload (ComfyUI); 200 once it
                                              answers again, non-2xx with the error if not
+    POST /models/fetch {"files"?: [{path, url, sha256?, size?}], "paths"?: [...]}
+                                             fetch models now, mid-life (a held task's):
+                                             202 at once; each path's state shows in
+                                             GET /state `models`
     GET  /health                             no token
 
 Served by podh-boot on 127.0.0.1 only (PODH_LOCAL_PORT, else an ephemeral port), behind
@@ -71,6 +76,9 @@ class LocalState:
             r = self.reply
             return {"drain": bool(r.get("drain")), "park": bool(r.get("park")),
                     "extend_until": r.get("extend_until"), "models_rev": r.get("models_rev"),
+                    # the end of the pod's paid keep-warm/idle window, when the control
+                    # plane says (a worker claims `fits_window_s` tasks against it)
+                    "window_until": r.get("window_until"),
                     "models": dict(self.models), "busy": self.busy, "detail": self.detail,
                     "stage": self.stage, "ready": self.ready}
 
@@ -79,7 +87,8 @@ class LocalServer:
     def __init__(self, state: LocalState, *, token: Optional[str] = None,
                  port: Optional[int] = None,
                  on_done: Optional[Callable] = None, on_busy: Optional[Callable] = None,
-                 on_restart: Optional[Callable] = None):
+                 on_restart: Optional[Callable] = None,
+                 on_models: Optional[Callable] = None):
         self.state = state
         self.token = token or os.environ.get("PODH_LOCAL_TOKEN") or secrets.token_hex(16)
         if port is None:
@@ -87,6 +96,7 @@ class LocalServer:
             port = int(raw) if raw.isdigit() else 0
         outer = self
         self.on_done, self.on_busy, self.on_restart = on_done, on_busy, on_restart
+        self.on_models = on_models
 
         self.active = 0
         self.active_lock = threading.Lock()
@@ -145,6 +155,14 @@ class LocalServer:
                     if outer.on_restart is None:
                         return self._send(503, {"error": "nothing to restart"})
                     code, obj = outer.on_restart()
+                    return self._send(code, obj)
+                if self.path == "/models/fetch":
+                    if outer.on_models is None:
+                        return self._send(503, {"error": "this pod fetches no models"})
+                    files, paths = body.get("files") or [], body.get("paths") or []
+                    if not isinstance(files, list) or not isinstance(paths, list):
+                        return self._send(422, {"error": "files and paths must be lists"})
+                    code, obj = outer.on_models(files, [str(p) for p in paths])
                     return self._send(code, obj)
                 if self.path == "/done":
                     try:
@@ -224,6 +242,71 @@ def call(method: str, path: str, body: Optional[dict] = None,
             return e.code, None
     except Exception:
         return 0, None
+
+
+class Client:
+    """The local API from Python, for workers and handlers: every call is best effort and
+    never raises; each returns (status, body) like `call`, status 0 when nothing answers.
+
+        c = Client()            # PODH_LOCAL_URL / PODH_LOCAL_TOKEN
+        c.busy(True, "task-1"); c.state(); c.restart_workload(); c.done(0)
+    """
+
+    def __init__(self, url: Optional[str] = None, token: Optional[str] = None):
+        self.url = (url if url is not None else os.environ.get("PODH_LOCAL_URL", "")).rstrip("/")
+        self.token = token if token is not None else os.environ.get("PODH_LOCAL_TOKEN", "")
+
+    @property
+    def configured(self) -> bool:
+        return bool(self.url)
+
+    def call(self, method: str, path: str, body: Optional[dict] = None,
+             timeout: float = 10) -> tuple:
+        if not self.url:
+            return 0, None
+        data = json.dumps(body).encode() if body is not None else None
+        req = urllib.request.Request(
+            f"{self.url}{path}", data=data, method=method,
+            headers={"X-Podh-Token": self.token, "Content-Type": "application/json"})
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                return r.status, json.loads(r.read() or b"null")
+        except urllib.error.HTTPError as e:
+            try:
+                return e.code, json.loads(e.read() or b"null")
+            except Exception:
+                return e.code, None
+        except Exception:
+            return 0, None
+
+    def health(self) -> bool:
+        return self.call("GET", "/health", timeout=3)[0] == 200
+
+    def state(self) -> dict:
+        """GET /state, or {} when the API does not answer."""
+        st, obj = self.call("GET", "/state", timeout=5)
+        return obj if st == 200 and isinstance(obj, dict) else {}
+
+    def busy(self, busy: bool, detail: Optional[str] = None) -> tuple:
+        body: dict = {"busy": bool(busy)}
+        if detail:
+            body["detail"] = str(detail)[:200]
+        return self.call("POST", "/busy", body, timeout=5)
+
+    def done(self, rc: int, reason: Optional[str] = None, stage: Optional[str] = None) -> tuple:
+        body: dict = {"rc": int(rc)}
+        if reason:
+            body["reason"] = reason
+        if stage:
+            body["stage"] = stage
+        return self.call("POST", "/done", body)
+
+    def restart_workload(self, timeout: float = 600) -> tuple:
+        return self.call("POST", "/workload/restart", {}, timeout=timeout)
+
+    def models_fetch(self, files: Optional[list] = None, paths: Optional[list] = None) -> tuple:
+        return self.call("POST", "/models/fetch",
+                         {"files": list(files or []), "paths": list(paths or [])}, timeout=30)
 
 
 def start_beat(state: LocalState, interval: float = 60.0, live=None,

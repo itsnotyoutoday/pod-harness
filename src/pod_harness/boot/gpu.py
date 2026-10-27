@@ -115,5 +115,8 @@ def probe_nvenc(ctx: Context) -> None:
     except OSError as e:
         ok, why = False, f" — {e}"
     ctx.facts["nvenc"] = ok
+    ctx.exports["PODH_NVENC"] = "1" if ok else "0"     # podh-worker claims with it
+    # The encoder an app should hand ffmpeg, so each app stops probing on its own.
+    ctx.exports["PODH_FFMPEG_ENCODER"] = "h264_nvenc" if ok else "libx264"
     ctx.line(f"nvenc: {'yes' if ok else 'no'}{why}")
     post_facts(ctx)

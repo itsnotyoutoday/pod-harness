@@ -663,6 +663,7 @@
           "drain",
           "park",
           "extend_until",
+          "window_until",
           "models_rev",
           "models",
           "busy",
@@ -670,7 +671,7 @@
           "stage",
           "ready"
         ],
-        "note": "drain/park/extend_until/models_rev are the last /alive reply's; models is {path: present|fetching|failed}"
+        "note": "drain/park/extend_until/window_until/models_rev are the last /alive reply's (window_until: end of the paid keep-warm/idle window, when the control plane sends it); models is {path: present|fetching|failed}"
       },
       {
         "method": "POST",
@@ -699,6 +700,20 @@
           "url"
         ],
         "note": "stop and start the workload; 200 once it answers again (within up_timeout_s); 409 no workload / pod ended; 503 {error, log_tail} when it does not come back. Does not count as a crash."
+      },
+      {
+        "method": "POST",
+        "path": "/models/fetch",
+        "body": {
+          "optional": [
+            "files",
+            "paths"
+          ]
+        },
+        "reply": [
+          "fetching"
+        ],
+        "note": "fetch models now, mid-life (a held task's): files [{path, url, sha256?, size?}] carry their links, bare paths are looked up in a fresh GET /v1/pod/models. 202 at once; each path's state then shows in /state models. 422 bad path, 503 no models machinery."
       }
     ]
   },
@@ -770,13 +785,19 @@
     "endings": {
       "stage failure": "done(rc, reason, stage, log_tail), then idle (exit with --exit-on-fail)",
       "workload": "fatal CUDA string → rc 7 stage gpu_check; scan_log_for hit, or a second crash → stage workload",
-      "app.serve": "exit 0 → done(0); a second crash → stage app_serve; drain/park → SIGTERM, serve_grace_s, SIGKILL, and the pod stays up",
+      "app.serve": "exit 0 → done(0), except under drain/park (the pod idles); a second crash → stage app_serve; drain/park → SIGTERM, serve_grace_s, SIGKILL, and the pod stays up",
       "local POST /done": "done(rc, reason, stage) as given"
     },
     "exit_codes": {
       "7": "GPU unusable (gpu_check, or a fatal CUDA string in the workload log)",
       "other": "the failing step's own rc where it has one, else 1"
     },
-    "app_env": "GET /v1/pod/env, over the container env, for app.run and app.serve"
+    "app_env": "GET /v1/pod/env, over the container env, for app.run and app.serve",
+    "exports": {
+      "PODH_COMFY_URL": "the ComfyUI workload's base URL (http://127.0.0.1:<port>)",
+      "PODH_NVENC": "1|0 after the NVENC probe",
+      "PODH_FFMPEG_ENCODER": "h264_nvenc|libx264 after the NVENC probe",
+      "_also": "PODH_MODELS_ROOT, PODH_WORKLOAD_ENV, PODH_BOOT_DIR, PODH_COMFY_ROOT, PODH_COMFY_PY, PODH_APP_ROOT, PODH_LOCAL_URL, PODH_LOCAL_TOKEN"
+    }
   }
 }
