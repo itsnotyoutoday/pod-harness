@@ -313,7 +313,7 @@ class Worker:
                 t.ctx.log(f"no handler for kind {t.kind!r}: {why}")
                 return self._release(t, "no handler")
             t.handler = h
-            if t.held or t.task.get("missing_models"):
+            if t.held or t.task.get("missing_models") or t.task.get("from_source"):
                 t0 = time.time()
                 err = self._models(t)
                 t.held_s = time.time() - t0
@@ -329,8 +329,8 @@ class Worker:
             self._release(t, f"worker error: {type(e).__name__}"[:300])
 
     def _needed(self, t: TaskRun) -> list:
-        """The task's models (needs.models, and the claim's missing_models) not on this disk,
-        by path. pod-control has added them to this pod's job (mid-life additions), so
+        """The task's models (needs.models, the claim's missing_models and from_source) not on
+        this disk, by path. pod-control has added them to this pod's job (mid-life additions), so
         podh-boot's local API fetches them through GET /v1/pod/models."""
         sizes: dict = {}
         for m in (t.task.get("needs") or {}).get("models") or []:
@@ -340,11 +340,23 @@ class Worker:
         for p in t.task.get("missing_models") or []:
             if isinstance(p, str) and p:
                 sizes.setdefault(p, None)
+        for m in self._sourced(t).values():
+            sizes.setdefault(m["path"], m.get("size"))
 
         def missing(p, size=None):
             f = self.models_root / p
             return not f.is_file() or (size is not None and f.stat().st_size != int(size))
         return [p for p, size in sizes.items() if missing(p, size)]
+
+    @staticmethod
+    def _sourced(t: TaskRun) -> dict:
+        """{path: {path, source, put_url?, sha256?, size?}}: the claim's `from_source` — models
+        the store lacks, which this pod fetches from their source and puts back (TASK-API §10)."""
+        out = {}
+        for m in t.task.get("from_source") or []:
+            if isinstance(m, dict) and isinstance(m.get("path"), str) and m.get("source"):
+                out[m["path"]] = m
+        return out
 
     def _models(self, t: TaskRun) -> Optional[str]:
         want = self._needed(t)
@@ -354,7 +366,12 @@ class Worker:
         t.ctx.progress(0.0, "fetching models")
         if not self.local.configured:
             return f"no podh-boot local API to fetch {', '.join(want)[:200]}"
-        st, obj = self.local.models_fetch([], want)
+        sourced = self._sourced(t)
+        files = [sourced[p] for p in want if p in sourced]
+        if files:
+            t.ctx.log(f"not in the store, fetched from source by this pod: "
+                      f"{', '.join(f['path'] for f in files)[:200]}")
+        st, obj = self.local.models_fetch(files, [p for p in want if p not in sourced])
         if st != 202:
             return f"local /models/fetch answered {st}: {obj}"
         end = time.time() + self.model_timeout_s

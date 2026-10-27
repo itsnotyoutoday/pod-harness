@@ -278,6 +278,65 @@ check(f"the task stays cancelled; the pod's late report changes nothing (state {
       v.get("state") == "cancelled" and not v.get("artifacts"))
 check("the worker reported it as cancelled", ("t-cancel", "cancelled") in w.reports)
 
+# -- a model the store lacks, fetched by the pod from its source (TASK-API §10) -----------------
+print("— a model missing from the store, with a source: from_source")
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer  # noqa: E402
+from pod_harness import fetch, local  # noqa: E402
+from pod_harness.boot import models  # noqa: E402
+from pod_harness.boot.core import Context  # noqa: E402
+
+MODEL = "checkpoints/src.safetensors"
+MDATA = os.urandom(64_000)
+SRC_GETS = []
+
+
+class Source(BaseHTTPRequestHandler):          # a stand-in for huggingface.co
+    def do_GET(self):  # noqa: N802
+        SRC_GETS.append((self.path, self.headers.get("Authorization")))
+        if self.path != "/o/r/resolve/v1/src.safetensors":
+            self.send_response(404); self.send_header("Content-Length", "0"); self.end_headers()
+            return
+        self.send_response(200)
+        self.send_header("Content-Length", str(len(MDATA)))
+        self.end_headers()
+        self.wfile.write(MDATA)
+
+    def log_message(self, *a):
+        pass
+
+
+src = ThreadingHTTPServer(("127.0.0.1", 0), Source)
+threading.Thread(target=src.serve_forever, daemon=True).start()
+fetch.HF_BASE = f"http://127.0.0.1:{src.server_port}"
+os.environ["HF_TOKEN"] = "hf-tok"
+_orig_head = s3sign.head
+s3sign.head = lambda st, path, **kw: ({"exists": False, "size": None} if path == MODEL
+                                      else _orig_head(st, path, **kw))
+# The pod's podh-boot side: the local API the worker asks for models.
+bstate = local.LocalState()
+bstate.ready = True
+bctx = Context(boot_dir=T / "bd", state=bstate)
+lsrv = local.LocalServer(bstate, token="lt",
+                         on_models=lambda f, p_: models.ensure(bctx, f, p_)).start()
+os.environ.update(PODH_LOCAL_URL=lsrv.url, PODH_LOCAL_TOKEN="lt")
+cf.mode = "ok"
+st, body = submit("t-src", needs={"models": [{"path": MODEL, "source": "hf://o/r/src.safetensors@v1",
+                                              "sha256": hashlib.sha256(MDATA).hexdigest(),
+                                              "size": len(MDATA)}]})
+check(f"a task needing a model with a source is accepted ({st})", st == 202)
+w, rc = run()
+v = task("t-src")
+check(f"the claim's from_source model was fetched from its source; the task succeeded "
+      f"(state {v.get('state')}, error {v.get('error')})",
+      v.get("state") == "succeeded" and (T / "models" / MODEL).read_bytes() == MDATA)
+check("...the source was asked at its hf:// resolve URL with HF_TOKEN",
+      SRC_GETS and SRC_GETS[0] == ("/o/r/resolve/v1/src.safetensors", "Bearer hf-tok"))
+check("...and the pod put it back into the store through the presigned put_url",
+      wait_for(lambda: fc.blobs.get(f"models/{MODEL}") == MDATA, 15)
+      and ("models", "PUT", MODEL) in SIGNED)
+s3sign.head = _orig_head
+lsrv.close(); src.shutdown()
+
 server.should_exit = True
 cf.close(); fc.close()
 print(f"\n{sum(ok)}/{len(ok)} passed")

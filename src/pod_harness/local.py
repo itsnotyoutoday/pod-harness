@@ -6,7 +6,7 @@
     POST /done  {"rc", "reason"?, "stage"?}  the only exit
     POST /workload/restart                   restart the workload (ComfyUI); 200 once it
                                              answers again, non-2xx with the error if not
-    POST /models/fetch {"files"?: [{path, url, sha256?, size?}], "paths"?: [...]}
+    POST /models/fetch {"files"?: [{path, url | source, put_url?, sha256?, size?}], "paths"?: [...]}
                                              fetch models now, mid-life (a held task's):
                                              202 at once; each path's state shows in
                                              GET /state `models`

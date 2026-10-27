@@ -22,8 +22,6 @@ import json
 import os
 import threading
 import time
-import urllib.error
-import urllib.request
 from pathlib import Path
 from typing import Optional
 
@@ -48,19 +46,8 @@ def _sha_size(path: Path) -> tuple:
     return h.hexdigest(), n
 
 
-def put_file(url: str, path: Path, timeout: float = 600) -> int:
-    """PUT a file to a presigned URL (no pod token). Returns the HTTP status; raises on
-    no answer."""
-    size = path.stat().st_size
-    with open(path, "rb") as f:
-        req = urllib.request.Request(url, data=f, method="PUT",
-                                     headers={"Content-Length": str(size),
-                                              "Content-Type": "application/octet-stream"})
-        try:
-            with urllib.request.urlopen(req, timeout=timeout) as r:
-                return r.status
-        except urllib.error.HTTPError as e:
-            return e.code
+#: Kept here for callers that imported it from this module; it lives in fetch now.
+put_file = fetch.put_file
 
 
 def artifact_name(name) -> str:

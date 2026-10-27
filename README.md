@@ -155,7 +155,7 @@ gpu_check → binaries → models → addons → app → workload → ready → 
 |---|---|
 | `gpu_check` | podh-gpucheck; posts `vram_gb`, `cuda`, `driver`, `gpu` and (after binaries) an NVENC probe to `/v1/pod/facts`. Always runs, even on a resumed pod. |
 | `binaries` | pinned `{name, pin, url, sha256, env}` (+ optional `archive_path`, `bin_names`; else the release's `bin/` is found), verified, installed once per sha, shared as kit `binary-<name>-<sha16>`; `env` (with `{bin}`/`{bindir}`) goes to `$PODH_WORKLOAD_ENV` |
-| `models` | the manifest's presigned files into `$PODH_MODELS_ROOT`, 2 at a time, resumable (aria2c if present), fresh links on expiry, size/sha checked, per-path state reported |
+| `models` | the manifest's presigned files into `$PODH_MODELS_ROOT`, 2 at a time, resumable (aria2c if present), fresh links on expiry, size/sha checked, per-path state reported; a file the store lacks (`in_store: false`, with a `source`) is fetched from the source instead and put back into the store in the background (below) |
 | `addons` | git repos at full commits, validated again on the pod, `pip` into the workload's python, links (never outside their roots), import probes; `optional` items only warn; the set is kept as a kit |
 | `app` | the app's code fetched with ITS token (`Authorization: Bearer $<fetch.auth_env>`), or from a presigned `{url, sha256}` (no header; the archive must match the sha256), unpacked into `$PODH_APP_ROOT`, its `run` executed there (`{app}` in argv = that dir) — before the workload, so it can add files and `KEY=value` lines to `$PODH_WORKLOAD_ENV` |
 | `workload` | ComfyUI (models wired through `extra_model_paths.yaml`) or a command; up within `up_timeout_s`; log scanned for fatal strings; restarted once |
@@ -175,6 +175,16 @@ servers that refuse any of these (400/422) get the report without them.
 A failure reports `done(rc, reason, stage, log_tail)` and idles (`--exit-on-fail` exits). A
 resumed pod skips what its disk already has. After ready a watcher fetches models added
 mid-life (`models_rev` on the heartbeat reply) without ever ending the pod.
+
+**When the store lacks a model** (TASK-API §10, a safety net: apps seed their store first).
+A manifest entry, or a task claim's `from_source` item, may be `{path, source, put_url,
+sha256?, size?}` instead of `{path, url}`. The pod downloads it straight from `source` —
+`https://…`, `hf://<owner>/<repo>/<file>@<rev>` (Bearer `$HF_TOKEN` when set) or
+`civitai://<model-version-id>` (Bearer `$CIVITAI_TOKEN`) — resumable and checked, logs
+"not in store: fetched from source; uploading back to the store", uses it at once, and then
+PUTs it to `put_url` in the background: one upload at a time, at low priority, only once
+the pod is ready, skipped while it drains or parks, never holding up ready or a task, with
+a boot line when it ends. Paths the manifest lists under `missing` (no source) fail the boot.
 
 Two ways to run it:
 
@@ -197,7 +207,7 @@ so a resumed pod serving a new job gets that job's), over the container env.
   runs only while the pod is not busy. `podh-report busy [--detail D]` / `podh-report idle`.
 - `GET /state` → `{drain, park, extend_until, window_until, models_rev, models, …}` from
   the last heartbeat reply, so a worker stops claiming work on drain without asking its app.
-- `POST /models/fetch {"files"?: [{path, url, sha256?, size?}], "paths"?: [...]}` — fetch
+- `POST /models/fetch {"files"?: [{path, url, sha256?, size?} | {path, source, put_url?, …}], "paths"?: [...]}` — fetch
   models now through the same machinery as the boot set (resumable, verified, states
   reported); 202 at once, then each path's state shows in `/state`'s `models`.
 - `POST /done {"rc", "reason"?, "stage"?}` — the only exit. `podh-report done` uses it.

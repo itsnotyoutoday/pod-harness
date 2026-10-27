@@ -280,6 +280,37 @@ check("...and its state is reported failed, with the error", any(
     for pth, b, _ in fc.calls[n0:] if pth == "/v1/pod/models/state"))
 pod.extra_models = {}
 
+# the store lacks a model that has a source (TASK-API §10)
+src_data = os.urandom(50_000)
+pod.sourced = {"loras/from_source.safetensors": src_data}
+n0, r0 = len(fc.calls), len(fc.requests)
+p = pod.run(T / "m-source", FAKE_SERVE="ok0", FAKE_SERVE_SLEEP="5")
+d = dones(fc, n0)
+lines = [b["line"] for pth, b, _ in fc.calls[n0:] if pth == "/v1/boot"]
+check("a model the store lacks is fetched from its source and the boot completes",
+      p.returncode == 0 and d and d[-1]["rc"] == 0
+      and (pod.tmp / "models" / "loras/from_source.safetensors").read_bytes() == src_data)
+check("...logged clearly as the fallback",
+      any("not in store: fetched from source" in ln and "uploading back to the store" in ln
+          for ln in lines))
+check("...then put back into the store in the background, after ready, with a boot line",
+      fc.blobs.get("store_loras_from_source.safetensors") == src_data
+      and any("uploaded back to the store" in ln for ln in lines)
+      and lines.index(next(ln for ln in lines if ln.startswith("ready")))
+      < lines.index(next(ln for ln in lines if "uploaded back to the store" in ln)))
+puts = [r for r in fc.requests[r0:] if r["method"] == "PUT"]
+check("...one PUT, without the pod token", len(puts) == 1
+      and "x-podh-token" not in puts[0]["headers"])
+pod.sourced = {}
+pod.missing_paths = ["loras/nowhere.safetensors"]
+n0 = len(fc.calls)
+p = pod.run(T / "m-missing")
+d = dones(fc, n0)
+check("a model not in the store and with no source fails the boot at stage models",
+      p.returncode == 1 and d and d[-1]["stage"] == "models" and "no source" in d[-1]["reason"]
+      and "loras/nowhere" in d[-1]["reason"])
+pod.missing_paths = []
+
 good_items = pod.addon_items
 pod.addon_items = [dict(good_items[0], commit=pod.commit_a[:12])]
 n0 = len(fc.calls)

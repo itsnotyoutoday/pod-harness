@@ -453,6 +453,25 @@ run()
 check("a held task whose model cannot be fetched is released, not failed",
       (ft.releases.get("t-nomodel") or "").startswith("models:") and "t-nomodel" not in ft.dones)
 
+# a model the store lacks, with a source: the claim's from_source (TASK-API §10)
+reset()
+import hashlib  # noqa: E402
+sdata = b"S" * 4096
+fc.blobs["hf_ckpt"] = sdata
+state.ready = True
+ft.queue.append(task("t-src", needs={"models": [{"path": "checkpoints/src.safetensors"}]},
+                     from_source=[{"path": "checkpoints/src.safetensors",
+                                   "source": fc.blob_url("hf_ckpt"),
+                                   "put_url": f"{fc.url}/put/store_src?sig=p",
+                                   "sha256": hashlib.sha256(sdata).hexdigest(),
+                                   "size": len(sdata)}]))
+run()
+check("a from_source model is fetched by the pod from its source, and the task runs",
+      ft.dones.get("t-src", {}).get("ok") is True
+      and (T / "models" / "checkpoints/src.safetensors").read_bytes() == sdata)
+check("...and it is put back into the store in the background",
+      wait_for(lambda: fc.blobs.get("store_src") == sdata))
+
 # -- the client on its own -------------------------------------------------------------------------
 print("— pod_harness.comfy")
 check("missing_nodes finds node types this ComfyUI lacks (API and editor formats)",

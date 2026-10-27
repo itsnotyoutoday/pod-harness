@@ -105,6 +105,97 @@ s2 = serve.Serve(ctx, [sys.executable, "-c", "pass"], dict(os.environ), str(tmp)
 s2.start()
 check("without a drain, exit 0 still finishes it", wait_for(lambda: ends == [(0, "app serve finished")]))
 
+print("— models the store lacks, through /models/fetch (TASK-API §10)")
+import hashlib  # noqa: E402
+from pod_harness import fetch as _fetch  # noqa: E402
+sdata = os.urandom(20_000)
+fc.blobs["srcfile"] = sdata
+state.ready = True
+st, obj = c.models_fetch([{"path": "loras/s.safetensors", "source": fc.blob_url("srcfile"),
+                           "put_url": f"{fc.url}/put/stored_s",
+                           "sha256": hashlib.sha256(sdata).hexdigest(), "size": len(sdata)}], [])
+check("a {path, source, put_url} file is accepted", st == 202)
+check("...fetched from the source and present",
+      wait_for(lambda: state.models.get("loras/s.safetensors") == "present")
+      and (tmp / "models" / "loras/s.safetensors").read_bytes() == sdata)
+check("...and put back into the store in the background",
+      wait_for(lambda: fc.blobs.get("stored_s") == sdata))
+st, obj = c.models_fetch([{"path": "x.bin", "source": "ftp://nope/x"}], [])
+check("a source that is not https/hf/civitai is refused (422)", st == 422 and "ftp" in obj["error"])
+fc.blobs["src2"] = b"two"
+state.take_reply({"drain": True})
+before = set(fc.blobs)
+c.models_fetch([{"path": "loras/d.bin", "source": fc.blob_url("src2"),
+                 "put_url": f"{fc.url}/put/stored_d"}], [])
+check("while the pod drains, the file is still fetched and used",
+      wait_for(lambda: state.models.get("loras/d.bin") == "present"))
+check("...but its upload is skipped", wait_for(
+    lambda: models.uploader(ctx).done.get("loras/d.bin", "").startswith("skipped"))
+      and "stored_d" not in fc.blobs)
+state.take_reply({"drain": False})
+fc.blobs["src3"] = b"three"
+fc.put_refuse["stored_e"] = 5
+c.models_fetch([{"path": "loras/e.bin", "source": fc.blob_url("src3"),
+                 "put_url": f"{fc.url}/put/stored_e"}], [])
+check("a refused upload (expired put_url) is reported failed and the model stays present",
+      wait_for(lambda: models.uploader(ctx).done.get("loras/e.bin", "").startswith("failed"))
+      and state.models.get("loras/e.bin") == "present")
+
+print("— source references")
+os.environ.pop("HF_TOKEN", None)
+os.environ["CIVITAI_TOKEN"] = "civ"
+check("hf://owner/repo/dir/file@rev → resolve URL",
+      _fetch.resolve_source("hf://o/r/dir/f.safetensors@abc123") ==
+      ("https://huggingface.co/o/r/resolve/abc123/dir/f.safetensors", {}))
+os.environ["HF_TOKEN"] = "hft"
+check("...rev defaults to main, HF_TOKEN as a Bearer header",
+      _fetch.resolve_source("hf://o/r/f.bin") ==
+      ("https://huggingface.co/o/r/resolve/main/f.bin", {"Authorization": "Bearer hft"}))
+check("civitai://<id> → the download API, CIVITAI_TOKEN as a Bearer header",
+      _fetch.resolve_source("civitai://4242") ==
+      ("https://civitai.com/api/download/models/4242", {"Authorization": "Bearer civ"}))
+bad = 0
+for s_ in ("hf://o/r", "hf://o/../f@x", "civitai://abc", "", "s3://b/k"):
+    try:
+        _fetch.resolve_source(s_)
+    except ValueError:
+        bad += 1
+check("...malformed ones are refused", bad == 5)
+os.environ.pop("HF_TOKEN"); os.environ.pop("CIVITAI_TOKEN")
+
+# A source's token must not follow a redirect to another host (the CDN, a bucket).
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer  # noqa: E402
+import threading  # noqa: E402
+seen = []
+
+
+class Redir(BaseHTTPRequestHandler):
+    def do_GET(self):  # noqa: N802
+        seen.append((self.headers.get("Host"), self.headers.get("Authorization")))
+        if self.path.startswith("/first"):
+            self.send_response(302)
+            self.send_header("Location", f"http://localhost:{self.server.server_port}/cdn")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+        self.send_response(200)
+        self.send_header("Content-Length", "3")
+        self.end_headers()
+        self.wfile.write(b"abc")
+
+    def log_message(self, *a):
+        pass
+
+
+rs = ThreadingHTTPServer(("127.0.0.1", 0), Redir)
+threading.Thread(target=rs.serve_forever, daemon=True).start()
+_fetch.http_download(f"http://127.0.0.1:{rs.server_port}/first", tmp / "redir.bin",
+                     headers={"Authorization": "Bearer secret"})
+rs.shutdown()
+check("the token goes to the source, not to the host it redirects to",
+      seen[0][1] == "Bearer secret" and seen[1][1] is None
+      and (tmp / "redir.bin").read_bytes() == b"abc")
+
 srv.close(); bare.close(); fc.close()
 print(f"\n{sum(ok)}/{len(ok)} passed")
 sys.exit(0 if all(ok) else 1)

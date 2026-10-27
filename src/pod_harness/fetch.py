@@ -40,6 +40,7 @@ import subprocess
 import tarfile
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import zipfile
 from http.client import HTTPException, IncompleteRead
@@ -51,6 +52,30 @@ from typing import Callable, Optional
 _UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
        "(KHTML, like Gecko) Chrome/120.0 Safari/537.36")
 CHUNK = 1 << 20
+
+
+class _DropAuthOnRedirect(urllib.request.HTTPRedirectHandler):
+    """A redirect to ANOTHER host loses the Authorization header. A model source (Hugging
+    Face, Civitai) answers with a redirect to a CDN or a presigned bucket URL: the app's
+    token must not follow it there, and a bucket refuses a request that carries two kinds
+    of authorisation."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        new = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if new is not None:
+            old_host = urllib.parse.urlsplit(req.full_url).netloc
+            if urllib.parse.urlsplit(newurl).netloc != old_host:
+                for k in [k for k in new.headers if k.lower() == "authorization"]:
+                    del new.headers[k]
+                new.unredirected_hdrs.pop("Authorization", None)
+        return new
+
+
+_OPENER = urllib.request.build_opener(_DropAuthOnRedirect)
+
+
+def _urlopen(req, timeout):
+    return _OPENER.open(req, timeout=timeout)
 
 
 class DownloadError(Exception):
@@ -124,7 +149,7 @@ def http_download(url: str, dest, *, size: Optional[int] = None,
         req = urllib.request.Request(url, headers=h)
         timeout = read_timeout if left is None else max(1.0, min(read_timeout, left))
         try:
-            resp = urllib.request.urlopen(req, timeout=timeout)
+            resp = _urlopen(req, timeout)
         except urllib.error.HTTPError as e:
             if e.code in (401, 403):
                 raise LinkExpired(f"{dest.name}: HTTP {e.code} (link expired or refused)")
@@ -216,6 +241,66 @@ def aria2c_download(url: str, dest, *, size: Optional[int] = None,
     if ctl.exists():
         ctl.unlink()
     return _finish(part, dest, size, sha256)
+
+
+def put_file(url: str, path, timeout: float = 600) -> int:
+    """PUT a file to a presigned URL (no pod token, one stream). Returns the HTTP status;
+    raises on no answer."""
+    path = Path(path)
+    size = path.stat().st_size
+    with open(path, "rb") as f:
+        req = urllib.request.Request(url, data=f, method="PUT",
+                                     headers={"Content-Length": str(size),
+                                              "Content-Type": "application/octet-stream"})
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                return r.status
+        except urllib.error.HTTPError as e:
+            return e.code
+
+
+# -- model sources (TASK-API §10: a pod's fallback when the store lacks a file) ----------------
+
+HF_BASE = "https://huggingface.co"
+CIVITAI_BASE = "https://civitai.com"
+
+
+def resolve_source(source: str) -> tuple:
+    """(url, headers) for a model's `source`:
+
+        https://…                          as is (http:// too)
+        hf://<owner>/<repo>/<file…>@<rev>  → {HF_BASE}/<owner>/<repo>/resolve/<rev>/<file…>
+                                             (rev defaults to main); Bearer $HF_TOKEN if set
+        civitai://<model-version-id>       → {CIVITAI_BASE}/api/download/models/<id>;
+                                             Bearer $CIVITAI_TOKEN if set
+
+    Raises ValueError for anything else.
+    """
+    if not isinstance(source, str) or not source.strip():
+        raise ValueError("source is empty")
+    src = source.strip()
+    if src.startswith(("https://", "http://")):
+        return src, {}
+    if src.startswith("hf://"):
+        body, rev = src[len("hf://"):], "main"
+        if "@" in body:
+            body, rev = body.rsplit("@", 1)
+        parts = [p for p in body.split("/") if p]
+        if len(parts) < 3 or not rev or any(p in (".", "..") for p in parts):
+            raise ValueError(f"source {source!r}: hf:// needs <owner>/<repo>/<file>[@<rev>]")
+        repo, file = "/".join(parts[:2]), "/".join(parts[2:])
+        url = (f"{HF_BASE}/{repo}/resolve/{urllib.parse.quote(rev, safe='')}/"
+               f"{urllib.parse.quote(file)}")
+        tok = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
+        return url, ({"Authorization": f"Bearer {tok}"} if tok else {})
+    if src.startswith("civitai://"):
+        vid = src[len("civitai://"):].strip("/")
+        if not vid.isdigit():
+            raise ValueError(f"source {source!r}: civitai:// needs a numeric model version id")
+        tok = os.environ.get("CIVITAI_TOKEN")
+        return (f"{CIVITAI_BASE}/api/download/models/{vid}",
+                {"Authorization": f"Bearer {tok}"} if tok else {})
+    raise ValueError(f"source {source!r}: not https://, hf:// or civitai://")
 
 
 def download(url: str, dest, *, size: Optional[int] = None, sha256: Optional[str] = None,

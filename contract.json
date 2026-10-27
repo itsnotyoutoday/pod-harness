@@ -524,10 +524,11 @@
           "reply": {
             "200": [
               "models_rev",
-              "files[]: path, url, sha256?, size?, boot?"
+              "files[]: path, url, sha256?, size?, boot?  |  path, in_store: false, source, put_url, sha256?, size?, boot?",
+              "missing[]: paths not in the store and with no source"
             ]
           },
-          "note": "presigned GETs, fetched WITHOUT the pod token. Asked again when a link is refused (401/403) and on a higher models_rev. boot:false files never fail the boot; they are fetched after ready."
+          "note": "presigned GETs, fetched WITHOUT the pod token. Asked again when a link is refused (401/403) and on a higher models_rev. boot:false files never fail the boot; they are fetched after ready. TASK-API §10: an in_store:false file is downloaded from its source (https://; hf://<owner>/<repo>/<file>@<rev> → huggingface.co/<owner>/<repo>/resolve/<rev>/<file> with Bearer $HF_TOKEN; civitai://<version id> → civitai.com/api/download/models/<id> with Bearer $CIVITAI_TOKEN; the token is dropped on a redirect to another host), size/sha checked, used at once, then PUT to put_url in the background: one at a time, low priority, after ready, skipped while draining/parked, never blocking ready or a task, ending in a boot line. `missing` paths are reported failed and fail the boot."
         },
         {
           "method": "POST",
@@ -654,7 +655,7 @@
             "200 draining": "draining: true, no tasks: no more claims; unstarted tasks are released",
             "409": "this pod was not launched for a task pool: polled again"
           },
-          "note": "have = {models: [paths under the models root], loaded: [the last task's needs.loads]}. kinds only with --kinds; window_s only when known (pod-control ignores both today). Each task (claim_view): task_id, kind, lane, pool, state (claimed|held), attempt, lease_s, lease_until, timeout_s (null: none), needs {models [{path, size?, sha256?}], loads, …}, workflow, payload, labels, inputs {name: {url, ref?} (presigned at claim) | {value} (a dependency's result path)}, outputs {to?, keep, put_url?, put? {name: url} (only for outputs.names), sign?}, held_reason (pod_fetch), missing_models [path]. No model links: pod-control adds a held task's models to the pod's job and podh-boot fetches them by path (GET /v1/pod/models). Source: pod-control src/pod_control/taskapi.py, tasks.py; TASK-API §3, §8, §9"
+          "note": "have = {models: [paths under the models root], loaded: [the last task's needs.loads]}. kinds only with --kinds; window_s only when known (pod-control ignores both today). Each task (claim_view): task_id, kind, lane, pool, state (claimed|held), attempt, lease_s, lease_until, timeout_s (null: none), needs {models [{path, size?, sha256?}], loads, …}, workflow, payload, labels, inputs {name: {url, ref?} (presigned at claim) | {value} (a dependency's result path)}, outputs {to?, keep, put_url?, put? {name: url} (only for outputs.names), sign?}, held_reason (pod_fetch), missing_models [path], from_source [{path, source, put_url, sha256?, size?}] (models the store lacks: the worker hands them to podh-boot's /models/fetch as files, and podh-boot fetches them from the source and puts them back). No model links: pod-control adds a held task's models to the pod's job and podh-boot fetches them by path (GET /v1/pod/models). Source: pod-control src/pod_control/taskapi.py, tasks.py; TASK-API §3, §8, §9"
         },
         {
           "method": "POST",
@@ -874,7 +875,7 @@
         "reply": [
           "fetching"
         ],
-        "note": "fetch models now, mid-life (a held task's): files [{path, url, sha256?, size?}] carry their links, bare paths are looked up in a fresh GET /v1/pod/models. 202 at once; each path's state then shows in /state models. 422 bad path, 503 no models machinery."
+        "note": "fetch models now, mid-life (a held task's): files [{path, url, sha256?, size?}] carry their links ({path, source, put_url?, sha256?, size?} for one the store lacks: fetched from the source, put back in the background), bare paths are looked up in a fresh GET /v1/pod/models. 202 at once; each path's state then shows in /state models. 422 bad path, 503 no models machinery."
       }
     ]
   },

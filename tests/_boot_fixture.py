@@ -192,6 +192,8 @@ echo "ffmpeg version n8.1-fake"
         self.extra_models: dict = {}
         self.late: set = set()        # paths the manifest marks "boot": false (mid-life)
         self.models_rev = 1
+        self.sourced: dict = {}      # path -> bytes: not in the store, served from a "source"
+        self.missing_paths: list = []  # not in the store, no source (manifest `missing`)
         # addons (git repos reached through insteadOf)
         self.repos = t / "repos"
         self.commit_a = make_repo(self.repos, "nodeA", {
@@ -256,7 +258,15 @@ echo "ffmpeg version n8.1-fake"
                 items.append({"path": p, "url": fc.blob_url(p.replace("/", "_"), sig),
                               "size": len(data), "sha256": hashlib.sha256(data).hexdigest(),
                               "boot": p not in self.late})
-            return 200, {"job_id": "job_1", "models_rev": self.models_rev, "files": items}
+            for p, data in self.sourced.items():
+                name = p.replace("/", "_")
+                fc.blobs["src_" + name] = data
+                items.append({"path": p, "in_store": False, "source": fc.blob_url("src_" + name),
+                              "put_url": f"{fc.url}/put/store_{name}?X-Amz-Signature=x",
+                              "size": len(data), "sha256": hashlib.sha256(data).hexdigest(),
+                              "boot": p not in self.late})
+            return 200, {"job_id": "job_1", "models_rev": self.models_rev, "files": items,
+                         "missing": list(self.missing_paths)}
         fc.routes[("GET", "/v1/pod/models")] = manifest
         fc.routes[("GET", "/v1/pod/addons")] = lambda req: (
             200, {"set": "lane/comfy", "version": 7, "items": self.addon_items})
