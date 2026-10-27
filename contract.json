@@ -932,7 +932,7 @@
       ]
     },
     "app": [
-      "fetch {url, auth_env} → Authorization: Bearer $<auth_env>",
+      "fetch {url, auth_env} → Authorization: Bearer $<auth_env>; or {url (presigned), sha256, ref?, expires_s?} → no Authorization header, the archive must match sha256 (64 hex); sha256 may also accompany auth_env. With a sha256 the resume marker keys on it, not on the (changing) url",
       "run (argv; {app} = PODH_APP_ROOT; cwd PODH_APP_ROOT)",
       "dir?",
       "serve (same)",

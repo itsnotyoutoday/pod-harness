@@ -1,12 +1,15 @@
 """app: fetch the app's own code with its own token, unpack it, run its setup.
 
     "app": {"fetch": {"url": "https://…/bootstrap", "auth_env": "APP_POD_TOKEN"},
+                                         # or {"url": <presigned>, "sha256": "<64 hex>"}
             "run": ["bash", "/opt/app/setup.sh"],          # setup; must exit 0
             "dir": "/opt/app",                     # default $PODH_APP_ROOT, $PODH_APP_DIR, /opt/app
             "serve": [...], "serve_env": {...}, "serve_grace_s": 120}   # see serve.py
 
 The fetch sends `Authorization: Bearer $<auth_env>` — the APP's token, never the pod's
-control token. The answer is a tar (gzip/xz/zstd) or zip, unpacked member-checked into
+control token. Or it is a presigned link, `{"url", "sha256"}` (a control plane presigns it
+from a store ref): no Authorization header at all, and the download must match the sha256.
+`sha256` may also ride along with `auth_env`. The answer is a tar (gzip/xz/zstd) or zip, unpacked member-checked into
 `dir`, replacing what was there. `run` gets the boot's environment: PODH_COMFY_ROOT,
 PODH_COMFY_PY, PODH_MODELS_ROOT, PODH_WORKLOAD_ENV, PODH_JOB_ID, PODH_GPU_COUNT,
 PODH_LOCAL_URL/TOKEN and PODH_APP_ROOT (= PODH_APP_DIR), plus what binaries wrote to the
@@ -21,6 +24,7 @@ fetch/run skips it (podh-boot --fresh redoes it).
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import tempfile
 from pathlib import Path
@@ -63,13 +67,22 @@ def run(ctx: Context) -> None:
     if not f and not setup:
         ctx.line("no app setup")
         return
-    want = digest({"fetch": f, "run": setup, "dir": str(d)})
+    # A presigned URL is new on every boot; with a sha256 the CONTENT is the identity, so a
+    # resumed pod given a fresh link to the same archive still skips the stage.
+    ident = f
+    if isinstance(f, dict) and f.get("sha256"):
+        ident = {"sha256": str(f["sha256"]).lower(), "auth_env": f.get("auth_env")}
+    want = digest({"fetch": ident, "run": setup, "dir": str(d)})
     if ctx.marker("app") == want:
         ctx.line("app already set up (resumed pod)")
         return
     if f:
         if not isinstance(f, dict) or not isinstance(f.get("url"), str):
             raise BootFailure("app.fetch needs a url")
+        sha = f.get("sha256")
+        if sha is not None and not (isinstance(sha, str) and re.fullmatch(r"[0-9a-fA-F]{64}", sha)):
+            raise BootFailure(f"app.fetch: sha256 must be 64 hex characters, not {sha!r}")
+        sha = sha.lower() if sha else None
         headers = {}
         if f.get("auth_env"):
             tok = os.environ.get(str(f["auth_env"]))
@@ -82,7 +95,8 @@ def run(ctx: Context) -> None:
             arc = work / "app.archive"
             ctx.line(f"fetching the app into {d}")
             try:
-                fetch.http_download(f["url"], arc, headers=headers, deadline=ctx.deadline)
+                fetch.http_download(f["url"], arc, headers=headers, sha256=sha,
+                                    deadline=ctx.deadline)
             except fetch.DownloadError as e:
                 raise BootFailure(f"app fetch: {e}")
             if fetch.sniff(arc) == "raw":

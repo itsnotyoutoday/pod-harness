@@ -323,6 +323,29 @@ p = pod.run(T / "f-apptok", APP_POD_TOKEN="")
 d = dones(fc, n0)
 check("an app fetch without its token fails clearly", p.returncode == 1 and d
       and "APP_POD_TOKEN" in d[-1]["reason"])
+app_sha = hashlib.sha256(fc.blobs["app.tgz"]).hexdigest()
+saved_fetch = pod.spec["boot"]["app"]["fetch"]
+pod.spec["boot"]["app"]["fetch"] = {"url": fc.blob_url("app.tgz", "presigned1"), "sha256": app_sha}
+n0, r0 = len(fc.calls), len(fc.requests)
+p = pod.run(T / "a-presigned", APP_POD_TOKEN="", FAKE_SERVE="ok0", FAKE_SERVE_SLEEP="1")
+d = dones(fc, n0)
+gets = [r for r in fc.requests[r0:] if r["path"] == "/blob/app.tgz"]
+check("app.fetch {url, sha256} (presigned): no token needed, verified, the boot completes",
+      p.returncode == 0 and d and d[-1]["rc"] == 0 and gets
+      and all("authorization" not in r["headers"] for r in gets))
+pod.spec["boot"]["app"]["fetch"] = {"url": fc.blob_url("app.tgz", "presigned2"), "sha256": "0" * 64}
+n0 = len(fc.calls)
+p = pod.run(T / "a-badsha", APP_POD_TOKEN="")
+d = dones(fc, n0)
+check("...and a download that does not match its sha256 fails at stage app",
+      p.returncode == 1 and d and d[-1]["stage"] == "app" and "sha256" in d[-1]["reason"])
+pod.spec["boot"]["app"]["fetch"] = {"url": fc.blob_url("app.tgz"), "sha256": "nothex"}
+n0 = len(fc.calls)
+p = pod.run(T / "a-shaform", APP_POD_TOKEN="")
+d = dones(fc, n0)
+check("...and a sha256 that is not 64 hex is refused", p.returncode == 1 and d
+      and d[-1]["stage"] == "app" and "64 hex" in d[-1]["reason"])
+pod.spec["boot"]["app"]["fetch"] = saved_fetch
 pod.spec["boot"]["limits"] = {"app": 2}
 n0 = len(fc.calls)
 t0 = time.time()

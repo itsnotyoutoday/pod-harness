@@ -157,7 +157,7 @@ gpu_check → binaries → models → addons → app → workload → ready → 
 | `binaries` | pinned `{name, pin, url, sha256, env}` (+ optional `archive_path`, `bin_names`; else the release's `bin/` is found), verified, installed once per sha, shared as kit `binary-<name>-<sha16>`; `env` (with `{bin}`/`{bindir}`) goes to `$PODH_WORKLOAD_ENV` |
 | `models` | the manifest's presigned files into `$PODH_MODELS_ROOT`, 2 at a time, resumable (aria2c if present), fresh links on expiry, size/sha checked, per-path state reported |
 | `addons` | git repos at full commits, validated again on the pod, `pip` into the workload's python, links (never outside their roots), import probes; `optional` items only warn; the set is kept as a kit |
-| `app` | the app's code fetched with ITS token (`Authorization: Bearer $<fetch.auth_env>`), unpacked into `$PODH_APP_ROOT`, its `run` executed there (`{app}` in argv = that dir) — before the workload, so it can add files and `KEY=value` lines to `$PODH_WORKLOAD_ENV` |
+| `app` | the app's code fetched with ITS token (`Authorization: Bearer $<fetch.auth_env>`), or from a presigned `{url, sha256}` (no header; the archive must match the sha256), unpacked into `$PODH_APP_ROOT`, its `run` executed there (`{app}` in argv = that dir) — before the workload, so it can add files and `KEY=value` lines to `$PODH_WORKLOAD_ENV` |
 | `workload` | ComfyUI (models wired through `extra_model_paths.yaml`) or a command; up within `up_timeout_s`; log scanned for fatal strings; restarted once |
 | `ready` | boot line with stage `ready` |
 | `app.serve` | the app's long-running process (for a task pool, `podh-worker`): one restart, exit 0 ends the pod (unless the pod is draining or parked), drain/park → SIGTERM then SIGKILL after `serve_grace_s` |
