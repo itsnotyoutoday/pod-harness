@@ -131,8 +131,9 @@ check("safe_rel normalises a plain path", core.safe_rel("a/./b") == "a/b")
 
 # -- binary items ------------------------------------------------------------------------------------
 it = {"name": "ffmpeg", "url": "https://example.invalid/f.tar.xz", "sha256": "ab" * 32}
-check("a binary item validates, bin_names default to its name",
-      binaries._validate(it)["bins"] == ["ffmpeg"])
+check("a binary item validates; without bin_names they are found later",
+      binaries._validate(it)["bins"] is None
+      and binaries._validate(dict(it, pin="n8.1"))["name"] == "ffmpeg")
 for label, bad in {"no sha256": dict(it, sha256=None), "a short sha": dict(it, sha256="ab12"),
                    "a pin with no url": {"name": "ffmpeg", "pin": "n8.1", "sha256": "ab" * 32},
                    "a file url": dict(it, url="file:///etc/passwd"),
@@ -142,6 +143,32 @@ for label, bad in {"no sha256": dict(it, sha256=None), "a short sha": dict(it, s
         check(f"binary with {label} is refused", False)
     except BootFailure:
         check(f"binary with {label} is refused", True)
+
+# -- finding a release's executables ------------------------------------------------------------
+rel = tmp / "rel"
+for f, mode in {"pkg-1.0/bin/tool": 0o755, "pkg-1.0/bin/tool-helper": 0o755,
+                "pkg-1.0/bin/README": 0o644, "pkg-1.0/share/bin/tool": 0o755,
+                "other/tool2": 0o755}.items():
+    (rel / f).parent.mkdir(parents=True, exist_ok=True)
+    (rel / f).write_text("#!/bin/sh\n")
+    os.chmod(rel / f, mode)
+base = {"name": "tool", "bins": None, "archive_path": None}
+d, bins = binaries._discover(rel, base)
+check("no bin_names: the shallowest bin/ with the binary, and its other executables",
+      d == rel / "pkg-1.0" / "bin" and bins == ["tool", "tool-helper"])
+d, bins = binaries._discover(rel, dict(base, name="tool2"))
+check("no bin/ with it: the executable named like the binary, wherever it is",
+      d == rel / "other" and bins == ["tool2"])
+d, bins = binaries._discover(rel, dict(base, bins=["tool"], archive_path="pkg-*/bin"))
+check("explicit archive_path + bin_names are used as given", d == rel / "pkg-1.0" / "bin" and bins == ["tool"])
+try:
+    binaries._discover(rel, dict(base, name="absent"))
+    check("no executable named like the binary is a failure", False)
+except BootFailure:
+    check("no executable named like the binary is a failure", True)
+from pod_harness.boot import app as appmod  # noqa: E402
+check("{app} in argv is the app root", appmod.app_argv(["bash", "{app}/run.sh", "x"], Path("/r"))
+      == ["bash", "/r/run.sh", "x"] and appmod.app_argv("go {app}", Path("/r")) == ["bash", "-lc", "go /r"])
 
 # -- the stage runner ---------------------------------------------------------------------------------
 ctx = Context(boot_dir=tmp / "bd3")

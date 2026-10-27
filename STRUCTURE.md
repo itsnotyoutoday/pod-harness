@@ -250,7 +250,7 @@ $PODH_BOOT_DIR/               default $PODH_WORKSPACE/.podh-boot — survives a 
 $PODH_MODELS_ROOT/<path>      default $PODH_WORKSPACE/models; a file at its final name is
                               complete and verified — partials are <name>.part
 $PODH_ADDONS_ROOT/<name>/     default $PODH_COMFY_ROOT/custom_nodes
-$PODH_APP_DIR/                default /opt/app
+$PODH_APP_ROOT/               default boot.app.dir, else /opt/app
 ```
 
 Kits are the pod-side cousin of `cache/`: trivially recreatable, keyed by what they were

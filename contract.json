@@ -55,11 +55,12 @@
       "PODH_COMFY_ROOT": "the ComfyUI dir; default the first of /opt/ComfyUI, /workspace/runpod-slim/ComfyUI, /workspace/ComfyUI with main.py. Exported.",
       "PODH_COMFY_PY": "the workload's python (addons install into it, probes run with it); default the ComfyUI venv, else python3. Exported.",
       "PODH_ADDONS_ROOT": "where addons are cloned; default $PODH_COMFY_ROOT/custom_nodes, else <boot dir>/addons",
-      "PODH_APP_DIR": "where the app is unpacked; default boot.app.dir, else /opt/app. Exported.",
+      "PODH_APP_DIR": "same as PODH_APP_ROOT (kept as an alias)",
       "PODH_IMAGE_DIGEST": "the image's digest, if the image knows it; part of every kit's key",
       "PODH_KIT_FORMAT": "zst | gz for kits this pod publishes; default zst when the zstd binary exists",
       "PODH_NO_ARIA2": "1 = never use aria2c for downloads, even when present",
-      "PODH_PIP_TIMEOUT": "seconds per addon pip install, default 1200"
+      "PODH_PIP_TIMEOUT": "seconds per addon pip install, default 1200",
+      "PODH_APP_ROOT": "set BY podh-boot: where app.fetch is unpacked (boot.app.dir, else /opt/app); {app} in app.run/app.serve argv; their cwd. PODH_APP_DIR is the same path."
     },
     "provider_supplied": {
       "RUNPOD_POD_ID": "set by RunPod; used only for labelling, never for logic"
@@ -501,6 +502,19 @@
         },
         {
           "method": "GET",
+          "path": "/v1/pod/env",
+          "client": "boot/cli.py",
+          "reply": {
+            "200": [
+              "env",
+              "job_id"
+            ],
+            "404": "an older server: the app gets the container env"
+          },
+          "note": "every boot, resumed or not: the CURRENT job's app env. Exported to app.run and app.serve over the container env; job_id becomes PODH_JOB_ID."
+        },
+        {
+          "method": "GET",
           "path": "/v1/pod/models",
           "client": "boot/models.py",
           "reply": {
@@ -674,6 +688,16 @@
           "configured"
         ],
         "note": "the only exit: reported to the control plane, and podh-boot stops what it supervises"
+      },
+      {
+        "method": "POST",
+        "path": "/workload/restart",
+        "reply": [
+          "restarted",
+          "after_s",
+          "url"
+        ],
+        "note": "stop and start the workload; 200 once it answers again (within up_timeout_s); 409 no workload / pod ended; 503 {error, log_tail} when it does not come back. Does not count as a crash."
       }
     ]
   },
@@ -703,11 +727,12 @@
     "resume": "binaries, models, addons and app are skipped when the disk already has them (per sha / commit / definition); gpu_check always runs; --fresh ignores the disk",
     "binary_item": [
       "name",
+      "pin?",
       "url",
       "sha256",
+      "env?  ({bin} and {bindir} = the install dir; $VAR expanded against the env)",
       "archive_path?",
-      "bin_names?",
-      "env?  ({bin} and {bindir} = the install dir)"
+      "bin_names?  (absent: every executable in the shallowest bin/ holding one named like the binary)"
     ],
     "workload": {
       "comfyui": [
@@ -730,10 +755,10 @@
       ]
     },
     "app": [
-      "fetch {url, auth_env}",
-      "run",
+      "fetch {url, auth_env} → Authorization: Bearer $<auth_env>",
+      "run (argv; {app} = PODH_APP_ROOT; cwd PODH_APP_ROOT)",
       "dir?",
-      "serve",
+      "serve (same)",
       "serve_env",
       "serve_grace_s"
     ],
@@ -750,6 +775,7 @@
     "exit_codes": {
       "7": "GPU unusable (gpu_check, or a fatal CUDA string in the workload log)",
       "other": "the failing step's own rc where it has one, else 1"
-    }
+    },
+    "app_env": "GET /v1/pod/env, over the container env, for app.run and app.serve"
   }
 }

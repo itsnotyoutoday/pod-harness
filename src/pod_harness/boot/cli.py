@@ -4,6 +4,7 @@
 
 The spec comes from GET {PODH_CONTROL_URL}/v1/pod/spec with the pod token, or from --spec
 (or $PODH_BOOT_SPEC) — a JSON file with the same shape: {"boot": {...}, "policy": {...}}.
+The current job's app env comes from GET /v1/pod/env (see load_app_env).
 
 Stages, in this order, each under a time limit and each reporting boot lines:
 
@@ -65,6 +66,32 @@ def load_spec(path: Optional[str], ctx: Context) -> dict:
         delay = min(delay * 2, 30)
 
 
+def load_app_env(ctx: Context) -> None:
+    """GET /v1/pod/env → {"env": {...}, "job_id"}: the CURRENT job's app env.
+
+    Read on every boot, resumed or not: a parked pod resumed for a new job must hand that
+    job's credentials to app.run and app.serve, not the ones baked into the container at
+    create. A 404 (an older server) falls back to the container env.
+    """
+    if not heartbeat._cfg()[0]:
+        return
+    st, obj = heartbeat.request("GET", "/v1/pod/env", timeout=20)
+    if st == 404 or (st == 200 and not isinstance(obj, dict)):
+        say("env: no /v1/pod/env on this control plane; the app gets the container env")
+        return
+    if st != 200:
+        raise BootFailure(f"GET /v1/pod/env answered {st or 'nothing'} "
+                          f"({heartbeat.last_error() or obj})", stage="spec")
+    env = obj.get("env") or {}
+    if not isinstance(env, dict):
+        raise BootFailure("GET /v1/pod/env: `env` is not an object", stage="spec")
+    ctx.app_env = {str(k): str(v) for k, v in env.items() if v is not None}
+    if obj.get("job_id"):
+        ctx.exports["PODH_JOB_ID"] = str(obj["job_id"])
+        ctx.app_env["PODH_JOB_ID"] = str(obj["job_id"])
+    say(f"env: {len(ctx.app_env)} app variable(s) for job {obj.get('job_id') or '?'}")
+
+
 def ready(ctx: Context) -> None:
     w = ctx.workload
     ctx.state.ready = True
@@ -119,7 +146,8 @@ def main(argv: Optional[list] = None) -> int:
         except OSError:
             pass
 
-    srv = LocalServer(state, on_done=lambda rc, reason, stage: ctx.finish(rc, reason, stage))
+    srv = LocalServer(state, on_done=lambda rc, reason, stage: ctx.finish(rc, reason, stage),
+                      on_restart=lambda: workload.restart_for_api(ctx))
     srv.start()
     ctx.exports.update(srv.env())
     os.environ.update(srv.env())                # podh-report in our own children finds it
@@ -151,6 +179,7 @@ def main(argv: Optional[list] = None) -> int:
     try:
         ctx.stage = "spec"
         ctx.load(load_spec(a.spec, ctx))
+        load_app_env(ctx)
         for name, fn, lim in _stages(ctx):
             run_stage(ctx, name, fn, lim)
     except BootFailure as f:

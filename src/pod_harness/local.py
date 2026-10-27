@@ -3,6 +3,8 @@
     POST /busy  {"busy": bool, "detail"?}   flip at each step's start and end
     GET  /state → {drain, park, extend_until, models_rev, models, busy, detail, stage, ready}
     POST /done  {"rc", "reason"?, "stage"?}  the only exit
+    POST /workload/restart                   restart the workload (ComfyUI); 200 once it
+                                             answers again, non-2xx with the error if not
     GET  /health                             no token
 
 Served by podh-boot on 127.0.0.1 only (PODH_LOCAL_PORT, else an ephemeral port), behind
@@ -76,14 +78,15 @@ class LocalState:
 class LocalServer:
     def __init__(self, state: LocalState, *, token: Optional[str] = None,
                  port: Optional[int] = None,
-                 on_done: Optional[Callable] = None, on_busy: Optional[Callable] = None):
+                 on_done: Optional[Callable] = None, on_busy: Optional[Callable] = None,
+                 on_restart: Optional[Callable] = None):
         self.state = state
         self.token = token or os.environ.get("PODH_LOCAL_TOKEN") or secrets.token_hex(16)
         if port is None:
             raw = os.environ.get("PODH_LOCAL_PORT", "").strip()
             port = int(raw) if raw.isdigit() else 0
         outer = self
-        self.on_done, self.on_busy = on_done, on_busy
+        self.on_done, self.on_busy, self.on_restart = on_done, on_busy, on_restart
 
         self.active = 0
         self.active_lock = threading.Lock()
@@ -138,6 +141,11 @@ class LocalServer:
                     if outer.on_busy:
                         outer.on_busy()
                     return self._send(200, {"busy": body["busy"]})
+                if self.path == "/workload/restart":
+                    if outer.on_restart is None:
+                        return self._send(503, {"error": "nothing to restart"})
+                    code, obj = outer.on_restart()
+                    return self._send(code, obj)
                 if self.path == "/done":
                     try:
                         rc = int(body.get("rc", 0))

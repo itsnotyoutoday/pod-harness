@@ -2,9 +2,13 @@
 
 Each item is generic — nothing here knows what ffmpeg is:
 
-    {"name": "ffmpeg", "url": "https://…/ffmpeg-n8.1-linux64-gpl.tar.xz",
-     "sha256": "<64 hex>", "archive_path": "ffmpeg-*/bin", "bin_names": ["ffmpeg", "ffprobe"],
-     "env": {"IMAGEIO_FFMPEG_EXE": "{bin}/ffmpeg", "PATH": "{bindir}:$PATH"}}
+    {"name": "ffmpeg", "pin": "n8.1", "url": "https://…/ffmpeg-n8.1-linux64-gpl.tar.xz",
+     "sha256": "<64 hex>", "env": {"IMAGEIO_FFMPEG_EXE": "{bin}/ffmpeg", "PATH": "{bindir}:$PATH"},
+     "archive_path"?: "ffmpeg-*/bin", "bin_names"?: ["ffmpeg", "ffprobe"]}
+
+`pin` is the human name of the build (the server resolves it to url + sha256). Without
+`bin_names`, the executables are found: the shallowest `bin/` holding one named like the
+binary, and every executable beside it.
 
 The download is verified against sha256 BEFORE it is unpacked; `archive_path` (a glob, since
 release tarballs name their top directory after the version) is where in the archive the
@@ -48,8 +52,9 @@ def _validate(it) -> dict:
     if not isinstance(url, str) or not re.match(r"^https?://", url):
         raise BootFailure(f"binary {name}: url must be http(s) (the spec had {url!r}; a "
                           f"server resolves pins to url+sha256)")
-    bins = it.get("bin_names") or [name]
-    if not isinstance(bins, list) or not all(isinstance(b, str) and NAME_RE.match(b) for b in bins):
+    bins = it.get("bin_names") or None          # None: discover them under the tree's bin/
+    if bins is not None and (not isinstance(bins, list) or not all(
+            isinstance(b, str) and NAME_RE.match(b) for b in bins)):
         raise BootFailure(f"binary {name}: bad bin_names {bins!r}")
     env = it.get("env") or {}
     if not isinstance(env, dict):
@@ -63,7 +68,40 @@ def _installed(d: Path, it: dict) -> bool:
         m = json.loads((d / MARKER).read_text())
     except (OSError, ValueError):
         return False
-    return m.get("sha256") == it["sha256"] and all(os.access(d / b, os.X_OK) for b in it["bins"])
+    bins = it["bins"] or m.get("bins") or [it["name"]]
+    return m.get("sha256") == it["sha256"] and all(os.access(d / b, os.X_OK) for b in bins)
+
+
+def _exe(p: Path) -> bool:
+    return p.is_file() and os.access(p, os.X_OK)
+
+
+def _discover(tree: Path, it: dict) -> tuple:
+    """(directory, [executables]) to install.
+
+    bin_names given: those, from archive_path (or the top). Absent: the shallowest `bin/`
+    directory (under archive_path, if given) holding an executable named like the binary,
+    and every executable beside it — a release's bin/ is ffmpeg AND ffprobe. With no such
+    bin/, the executable named like the binary wherever it is.
+    """
+    if it["bins"]:
+        return _locate(tree, it["archive_path"]), it["bins"]
+    base = _locate(tree, it["archive_path"])
+    name = it["name"]
+    if base.name == "bin" or it["archive_path"]:
+        dirs = [base]
+    else:
+        dirs = sorted((Path(r) for r, _, _ in os.walk(base) if Path(r).name == "bin"),
+                      key=lambda d: (len(d.parts), str(d)))
+    for d in dirs:
+        if _exe(d / name):
+            return d, sorted(f.name for f in d.iterdir() if _exe(f) and not f.is_symlink()
+                             and NAME_RE.match(f.name))
+    for r, _, files in sorted(os.walk(base), key=lambda x: (len(Path(x[0]).parts), x[0])):
+        if name in files and _exe(Path(r) / name):
+            return Path(r), [name]
+    raise BootFailure(f"{name}: no executable named {name} in the archive"
+                      f"{' under ' + it['archive_path'] if it['archive_path'] else ''}")
 
 
 def _locate(tree: Path, archive_path) -> Path:
@@ -102,17 +140,18 @@ def install(ctx: Context, it: dict) -> Path:
         try:
             if fetch.sniff(arc) == "raw":
                 tree.mkdir()
-                shutil.copy2(arc, tree / it["bins"][0])
+                shutil.copy2(arc, tree / (it["bins"] or [it["name"]])[0])
+                os.chmod(tree / (it["bins"] or [it["name"]])[0], 0o755)
             else:
                 fetch.safe_extract(arc, tree)
         except (fetch.UnsafeArchive, OSError, Exception) as e:
             if isinstance(e, BootFailure):
                 raise
             raise BootFailure(f"{it['name']}: cannot unpack: {e}")
-        src = _locate(tree, it["archive_path"])
+        src, bins = _discover(tree, it)
         staged = work / "out"
         staged.mkdir()
-        for b in it["bins"]:
+        for b in bins:
             s = src / b
             if not s.is_file():
                 raise BootFailure(f"{it['name']}: {b} is not in the archive at "
@@ -120,7 +159,7 @@ def install(ctx: Context, it: dict) -> Path:
             shutil.copy2(s, staged / b)
             os.chmod(staged / b, 0o755)
         (staged / MARKER).write_text(json.dumps({"name": it["name"], "sha256": it["sha256"],
-                                                 "bins": it["bins"]}))
+                                                 "bins": bins}))
         fetch.replace_dir(staged, d)
     finally:
         shutil.rmtree(work, ignore_errors=True)

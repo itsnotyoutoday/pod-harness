@@ -241,6 +241,7 @@ class Context:
         self.workload = None          # set by the workload stage
         self.serve = None             # set when app.serve starts
         self.manifest = None          # models.Manifest, kept for mid-life additions
+        self.app_env: dict = {}       # the current job's app env, from GET /v1/pod/env
         self._markers = self.boot_dir / "markers.json"
 
     # -- configuration --------------------------------------------------------------------

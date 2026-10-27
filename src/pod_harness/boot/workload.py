@@ -16,7 +16,8 @@ Up means the port answers HTTP (any status below 500) within up_timeout_s. While
 and for the rest of its life, its log is scanned for fatal strings — podh-gpucheck's CUDA
 list plus `scan_log_for`. A CUDA one ends the pod at stage gpu_check with rc 7 (the host is
 bad); any other at stage workload. A crash is restarted once; the second ends the pod at
-stage workload with the log's tail.
+stage workload with the log's tail. The worker may also ask for a restart (local API POST
+/workload/restart) when a job wedges inside the workload; that does not count as a crash.
 """
 from __future__ import annotations
 
@@ -154,28 +155,70 @@ class Workload:
         ctx = self.ctx
         while not self.stopping and not ctx.finished.is_set():
             time.sleep(interval)
-            if self.stopping or ctx.finished.is_set():
-                return
-            hit = self.scan()
-            if hit:
-                ctx.fail(self._fatal(hit))
-                return
-            rc = self.proc.poll()
-            if rc is None:
-                continue
-            if self.restarts >= 1:
-                ctx.fail(BootFailure(f"{self.name} exited {rc} again after a restart",
-                                     rc=rc or 1, stage="workload", log_tail=tail(self.log)))
-                return
-            self.restarts += 1
-            ctx.line(f"{self.name} exited {rc}; restarting it once", "workload")
+            with self.lock:                # never at the same time as an asked-for restart
+                if self.stopping or ctx.finished.is_set():
+                    return
+                hit = self.scan()
+                if hit:
+                    ctx.fail(self._fatal(hit))
+                    return
+                rc = self.proc.poll()
+                if rc is None:
+                    continue
+                if self.restarts >= 1:
+                    ctx.fail(BootFailure(f"{self.name} exited {rc} again after a restart",
+                                         rc=rc or 1, stage="workload", log_tail=tail(self.log)))
+                    return
+                self.restarts += 1
+                ctx.line(f"{self.name} exited {rc}; restarting it once", "workload")
+                try:
+                    self.start()
+                    self.wait_up(time.time() + self.up_timeout)
+                    ctx.line(f"{self.name} answering again", "workload")
+                except BootFailure as f:
+                    ctx.fail(f)
+                    return
+
+    def restart(self) -> None:
+        """Stop and start the workload on request, and wait until it answers again.
+
+        For a worker whose job wedged inside the workload (a C-level node ignores
+        /interrupt): only a new process frees it. Asked-for restarts do not count against
+        the one crash restart. Raises BootFailure when it does not come back; a fatal CUDA
+        string on the way up also ends the pod (the host is bad), anything else is left to
+        the supervisor, which treats a dead process as a crash.
+        """
+        with self.lock:
+            if self.stopping or self.ctx.finished.is_set():
+                raise BootFailure(f"{self.name} is stopping; not restarting", stage="workload")
+            self.ctx.line(f"restarting {self.name} on request", "workload")
+            if self.proc is not None:
+                stop_process(self.proc, 10)
+            self.start()
             try:
-                self.start()
                 self.wait_up(time.time() + self.up_timeout)
-                ctx.line(f"{self.name} answering again", "workload")
             except BootFailure as f:
-                ctx.fail(f)
-                return
+                if f.rc == gpucheck.EXIT_GPU:
+                    self.ctx.fail(f)
+                raise
+            self.ctx.line(f"{self.name} answering again after the requested restart", "workload")
+
+
+def restart_for_api(ctx: Context) -> tuple:
+    """(status, body) for the local API's POST /workload/restart."""
+    w = ctx.workload
+    if w is None:
+        return 409, {"error": "this pod has no workload to restart"}
+    if ctx.finished.is_set():
+        return 409, {"error": "the pod's work has ended"}
+    t0 = time.time()
+    try:
+        w.restart()
+    except BootFailure as f:
+        return 503, {"error": f.reason, "log_tail": f.log_tail}
+    except OSError as e:
+        return 500, {"error": f"{type(e).__name__}: {e}"}
+    return 200, {"restarted": True, "after_s": round(time.time() - t0, 1), "url": w.url}
 
 
 def build(ctx: Context) -> Optional[Workload]:

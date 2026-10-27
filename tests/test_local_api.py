@@ -89,6 +89,13 @@ check("/state reports the last heartbeat reply and model states",
 check("/done reaches the supervisor", raw("POST", "/done", {"rc": 3, "reason": "r", "stage": "s"})[0] == 200
       and dones[-1] == (3, "r", "s"))
 check("/done wants an integer rc", raw("POST", "/done", {"rc": "x"})[0] == 422)
+check("/workload/restart without a workload is 503", raw("POST", "/workload/restart")[0] == 503)
+srv.on_restart = lambda: (200, {"restarted": True})
+check("/workload/restart answers what the supervisor says",
+      raw("POST", "/workload/restart") == (200, {"restarted": True}))
+srv.on_restart = lambda: (503, {"error": "did not answer"})
+check("...including its failure", raw("POST", "/workload/restart")[0] == 503)
+check("/workload/restart needs the token", raw("POST", "/workload/restart", token=None)[0] == 401)
 
 # -- podh-report over it ------------------------------------------------------------------
 check("podh-report busy exits 3 outside podh-boot", report.main(["busy"]) == 3)

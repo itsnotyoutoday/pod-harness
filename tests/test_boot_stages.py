@@ -10,6 +10,7 @@ import json
 import os
 import sys
 import time
+import urllib.error
 import urllib.request
 from pathlib import Path
 
@@ -63,8 +64,9 @@ check("facts: vram_gb, cuda, driver and the card after the GPU check",
       and facts[0].get("driver") == "570.86.15" and facts[0].get("gpu") == "NVIDIA L40S")
 check("facts: nvenc once ffmpeg is installed", facts[-1].get("nvenc") is True)
 bindir = bd / "bin" / f"ffmpeg-{pod.ff_sha[:12]}"
-check("the pinned binary is installed from its archive_path", os.access(bindir / "ffmpeg", os.X_OK)
-      and os.access(bindir / "ffprobe", os.X_OK) and not (bindir / "LICENSE").exists())
+check("without bin_names, every executable in the release's bin/ is installed",
+      os.access(bindir / "ffmpeg", os.X_OK) and os.access(bindir / "ffprobe", os.X_OK)
+      and not (bindir / "LICENSE").exists())
 claims = [b for pth, b, _ in fc.calls[n0:] if pth == f"/v1/pod/kits/binary-ffmpeg-{pod.ff_sha[:16]}"]
 check("...and published as kit binary-<name>-<sha16>, keyed by the full sha",
       claims and claims[0]["key"] == pod.ff_sha
@@ -117,7 +119,16 @@ check("ComfyUI sees the app's added env and PATH with the binary first",
 emp = (bd / "extra_model_paths.yaml").read_text()
 check("extra_model_paths.yaml points ComfyUI's folders at the models root",
       f"base_path: {T / 'models'}" in emp and "  checkpoints: checkpoints/" in emp)
+check("app.run gets {app} replaced by the app root, and runs there",
+      (bd / "setup-cwd.txt").read_text().strip() == os.path.realpath(T / "app")
+      and f"PODH_APP_ROOT={T / 'app'}" in senv)
+check("the job's app env from /v1/pod/env overrides the container's, with its job id",
+      "APP_JOB_SECRET=from-control" in senv and "PODH_JOB_ID=job_2" in senv)
 sv = (bd / "serve-env.txt").read_text()
+check("app.serve too: {app}, cwd, PODH_APP_ROOT and the job's env",
+      (bd / "serve-cwd.txt").read_text().strip() == os.path.realpath(T / "app")
+      and f"PODH_APP_ROOT={T / 'app'}" in sv and "APP_JOB_SECRET=from-control" in sv
+      and "PODH_JOB_ID=job_2" in sv)
 check("app.serve gets serve_env (expanded) and the local API",
       "SERVE_FLAG=yes" in sv and f"SERVE_PATH={T / 'models'}/x" in sv and "PODH_LOCAL_URL=" in sv)
 alive = fc.bodies("/v1/alive")
@@ -145,6 +156,11 @@ check("addons: already installed, no pip", any("nodeA" in ln and "already instal
       and len(pod.pip_log.read_text().splitlines()) == pip_n)
 check("app: already set up, not fetched again", any("already set up" in ln for ln in lines)
       and not any(r["path"] == "/blob/app.tgz" for r in fc.requests[rq0:]))
+pod.pod_env = None
+p = pod.run(bd, args=("--exit-on-fail", "--fresh"), FAKE_SERVE="ok0")
+check("an older server without /v1/pod/env: the app gets the container env",
+      p.returncode == 0 and "APP_JOB_SECRET=from-container" in (bd / "serve-env.txt").read_text())
+pod.pod_env = {"env": {"APP_JOB_SECRET": "from-control", "APP_POD_TOKEN": "apptok"}, "job_id": "job_2"}
 rq0 = len(fc.requests)
 p = pod.run(bd, args=("--exit-on-fail", "--fresh"), FAKE_SERVE="ok0")
 check("--fresh redoes what the disk says is done",
@@ -340,6 +356,29 @@ check("/state shows drain to the worker", wait_for(lambda: state()["drain"] is T
 time.sleep(1.5)
 check("a drained pod is not ended: it idles for pod-control to stop or park",
       proc.poll() is None)
+def post(path, timeout=60):
+    req = urllib.request.Request(f"http://127.0.0.1:{port}{path}", method="POST", data=b"{}",
+                                 headers={"X-Podh-Token": "lt"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return r.status, json.loads(r.read())
+    except urllib.error.HTTPError as e:
+        return e.code, json.loads(e.read())
+
+
+runs = int((bd / "comfy-count").read_text())
+st, body = post("/workload/restart")
+check("POST /workload/restart answers 200 once ComfyUI answers again",
+      st == 200 and body.get("restarted") and int((bd / "comfy-count").read_text()) == runs + 1)
+(bd / "comfy-mode").write_text("crash")
+st, body = post("/workload/restart")
+(bd / "comfy-mode").unlink()
+check("...and non-2xx with the error when it does not come back",
+      st == 503 and "before it answered" in body.get("error", ""))
+check("...after which the supervisor restarts it (a dead process is a crash)",
+      wait_for(lambda: int((bd / "comfy-count").read_text()) == runs + 3, 20)
+      and wait_for(lambda: proc.poll() is None and "answering again" in " ".join(
+          b.get("line", "") for pth, b, _ in fc.calls[-20:] if pth == "/v1/boot"), 20))
 nd = len(dones(fc))
 req = urllib.request.Request(f"http://127.0.0.1:{port}/done", method="POST",
                              data=json.dumps({"rc": 0, "reason": "drained"}).encode(),

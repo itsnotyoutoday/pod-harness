@@ -3,7 +3,8 @@
     "app": {..., "serve": [cmd] | "shell line", "serve_env": {...}, "serve_grace_s": 120}
 
 Started after `ready` (after the workload answers, or right after app.run when there is no
-workload), with the boot's environment plus serve_env. Supervised:
+workload), in the app root, `{app}` in its argv replaced by it, with the boot's environment,
+the job's app env (/v1/pod/env), then serve_env. Supervised:
 
   - exits 0            the work is finished: done(0). A workload-less job (a trainer) ends
                        exactly like this.
@@ -89,13 +90,14 @@ def build(ctx: Context) -> Optional[Serve]:
     cmd = app.get("serve")
     if not cmd:
         return None
+    from .app import app_argv, app_dir, app_env
+    d = app_dir(ctx)
     try:
-        cmd = as_cmd(cmd)
+        cmd = app_argv(cmd, d)
     except ValueError as e:
         raise BootFailure(f"app.serve: {e}", stage="app_serve")
-    from .app import app_dir
-    d = app_dir(ctx)
-    env = ctx.child_env({str(k): str(v) for k, v in (app.get("serve_env") or {}).items()})
+    d.mkdir(parents=True, exist_ok=True)
+    ctx.exports["PODH_APP_ROOT"] = ctx.exports["PODH_APP_DIR"] = str(d)
+    env = app_env(ctx, {str(k): str(v) for k, v in (app.get("serve_env") or {}).items()})
     grace = float(app.get("serve_grace_s") or DEFAULT_GRACE)
-    return Serve(ctx, cmd, env, str(d) if d.is_dir() else None, grace,
-                 ctx.boot_dir / "logs" / "serve.log")
+    return Serve(ctx, cmd, env, str(d), grace, ctx.boot_dir / "logs" / "serve.log")

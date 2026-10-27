@@ -75,6 +75,9 @@ import json, os, sys, time, http.server, threading
 a = sys.argv[1:]
 port = int(a[a.index("--port") + 1])
 mode = os.environ.get("FAKE_COMFY", "ok")
+mf = os.environ.get("FAKE_COMFY_MODEFILE")
+if mf and os.path.exists(mf):
+    mode = open(mf).read().strip()
 count_file = os.environ["FAKE_COMFY_COUNT"]
 n = int(open(count_file).read()) + 1 if os.path.exists(count_file) else 1
 open(count_file, "w").write(str(n))
@@ -109,7 +112,8 @@ while True:
 
 SETUP = r'''#!/bin/bash
 set -e
-env | grep -E '^(PODH_|IMAGEIO|WL_)' | sort > "$PODH_BOOT_DIR/setup-env.txt"
+env | grep -E '^(PODH_|IMAGEIO|WL_|APP_)' | sort > "$PODH_BOOT_DIR/setup-env.txt"
+pwd > "$PODH_BOOT_DIR/setup-cwd.txt"
 echo "APP_ADDED=from-setup" >> "$PODH_WORKLOAD_ENV"
 mkdir -p "$PODH_COMFY_ROOT/custom_nodes/app-shim"
 echo "# dropped by the app" > "$PODH_COMFY_ROOT/custom_nodes/app-shim/__init__.py"
@@ -121,6 +125,7 @@ echo setup ok
 SERVE = r'''#!/bin/bash
 mode="${FAKE_SERVE:-ok0}"
 env | grep -E '^(PODH_|SERVE_|APP_)' | sort > "$PODH_BOOT_DIR/serve-env.txt"
+pwd > "$PODH_BOOT_DIR/serve-cwd.txt"
 count="$PODH_BOOT_DIR/serve-count"
 n=$(( $(cat "$count" 2>/dev/null || echo 0) + 1 )); echo $n > "$count"
 echo "serve run $n mode $mode"
@@ -220,14 +225,13 @@ echo "ffmpeg version n8.1-fake"
         return {"boot": {
             "gpu_check": True,
             "binaries": [{"name": "ffmpeg", "url": fc.blob_url("ffmpeg.tar.gz"),
-                          "sha256": self.ff_sha, "archive_path": "ffmpeg-*/bin",
-                          "bin_names": ["ffmpeg", "ffprobe"],
+                          "pin": "n8.1", "sha256": self.ff_sha,
                           "env": {"IMAGEIO_FFMPEG_EXE": "{bin}/ffmpeg", "PATH": "{bindir}:$PATH"}}],
             "models": {"profile": "p", "paths": list(self.models)},
             "addons": {"set": "lane/comfy", "version": 7},
             "app": {"fetch": {"url": fc.blob_url("app.tgz"), "auth_env": "APP_POD_TOKEN"},
-                    "run": ["bash", "setup.sh"], "dir": str(self.tmp / "app"),
-                    "serve": ["bash", str(self.tmp / "app" / "serve.sh")],
+                    "run": ["bash", "{app}/setup.sh"], "dir": str(self.tmp / "app"),
+                    "serve": ["bash", "{app}/serve.sh"],
                     "serve_env": {"SERVE_FLAG": "yes", "SERVE_PATH": "$PODH_MODELS_ROOT/x"},
                     "serve_grace_s": 5},
             "workload": {"comfyui": {"port": free_port(), "args": ["--enable-cors-header"],
@@ -239,6 +243,10 @@ echo "ffmpeg version n8.1-fake"
     def wire(self):
         fc = self.fc
         fc.routes[("GET", "/v1/pod/spec")] = lambda req: (200, self.spec)
+        self.pod_env = {"env": {"APP_JOB_SECRET": "from-control", "APP_POD_TOKEN": "apptok"},
+                        "job_id": "job_2"}
+        fc.routes[("GET", "/v1/pod/env")] = lambda req: (
+            (200, self.pod_env) if self.pod_env is not None else (404, {"detail": "not found"}))
 
         def manifest(req):
             self.manifest_calls += 1
@@ -295,7 +303,9 @@ echo "ffmpeg version n8.1-fake"
             "PODH_COMFY_ROOT": str(self.comfy), "PODH_COMFY_PY": str(self.py),
             "PODH_NO_ARIA2": "1", "PODH_KIT_FORMAT": "gz",
             "GIT_CONFIG_GLOBAL": str(self.gitconfig), "GIT_CONFIG_NOSYSTEM": "1",
-            "APP_POD_TOKEN": "apptok", "FAKE_NVENC": "1", "FAKE_GPUS": "1",
+            "APP_POD_TOKEN": "apptok", "APP_JOB_SECRET": "from-container",
+            "FAKE_NVENC": "1", "FAKE_GPUS": "1",
+            "FAKE_COMFY_MODEFILE": str(boot_dir / "comfy-mode"),
             "FAKE_COMFY_COUNT": str(boot_dir / "comfy-count"),
             "FAKE_COMFY_ENVOUT": str(boot_dir / "comfy-env.json"),
         })
