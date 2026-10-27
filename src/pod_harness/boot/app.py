@@ -19,7 +19,8 @@ BEFORE the workload, so it may drop files into the workload tree and add workloa
 appending KEY=value lines to $PODH_WORKLOAD_ENV.
 
 Done once per definition: a resumed pod whose app stage already succeeded with the same
-fetch/run skips it (podh-boot --fresh redoes it).
+fetch/run skips it (podh-boot --fresh redoes it) — but only while the app dir still holds
+the stamp from that run. A stop/resume that wiped the container disk sets it up again.
 """
 from __future__ import annotations
 
@@ -73,9 +74,19 @@ def run(ctx: Context) -> None:
     if isinstance(f, dict) and f.get("sha256"):
         ident = {"sha256": str(f["sha256"]).lower(), "auth_env": f.get("auth_env")}
     want = digest({"fetch": ident, "run": setup, "dir": str(d)})
-    if ctx.marker("app") == want:
+    # The marker lives in the boot dir (on the volume); the app dir usually does not. A cloud
+    # stop/resume keeps the volume and wipes the container disk, so the app is "set up" only
+    # if the stamp inside the app dir agrees too.
+    stamp = d / ".podh-app-stamp"
+    try:
+        stamped = stamp.read_text().strip()
+    except OSError:
+        stamped = None
+    if ctx.marker("app") == want and stamped == want:
         ctx.line("app already set up (resumed pod)")
         return
+    if ctx.marker("app") == want:
+        ctx.line(f"app was set up before, but {d} did not survive the resume; setting it up again")
     if f:
         if not isinstance(f, dict) or not isinstance(f.get("url"), str):
             raise BootFailure("app.fetch needs a url")
@@ -121,4 +132,6 @@ def run(ctx: Context) -> None:
         if rc != 0:
             raise BootFailure(f"app setup {'timed out' if rc is None else f'exited {rc}'}",
                               rc=rc or 1, log_tail=out)
+    d.mkdir(parents=True, exist_ok=True)
+    stamp.write_text(want + "\n")
     ctx.set_marker("app", want)

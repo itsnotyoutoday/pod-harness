@@ -187,6 +187,16 @@ check("addons: already installed, no pip", any("nodeA" in ln and "already instal
       and len(pod.pip_log.read_text().splitlines()) == pip_n)
 check("app: already set up, not fetched again", any("already set up" in ln for ln in lines)
       and not any(r["path"] == "/blob/app.tgz" for r in fc.requests[rq0:]))
+# A cloud stop/resume keeps the volume (boot dir, markers) and wipes the container disk (app).
+import shutil as _sh
+_sh.rmtree(T / "app")
+n0, rq0 = len(fc.calls), len(fc.requests)
+p = pod.run(bd, FAKE_SERVE="ok0")
+lines = [b["line"] for pth, b, _ in fc.calls[n0:] if pth == "/v1/boot"]
+check("app: a resume that wiped the app dir fetches and sets it up again",
+      p.returncode == 0 and any("did not survive the resume" in ln for ln in lines)
+      and any(r["path"] == "/blob/app.tgz" for r in fc.requests[rq0:])
+      and (T / "app" / ".podh-app-stamp").is_file())
 pod.pod_env = None
 p = pod.run(bd, args=("--exit-on-fail", "--fresh"), FAKE_SERVE="ok0")
 check("an older server without /v1/pod/env: the app gets the container env",
