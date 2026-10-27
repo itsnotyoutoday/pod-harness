@@ -1,0 +1,22 @@
+#!/bin/sh
+# quick-test [STRICT]: ComfyUI's own CI start, on the CPU, with every custom node loaded.
+# Fails (STRICT=1, the default) when any custom node failed to import, which ComfyUI itself
+# only logs. Cleans what the run wrote into the ComfyUI tree, so the layer holds nothing new.
+set -eu
+strict=${1:-1}
+root=${PODH_COMFY_ROOT:-/opt/ComfyUI}
+log=$(mktemp)
+cd "$root"
+if ! python main.py --quick-test-for-ci --cpu >"$log" 2>&1; then
+    cat "$log"; echo "FAIL: ComfyUI --quick-test-for-ci exited non-zero"; exit 1
+fi
+sed -n '/Import times for custom nodes/,/^$/p' "$log"
+if grep -E 'IMPORT FAILED|Cannot import ' "$log"; then
+    cat "$log"
+    if [ "$strict" = 1 ]; then echo "FAIL: a custom node did not import"; exit 1; fi
+    echo "WARNING: a custom node did not import (QUICK_TEST_STRICT=0, continuing)"
+fi
+# custom_nodes holds the baked packs (nested repos, which clean leaves alone anyway).
+git -C "$root" clean -fdxq -e custom_nodes
+rm -rf "$log" /root/.cache
+echo "quick test OK"

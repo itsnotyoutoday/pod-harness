@@ -55,6 +55,8 @@ it did not create is reported `unverified`, never `ok`.
 |---|---|---|
 | `ghcr.io/itsnotyoutoday/pod-harness` | ~240 MB | anything that is not machine learning |
 | `ghcr.io/itsnotyoutoday/lingua-pipeline` | ~6 GB | forced alignment + audio measurement |
+| `ghcr.io/itsnotyoutoday/podh-comfyui` | ~7 GB | ComfyUI on CUDA 12.8, booted by `podh-boot` ([below](#images-podh-comfyui-and-podh-comfyui-video)) |
+| `ghcr.io/itsnotyoutoday/podh-comfyui-video` | ~8 GB | the same plus lip-sync and voice node packs |
 
 Both are public, so pods pull without registry auth and without hitting Docker Hub's
 anonymous rate limit.
@@ -192,6 +194,62 @@ so a resumed pod serving a new job gets that job's), over the container env.
 `get` exits 0 with the dir filled or 2 when nobody has built it yet; the key also carries
 the python, torch, CUDA and image the build is for. The exact routes and fields are in
 `contract.json` under `control_plane.pod_calls`, `local_api` and `boot`.
+
+### Images: podh-comfyui and podh-comfyui-video
+
+GPU images whose entrypoint is `podh-boot` (`tini -- podh-boot`, port 8188), built by
+`.github/workflows/build-comfyui.yml` from `docker/comfyui.Dockerfile` and
+`docker/comfyui-video.Dockerfile`. They are the stages above with the slow parts done.
+
+| | podh-comfyui | podh-comfyui-video |
+|---|---|---|
+| base | `nvidia/cuda:12.8.1-cudnn-runtime-ubuntu24.04` | podh-comfyui, by digest |
+| python | 3.12 (Ubuntu's, one interpreter), venv `/opt/venv` | same |
+| torch | 2.11.0+cu128, torchvision 0.26.0, torchaudio 2.11.0 | same |
+| ComfyUI | v0.43.0 in `/opt/ComfyUI`, no ComfyUI-Manager | same |
+| ffmpeg | BtbN n8.1.3 static GPL (NVENC), sha256-pinned | same |
+| node packs | VideoHelperSuite, Frame-Interpolation, Impact-Pack (+ sam2), Impact-Subpack, rgthree-comfy, KJNodes | + LatentSyncWrapper, Fill-ChatterBox, onnxruntime-gpu 1.24.1, insightface 0.7.3 |
+
+Exact commits are in the Dockerfiles; every python package version is in
+`docker/comfyui/lock.txt` (regenerated from `lock.in`).
+
+**How a job uses one.** Launch the image with a boot spec, as for any `podh-boot` pod. The
+defaults already point at the image: `PODH_COMFY_ROOT=/opt/ComfyUI`,
+`PODH_COMFY_PY=/opt/venv/bin/python`, `PODH_ADDONS_ROOT=/opt/ComfyUI/custom_nodes`,
+`PODH_MODELS_ROOT=/workspace/models`. What the image baked is recorded under
+`PODH_BAKED_ROOT=/opt/podh/baked`, and the stages use it:
+
+- a `binaries` item with the baked ffmpeg's sha256 is used in place — no download, no kit;
+- an `addons` item whose `name` is the pack's directory (the repo name, e.g.
+  `ComfyUI-KJNodes`) and whose `commit` is the baked commit is **instant**: no clone, no
+  `requirements.txt`; its `pip` extras, `links` and `probe` still run. Any other commit is
+  cloned and installed as usual, beside or over it;
+- `workload.comfyui` starts the baked ComfyUI with its models wired to `PODH_MODELS_ROOT`.
+
+```json
+{"boot": {"gpu_check": true,
+          "binaries": [{"name": "ffmpeg", "pin": "n8.1.3", "url": "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-10-26-14-25/ffmpeg-n8.1.3-24-g92611900bb-linux64-gpl-8.1.tar.xz",
+                        "sha256": "d113aa5b57ab0dcfee171d835240ce3ea5db826a0ee80ed7528c8d26a61e87a4",
+                        "env": {"IMAGEIO_FFMPEG_EXE": "{bin}/ffmpeg", "PATH": "{bindir}:$PATH"}}],
+          "models": {"profile": "…"},
+          "addons": {"set": "…", "version": 1},
+          "workload": {"comfyui": {"port": 8188, "up_timeout_s": 300}}}}
+```
+
+**Models are never baked.** They are the job's: the `models` stage fetches them into
+`PODH_MODELS_ROOT`. Nothing is downloaded at build (the packs' install scripts, which fetch
+weights, are not run). A pack that fetches its weights on first use when they are not where
+it looks (LatentSyncWrapper's `checkpoints/`) should be given them with addon `links`.
+
+**pip is guarded.** `PIP_CONSTRAINT=/opt/podh/guard.txt` pins the torch trio and numpy for
+every pip run in the container, the addons stage's included: an addon that asks for another
+torch or `numpy<2` fails with pip's resolution error instead of replacing the CUDA build.
+
+**Tags.** `<registry>/<owner>/podh-comfyui:<comfyui tag>-cu128-<short sha>` (e.g.
+`v0.43.0-cu128-1a2b3c4`) and `:latest`; the same for `podh-comfyui-video`. Always on GHCR;
+also on Docker Hub as `docker.io/$DOCKERHUB_USER/…` when the repository has the
+`DOCKERHUB_USER`/`DOCKERHUB_TOKEN` secrets. Pin the versioned tag, or better the digest,
+in a job; `latest` moves.
 
 ### Submit a job
 

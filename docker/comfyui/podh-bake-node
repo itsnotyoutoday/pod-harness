@@ -1,0 +1,73 @@
+#!/usr/bin/env bash
+# podh-bake-node NAME REPO COMMIT [REQUIREMENTS_FILE|-]
+#
+# Build time only: check a ComfyUI node pack out into $PODH_ADDONS_ROOT/NAME exactly as
+# podh-boot's addons stage would (a shallow fetch of exactly COMMIT, detached, submodules,
+# .git KEPT — the stage recognises a checkout by its HEAD), install its requirements under
+# the image's lock, and record it in $PODH_BAKED_ROOT/addons.json.
+#
+# That record is what lets a job that pins the same commit skip both the clone and the
+# requirements at boot. It is written only after the install succeeded, so a pack that is
+# in addons.json is a pack whose requirements really are in the image.
+#
+# Requirement lines that are not plain requirements (git+…, URLs, -e, -r, options) are NOT
+# installed here and are printed: a pack that needs one gets it pinned explicitly in the
+# Dockerfile. An unpinned git URL is exactly the thing a build must not resolve on its own.
+set -euo pipefail
+
+name=${1:?name}; repo=${2:?repo}; commit=${3:?commit}; req=${4:-requirements.txt}
+root=${PODH_ADDONS_ROOT:?PODH_ADDONS_ROOT is not set}
+baked=${PODH_BAKED_ROOT:?PODH_BAKED_ROOT is not set}
+lock=${PODH_LOCK:-/opt/podh/lock.txt}
+py=${PODH_COMFY_PY:-python3}
+
+[[ $commit =~ ^[0-9a-f]{40}$ ]] || { echo "bake $name: commit must be a full 40-hex SHA" >&2; exit 2; }
+d="$root/$name"
+[[ -e $d ]] && { echo "bake $name: $d already exists" >&2; exit 2; }
+
+echo "=== bake $name @ ${commit:0:12} from $repo"
+export GIT_TERMINAL_PROMPT=0
+git init -q "$d"
+git -C "$d" remote add origin "$repo"
+if git -C "$d" fetch -q --depth 1 origin "$commit"; then
+    git -C "$d" checkout -q --detach FETCH_HEAD
+else
+    rm -rf "$d"
+    git clone -q --no-checkout "$repo" "$d"
+    git -C "$d" checkout -q --detach "$commit"
+fi
+if [[ -f $d/.gitmodules ]]; then
+    git -C "$d" submodule update --init --recursive --depth 1
+fi
+head=$(git -C "$d" rev-parse HEAD)
+[[ $head == "$commit" ]] || { echo "bake $name: checked out $head, wanted $commit" >&2; exit 1; }
+
+if [[ $req != - && -f $d/$req ]]; then
+    plain=$(mktemp)
+    while IFS= read -r line || [[ -n $line ]]; do
+        s=${line%%#*}; s=${s#"${s%%[![:space:]]*}"}; s=${s%"${s##*[![:space:]]}"}
+        [[ -z $s ]] && continue
+        if [[ $s == -* || $s == *://* || $s == git+* ]]; then
+            echo "    not installed from $req (pinned separately or not at all): $s"
+            continue
+        fi
+        printf '%s\n' "$s" >> "$plain"
+    done < "$d/$req"
+    if [[ -s $plain ]]; then
+        "$py" -m pip install --no-input -c "$lock" -r "$plain"
+    fi
+    rm -f "$plain"
+fi
+
+mkdir -p "$baked"
+"$py" - "$baked/addons.json" "$name" "$commit" "$d" "$repo" <<'PY'
+import json, sys
+path, name, commit, d, repo = sys.argv[1:]
+try:
+    obj = json.load(open(path))
+except (OSError, ValueError):
+    obj = {"addons": {}}
+obj.setdefault("addons", {})[name] = {"commit": commit, "dir": d, "repo": repo}
+json.dump(obj, open(path, "w"), indent=1, sort_keys=True)
+PY
+echo "=== baked $name"
