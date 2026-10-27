@@ -22,8 +22,10 @@ from typing import Optional
 from .. import gpucheck, heartbeat
 from .core import BootFailure, Context
 
+# 320x240 and a few frames: at 64x64 x 1 frame an A40 (which has NVENC) reported "no" —
+# below the encoder's minimum frame size, and one frame can be held back by its lookahead.
 NVENC_PROBE = ["-hide_banner", "-loglevel", "error", "-f", "lavfi",
-               "-i", "color=c=black:s=64x64:d=0.04", "-frames:v", "1",
+               "-i", "color=c=black:s=320x240:r=25:d=0.4", "-frames:v", "8",
                "-c:v", "h264_nvenc", "-f", "null", "-"]
 
 
