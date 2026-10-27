@@ -155,7 +155,7 @@ RUN set -eux; \
     $bake ComfyUI-VideoHelperSuite https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite 4d907bee61e92c2e65af3bd6383a4e4d356126d1; \
     $bake ComfyUI-Frame-Interpolation https://github.com/Fannovel16/ComfyUI-Frame-Interpolation 26545cc2dd95bc3d27f056016300673bdeee78f5 requirements-no-cupy.txt; \
     SAM2_BUILD_CUDA=0 pip install --no-input --no-build-isolation -c /opt/podh/lock.txt \
-        "sam2 @ git+https://github.com/facebookresearch/sam2@${SAM2_COMMIT}"; \
+        "sam-2 @ git+https://github.com/facebookresearch/sam2@${SAM2_COMMIT}"; \
     $bake ComfyUI-Impact-Pack https://github.com/ltdrdata/ComfyUI-Impact-Pack 429d0159ad429e64d2b3916e6e7be9c22d025c3c; \
     $bake ComfyUI-Impact-Subpack https://github.com/ltdrdata/ComfyUI-Impact-Subpack 50c7b71a6a224734cc9b21963c6d1926816a97f1; \
     $bake rgthree-comfy https://github.com/rgthree/rgthree-comfy d7297b42f0fa78bec1c0411478f887423c249502; \

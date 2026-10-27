@@ -56,7 +56,7 @@ jobs:
         # which talks to a real bucket and is meant to be run by hand against one; globbing
         # *.py swept it in and it failed on the credentials it is supposed to need.
         run: |
-          python3 -m pip install --quiet boto3
+          python3 -m pip install --quiet boto3 fastapi httpx "uvicorn[standard]"
           fail=0
           for t in tests/test_*.py; do
             echo "── $t"
