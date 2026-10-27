@@ -160,7 +160,7 @@ gpu_check → binaries → models → addons → app → workload → ready → 
 | `app` | the app's code fetched with ITS token (`Authorization: Bearer $<fetch.auth_env>`), unpacked into `$PODH_APP_ROOT`, its `run` executed there (`{app}` in argv = that dir) — before the workload, so it can add files and `KEY=value` lines to `$PODH_WORKLOAD_ENV` |
 | `workload` | ComfyUI (models wired through `extra_model_paths.yaml`) or a command; up within `up_timeout_s`; log scanned for fatal strings; restarted once |
 | `ready` | boot line with stage `ready` |
-| `app.serve` | the app's long-running process: one restart, exit 0 ends the pod, drain/park → SIGTERM then SIGKILL after `serve_grace_s` |
+| `app.serve` | the app's long-running process (for a task pool, `podh-worker`): one restart, exit 0 ends the pod (unless the pod is draining or parked), drain/park → SIGTERM then SIGKILL after `serve_grace_s` |
 
 A failure reports `done(rc, reason, stage, log_tail)` and idles (`--exit-on-fail` exits). A
 resumed pod skips what its disk already has. After ready a watcher fetches models added
@@ -177,23 +177,124 @@ bash -lc "pip install 'pod-harness @ git+https://github.com/<owner>/pod-harness@
 ```
 
 The app stage, the workload and `app.serve` get `PODH_COMFY_ROOT`, `PODH_COMFY_PY`,
-`PODH_MODELS_ROOT`, `PODH_WORKLOAD_ENV`, `PODH_JOB_ID`, `PODH_GPU_COUNT`, `PODH_APP_ROOT` and
-the local API, `PODH_LOCAL_URL` + `PODH_LOCAL_TOKEN` (127.0.0.1 only). `app.run` and
+`PODH_COMFY_URL`, `PODH_MODELS_ROOT`, `PODH_WORKLOAD_ENV`, `PODH_JOB_ID`, `PODH_GPU_COUNT`,
+`PODH_APP_ROOT`, after the NVENC probe `PODH_NVENC` (1/0) and `PODH_FFMPEG_ENCODER`
+(`h264_nvenc` or `libx264`), and the local API, `PODH_LOCAL_URL` + `PODH_LOCAL_TOKEN` (127.0.0.1 only). `app.run` and
 `app.serve` also get the current job's app env from `GET /v1/pod/env` (read on every boot,
 so a resumed pod serving a new job gets that job's), over the container env.
 
 - `POST /busy {"busy", "detail"?}` — rides on the next heartbeat; pod-control's idle clock
   runs only while the pod is not busy. `podh-report busy [--detail D]` / `podh-report idle`.
-- `GET /state` → `{drain, park, extend_until, models_rev, models, …}` from the last
-  heartbeat reply, so a worker stops claiming work on drain without asking its app.
+- `GET /state` → `{drain, park, extend_until, window_until, models_rev, models, …}` from
+  the last heartbeat reply, so a worker stops claiming work on drain without asking its app.
+- `POST /models/fetch {"files"?: [{path, url, sha256?, size?}], "paths"?: [...]}` — fetch
+  models now through the same machinery as the boot set (resumable, verified, states
+  reported); 202 at once, then each path's state shows in `/state`'s `models`.
 - `POST /done {"rc", "reason"?, "stage"?}` — the only exit. `podh-report done` uses it.
 - `POST /workload/restart` — restart the workload (a job wedged in a C-level node ignores
   ComfyUI's /interrupt); 200 once it answers again, non-2xx with the error if it does not.
+
+`pod_harness.local.Client` is the same API from Python (`busy`, `state`, `done`,
+`restart_workload`, `models_fetch`); it never raises.
 
 `podh-kit get|put <name> <app-key> <dir>` caches anything slow to build (a venv, wheels):
 `get` exits 0 with the dir filled or 2 when nobody has built it yet; the key also carries
 the python, torch, CUDA and image the build is for. The exact routes and fields are in
 `contract.json` under `control_plane.pod_calls`, `local_api` and `boot`.
+
+### Tasks and handlers: podh-worker
+
+`podh-worker` is the generic worker for task pools: the pod claims units of work from the
+control plane instead of running a job of its own. It is the pool's `app.serve`:
+
+```
+claim → (held: fetch models) → start → fetch inputs → handler prepare/run/finish
+      → upload outputs → done                      beating every lease_s/3 throughout
+```
+
+- **Claims** stay within `--capacity` (tasks executing at once, default 1) plus
+  `--prefetch` (claimed ahead, default 1): the next task's models download while one runs.
+  The claim reports the models on disk and `have.loaded` (the last task's `needs.loads`), so
+  the control plane can prefer a pod that already has the checkpoint.
+- **Held** tasks wait for their models, fetched through podh-boot's `POST /models/fetch`;
+  a model that cannot be fetched releases the task (no attempt counted).
+- **Busy**: the local busy flag is true while the worker holds any task, so the pod's idle
+  clock is right.
+- **Cancel** (a beat reply): ComfyUI is interrupted; if it does not stop within 20 s the
+  workload is restarted; reported as `cancelled`. A task cancelled before it starts is
+  dropped. A lease answered 404/409/410 is no longer this pod's: work stops, nothing is
+  reported.
+- **Stall**: a ComfyUI execution with no progress for `stall_s` (task, else `--stall-s`,
+  default 600) is interrupted, then restarted if need be — a failed attempt, stage `stall`.
+  `timeout_s` caps the whole task.
+- **Drain / park / SIGTERM**: no more claims, unstarted tasks released `draining`, the
+  running ones finish, exit 0.
+- An unknown `kind`, or one outside `--kinds`, is released with reason `no handler`.
+- A task with `fallback: "app"` is released rather than failed when it fails on the pod.
+- Inputs are cached across tasks up to `PODH_INPUT_CACHE_GB` (default 2).
+- `done` carries `result` (finish()'s JSON, ≤ 256 KB), `artifacts` and `usage` (fetch, run
+  and upload seconds, held seconds, prefetched, VRAM peak when `nvidia-smi` exists).
+
+`--once` runs one task and exits (for tests and one-shot pods); `--poll S` sets the gap
+between empty claims. The routes it calls are in `contract.json` under
+`control_plane.pod_calls`.
+
+**The built-in `comfy` kind** loads `workflow.ref` (a file in the app bundle) or
+`workflow.inline` (ComfyUI's API format), applies `workflow.patch`
+(`"<node>.inputs.<name>": value`, or names from `workflow.map`), copies each input into
+ComfyUI's `input/` and substitutes `{input:<name>}` with the name ComfyUI knows it by,
+posts the graph, follows `/ws` (polling `/history` if there is none), and uploads the saved
+files that match `outputs.keep`. A `keep` that matches nothing fails the task.
+
+**Your own kinds** ship in the app bundle, declared in `podh-handlers.json` at its root and
+imported with the bundle root on `sys.path`:
+
+```json
+{"handlers": {"myapp.upscale": "myapp_pod.handlers:Upscale"}}
+```
+
+```python
+# myapp_pod/handlers.py
+import json
+from pod_harness.worker import TaskHandler, TaskFailed
+
+class Upscale(TaskHandler):
+    def prepare(self, task, ctx):
+        # ctx.inputs: {name: local path}, already fetched and verified
+        graph = json.loads((ctx.app_root / "workflows/upscale.json").read_text())
+        graph["5"]["inputs"]["image"] = ctx.comfy.upload_input(ctx.inputs["image"])
+        return graph
+
+    def run(self, task, ctx, graph):
+        frames = []
+        for scale in task["payload"]["scales"]:      # several ComfyUI runs in one task
+            ctx.check()                               # raises Cancelled on a cancel
+            graph["7"]["inputs"]["scale_by"] = scale
+            r = ctx.comfy.run(graph, timeout_s=600, stall_s=120, keep=["*.png"],
+                              dest=ctx.workdir)
+            frames += r.files
+            ctx.emit({"scale": scale, "files": len(r.files)})
+        if not frames:
+            raise TaskFailed("no frames came out", stage="run")
+        return frames
+
+    def finish(self, task, ctx, frames):
+        refs = [ctx.upload(p, f"x{i}.png") for i, p in enumerate(frames)]
+        return {"frames": refs}                       # the task's result
+```
+
+`ComfyRunner` (the `comfy` kind) can be subclassed the same way, overriding `prepare` to
+change the graph or `finish` to check the outputs. `ctx` gives `task`, `payload`,
+`models_root`, `app_root`, `workdir`, `inputs`, `comfy` (a `pod_harness.comfy.ComfyClient`
+wired to this task's cancel, timeout and progress: `upload_input`, `run`, `interrupt`,
+`history`, `collect`), `progress(fraction, message)`, `log`, `emit(dict)`,
+`fetch(url | store://ref, dest)`, `upload(path, name)` → `{name, ref}` (mid-run too),
+`restart_workload()`, `cancelled()` and `check()`. `Cancelled` is a `BaseException`: an
+`except Exception` in a handler cannot swallow a cancel.
+
+`podh-catalogue check <workflow.json ...>` asks ComfyUI's `/object_info` whether every node
+type the workflows use exists (exit 1 naming the missing ones) — run it in `app.run` to
+fail the boot instead of the first task.
 
 ### Images: podh-comfyui and podh-comfyui-video
 

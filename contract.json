@@ -626,6 +626,114 @@
             "key",
             "size"
           ]
+        },
+        {
+          "method": "POST",
+          "path": "/v1/pod/tasks/claim",
+          "client": "worker/api.py",
+          "required": [
+            "capacity",
+            "have",
+            "nvenc"
+          ],
+          "optional": [
+            "kinds",
+            "window_s"
+          ],
+          "reply": {
+            "200": [
+              "tasks",
+              "lease_s"
+            ]
+          },
+          "note": "have = {models: [paths under the models root], loaded: [the last task's needs.loads]}. kinds only with --kinds; window_s (the paid keep-warm/idle window left, from /state window_until) only when known. Each task: task_id, kind, state (claimed|held), held_reason?, lease_s?, timeout_s?, stall_s?, needs, workflow, inputs {name: url | {url, sha256?, size?, filename?}}, outputs {to?, keep?, put? {name: url | {url, ref}}, put_url?}, models? [{path, url, sha256?, size?}] (links for a held task's missing models; absent: asked of podh-boot by path), payload, fallback?"
+        },
+        {
+          "method": "POST",
+          "path": "/v1/pod/tasks/{id}/beat",
+          "client": "worker/api.py",
+          "required": [
+            "progress",
+            "message"
+          ],
+          "reply": {
+            "200": [
+              "cancel"
+            ],
+            "404/409/410": "the lease is lost: work stops, nothing is reported"
+          },
+          "note": "every lease_s/3 from claim to report, held and prefetched tasks too"
+        },
+        {
+          "method": "POST",
+          "path": "/v1/pod/tasks/{id}/start",
+          "client": "worker/api.py",
+          "reply": {
+            "2xx": "running",
+            "404/409/410": "not ours any more: dropped",
+            "other": "retried 4 times, then released"
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/v1/pod/tasks/{id}/done",
+          "client": "worker/api.py",
+          "required": [
+            "ok",
+            "artifacts"
+          ],
+          "optional": [
+            "result",
+            "error",
+            "usage"
+          ],
+          "note": "artifacts [{name, ref, size, sha256}]; result is finish()'s JSON (≤ 256 KB); error {stage, reason, log_tail}, stage cancelled for a cancel; usage {phases {fetch_s, run_s, upload_s}, held_s, prefetched, vram_peak_mb?}. Retried on no answer or 5xx."
+        },
+        {
+          "method": "POST",
+          "path": "/v1/pod/tasks/{id}/release",
+          "client": "worker/api.py",
+          "required": [
+            "reason"
+          ],
+          "note": "\"no handler\", \"draining\", \"models: …\", \"failed on pod: …\" (fallback: app)"
+        },
+        {
+          "method": "POST",
+          "path": "/v1/pod/tasks/{id}/sign",
+          "client": "worker/api.py",
+          "optional": [
+            "refs",
+            "put"
+          ],
+          "reply": {
+            "200": [
+              "urls",
+              "put"
+            ]
+          },
+          "note": "refs: store:// refs for ctx.fetch → urls {ref: url}; put: artifact names without a link in the claim → put {name: url | {url, ref}}. Asked again for a put link refused with 401/403."
+        },
+        {
+          "method": "POST",
+          "path": "/v1/pod/tasks/{id}/event",
+          "client": "worker/api.py",
+          "required": [
+            "event"
+          ],
+          "note": "ctx.emit; at most 1/s per task (the worker waits out the gap), ≤ 16 KB"
+        },
+        {
+          "method": "POST",
+          "path": "/v1/pod/tasks/{id}/artifact",
+          "client": "worker/api.py",
+          "optional": [
+            "name",
+            "ref",
+            "size",
+            "sha256"
+          ],
+          "note": "after each upload, mid-run included; best effort"
         }
       ]
     }
@@ -798,6 +906,54 @@
       "PODH_NVENC": "1|0 after the NVENC probe",
       "PODH_FFMPEG_ENCODER": "h264_nvenc|libx264 after the NVENC probe",
       "_also": "PODH_MODELS_ROOT, PODH_WORKLOAD_ENV, PODH_BOOT_DIR, PODH_COMFY_ROOT, PODH_COMFY_PY, PODH_APP_ROOT, PODH_LOCAL_URL, PODH_LOCAL_TOKEN"
+    }
+  },
+  "worker": {
+    "_comment": "podh-worker (pod_harness.worker): the generic task worker, a task pool's app.serve. TASK-API §4, §5, §8.",
+    "cli": [
+      "--capacity N (PODH_WORKER_CAPACITY, 1)",
+      "--prefetch N (PODH_WORKER_PREFETCH, 1)",
+      "--once",
+      "--kinds a,b (PODH_WORKER_KINDS)",
+      "--poll S (PODH_WORKER_POLL_S, 5)",
+      "--stall-s S (PODH_WORKER_STALL_S, 600)",
+      "--interrupt-grace S (20)",
+      "--app-root (PODH_APP_ROOT)",
+      "--workdir (PODH_WORKER_DIR, else $PODH_BOOT_DIR/tasks)"
+    ],
+    "env": {
+      "PODH_INPUT_CACHE_GB": "input cache budget across tasks (default 2)",
+      "PODH_COMFY_URL": "ComfyUI (podh-boot exports it)",
+      "PODH_NVENC": "claimed as nvenc"
+    },
+    "handlers_file": "$PODH_APP_ROOT/podh-handlers.json: {\"handlers\": {kind: \"module:Class\"}}; built in: comfy",
+    "handler": [
+      "prepare(task, ctx) → prepared",
+      "run(task, ctx, prepared) → out",
+      "finish(task, ctx, out) → result dict | None"
+    ],
+    "ctx": [
+      "task",
+      "task_id",
+      "payload",
+      "models_root",
+      "app_root",
+      "workdir",
+      "inputs",
+      "comfy",
+      "progress(f, msg)",
+      "log(msg)",
+      "emit(dict)",
+      "fetch(url|store://ref, dest)",
+      "upload(path, name) → {name, ref}",
+      "restart_workload()",
+      "cancelled()",
+      "check()"
+    ],
+    "exits": {
+      "0": "--once done, or drained",
+      "1": "a handler did not stop after a cancel/timeout (podh-boot restarts app.serve)",
+      "2": "no PODH_CONTROL_URL"
     }
   }
 }
