@@ -183,6 +183,33 @@ else
     echo "  heartbeat off (no PODH_CONTROL_URL)"
 fi
 
+# -- GPU check ------------------------------------------------------------------------
+# Prove the GPU works before paying for anything that needs it.
+#
+# A broken rented GPU fails nothing at boot. The pod mounts, downloads models for ten
+# minutes, starts the job, and dies at the first CUDA call — or a framework quietly falls
+# back to the CPU and runs a hundred times slower at GPU rates. Asking takes seconds, so
+# it is asked HERE: after the log endpoints (so the verdict is readable) and before the
+# mount and every download (so a bad machine costs seconds, not a working set).
+#
+# gpucheck decides for itself whether this is a GPU pod (PODH_GPU_COUNT, else "does
+# nvidia-smi list a GPU"), so a CPU image passes straight through. --no-report because a
+# failure lands in fatal(), which reports with the reason and this stage; reporting twice
+# would race two /done calls. Any exit other than 0/7 is the check itself breaking — a
+# harness fault, not a GPU verdict — so that is loud but not fatal.
+STEP=gpu_check
+set +e
+gline=$(python3 -m pod_harness.gpucheck --no-report 2>&1)
+grc=$?
+set -e
+echo "$gline" | sed 's/^/  gpu      /'
+case "$grc" in
+    0) ;;
+    7) FATAL_RC=7
+       fatal "GPU check failed: $(echo "$gline" | tail -1 | sed 's/^gpu check: FAILED — //')" ;;
+    *) echo "  ! gpu check could not run (exit $grc) — continuing without a verdict" ;;
+esac
+
 # -- 4. data view ----------------------------------------------------------------------
 # The container is TOLD how its data arrives (PODH_MOUNT_KIND) and arranges it: a bind
 # mount or network volume needs only verifying, FUSE needs mounting before anything can
