@@ -70,7 +70,7 @@ jobs:
       - name: Run harness
         run: |
           docker run -d --name lht -p 8000:8000 \
-            -e PODH_API_TOKEN=ci -e MAX_IDLE_SEC=0 pod-harness-test
+            -e PODH_API_TOKEN=ci pod-harness-test
           for i in $(seq 1 30); do
             curl -sf http://localhost:8000/v1/health >/dev/null && break || sleep 1
           done

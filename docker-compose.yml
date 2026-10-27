@@ -89,8 +89,6 @@ services:
       PODH_SERVE_API: "1"
       PODH_API_TOKEN: ${PODH_API_TOKEN:-dev}
       PODH_STATUS_S3: ${PODH_STATUS_S3:-0}
-      MAX_IDLE_SEC: ${MAX_IDLE_SEC:-0}     # 0 = never self-terminate locally
-      MAX_LIFE_SEC: ${MAX_LIFE_SEC:-0}
     ports:
       - "${API_PORT:-8000}:8000"
     command: []                # no workload: idle and serve, per lingua-init
@@ -106,7 +104,6 @@ services:
     environment:
       PODH_API_TOKEN: ${PODH_API_TOKEN:-dev}
       PODH_STATUS_S3: "0"
-      MAX_IDLE_SEC: "0"
     ports:
       - "${HARNESS_PORT:-8000}:8000"
 

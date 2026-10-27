@@ -128,7 +128,7 @@ print('torch', torch.__version__, '| cuda', torch.version.cuda, '| librosa', lib
 # manifest overhead.
 COPY docker/harness/Caddyfile /etc/caddy/Caddyfile
 COPY docker/harness/podh-init docker/harness/podh-preflight \
-     docker/harness/podh-watchdog docker/harness/podh-self-delete \
+     docker/harness/podh-self-delete \
      docker/harness/podh-seed-models docker/harness/podh-mount docker/harness/podh-code \
      docker/harness/podh-publish docker/harness/podh-logs docker/harness/podh-roots \
      docker/harness/podh-prepare \

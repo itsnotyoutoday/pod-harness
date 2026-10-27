@@ -167,11 +167,13 @@ bounded by nothing.
 ### Cost control — read this
 
 An in-pod timeout **cannot terminate a RunPod pod**. Verified on real hardware:
-`runpodctl` invoked from inside a pod returns `Unauthorized`. `MAX_LIFE_SEC` will detect
-the timeout, attempt self-delete, be refused, log the refusal — and the pod keeps billing.
+`runpodctl` invoked from inside a pod returns `Unauthorized`. So the harness carries no
+in-pod deadline; a timer that can only detect, try to self-delete, be refused and log the
+refusal reads like cost control and is not.
 
-Treat the in-pod ceiling as a detector. **Termination must come from outside**, from
-whatever launched the pod. `pod-loader-rpc` does this with a context manager, a wall-clock
+**Termination must come from outside**, from whatever launched the pod. The pod's part is
+to make that easy: it heartbeats only while it produces output, so a hung pod goes quiet,
+and it reports `/done` — with a reason — the moment it is finished. `pod-loader-rpc` does this with a context manager, a wall-clock
 deadline thread, and a sweep for orphans.
 
 ---

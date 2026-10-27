@@ -33,9 +33,7 @@
       "PODH_API_TOKEN": "bearer token for /v1. Absent disables the API.",
       "PODH_API_PORT": "default 8000",
       "PODH_ENTRY": "override the batch entry module (default pod_harness.execute_job)",
-      "PODH_SERVE_API": "0 to skip the control surface",
-      "MAX_LIFE_SEC": "in-pod deadline. DETECTS but cannot terminate — runpodctl inside a pod returns Unauthorized, so cost control must be external.",
-      "MAX_IDLE_SEC": "idle shutdown; 0 disables"
+      "PODH_SERVE_API": "0 to skip the control surface"
     },
     "provider_supplied": {
       "RUNPOD_POD_ID": "set by RunPod; used only for labelling, never for logic"
