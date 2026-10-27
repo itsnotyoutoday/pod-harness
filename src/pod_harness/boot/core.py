@@ -205,6 +205,36 @@ def _writable_dir(p: Path) -> bool:
 COMFY_CANDIDATES = ("/opt/ComfyUI", "/workspace/runpod-slim/ComfyUI", "/workspace/ComfyUI")
 
 
+# -- what the image baked in ------------------------------------------------------------------
+
+def baked_root() -> Optional[Path]:
+    """$PODH_BAKED_ROOT: what an image built for podh-boot installed at build time.
+
+        bin/<name>-<sha12>/   a pinned binary, laid out (marker included) exactly as the
+                              binaries stage lays out its own installs
+        addons.json           {"addons": {name: {"commit", "dir"}}}: checkouts the image made
+                              AND whose requirements.txt it installed, at that commit, there
+
+    Unset (any image not built for it): nothing is baked.
+    """
+    v = os.environ.get("PODH_BAKED_ROOT")
+    return Path(v) if v else None
+
+
+def baked_addons() -> dict:
+    r = baked_root()
+    if r is None:
+        return {}
+    try:
+        obj = json.loads((r / "addons.json").read_text())
+    except (OSError, ValueError):
+        return {}
+    items = obj.get("addons") if isinstance(obj, dict) else None
+    if not isinstance(items, dict):
+        return {}
+    return {k: v for k, v in items.items() if isinstance(v, dict)}
+
+
 class Context:
     def __init__(self, *, boot_dir=None, python: Optional[str] = None, fresh: bool = False,
                  state: Optional[LocalState] = None):

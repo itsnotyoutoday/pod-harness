@@ -101,6 +101,23 @@ except ValueError:
     check("a real, non-empty directory is never replaced by a link", (addon / "real" / "keep.txt").exists())
 check("an addon kit omits absolute links (an unpacking pod must refuse them)",
       addons._no_abs_links(str(addon / "models"), ["ck"]) == ["ck"])
+# -- baked addons: only the exact checkout the image recorded ---------------------------------
+bk = tmp / "baked"
+bk.mkdir()
+bdir = tmp / "nodes" / "Pack"
+check("nothing is baked without PODH_BAKED_ROOT", addons.baked({"name": "Pack", "commit": C}, bdir) is False)
+os.environ["PODH_BAKED_ROOT"] = str(bk)
+check("...nor with no addons.json", addons.baked({"name": "Pack", "commit": C}, bdir) is False)
+(bk / "addons.json").write_text('{"addons": {"Pack": {"commit": "%s", "dir": "%s"}}}' % (C, bdir))
+check("a baked addon is recognised at its commit and directory",
+      addons.baked({"name": "Pack", "commit": C}, bdir) is True)
+check("...not at another commit", addons.baked({"name": "Pack", "commit": "b" * 40}, bdir) is False)
+check("...not in another directory",
+      addons.baked({"name": "Pack", "commit": C}, tmp / "elsewhere" / "Pack") is False)
+(bk / "addons.json").write_text("not json")
+check("a broken addons.json bakes nothing", addons.baked({"name": "Pack", "commit": C}, bdir) is False)
+os.environ.pop("PODH_BAKED_ROOT")
+
 check("kit names fit the server's 64", len(addons._kit_name("lane/" + "x" * 100)) <= 64
       and addons._kit_name("media/comfy") == "addons-media-comfy")
 

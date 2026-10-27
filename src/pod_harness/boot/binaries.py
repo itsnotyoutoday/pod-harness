@@ -19,7 +19,8 @@ become that directory, and the result goes into $PODH_WORKLOAD_ENV (with `$VAR` 
 when it is read), followed by the spec's `workload.env`.
 
 Already installed (the marker names the sha and every binary is there): skipped. That is
-the resume path for a parked pod.
+the resume path for a parked pod. An image that baked the same build in, laid out the same
+way under $PODH_BAKED_ROOT/bin/<name>-<sha12>/, is used in place: no download, no kit.
 """
 from __future__ import annotations
 
@@ -33,7 +34,7 @@ from pathlib import Path
 
 from .. import fetch, heartbeat, kits
 from . import gpu
-from .core import NAME_RE, BootFailure, Context, set_env_lines
+from .core import NAME_RE, BootFailure, Context, baked_root, set_env_lines
 
 SHA_RE = re.compile(r"^[0-9a-f]{64}$")
 MARKER = ".podh-binary.json"
@@ -119,7 +120,11 @@ def install(ctx: Context, it: dict) -> Path:
     if not ctx.fresh and _installed(d, it):
         ctx.line(f"{it['name']}: already installed")
         return d
-    kit = f"binary-{it['name'][:40]}-{it['sha256'][:16]}"     # names are ≤64; key = full sha
+    root = baked_root()
+    if root is not None and _installed(root / "bin" / d.name, it):
+        ctx.line(f"{it['name']}: baked into the image")
+        return root / "bin" / d.name
+    kit =f"binary-{it['name'][:40]}-{it['sha256'][:16]}"     # names are ≤64; key = full sha
     d.parent.mkdir(parents=True, exist_ok=True)
     if heartbeat._cfg()[0]:
         try:

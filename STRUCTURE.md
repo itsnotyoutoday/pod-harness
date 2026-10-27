@@ -250,6 +250,10 @@ $PODH_BOOT_DIR/               default $PODH_WORKSPACE/.podh-boot — survives a 
 $PODH_MODELS_ROOT/<path>      default $PODH_WORKSPACE/models; a file at its final name is
                               complete and verified — partials are <name>.part
 $PODH_ADDONS_ROOT/<name>/     default $PODH_COMFY_ROOT/custom_nodes
+$PODH_BAKED_ROOT/             set by images built for podh-boot (/opt/podh/baked); read-only
+  bin/<name>-<sha12>/         a binary baked at build, laid out like bin/ above: used in place
+  addons.json                 {addons: {name: {commit, dir}}}: checkouts whose requirements
+                              the build installed — a job pinning the same commit skips both
 $PODH_APP_ROOT/               default boot.app.dir, else /opt/app
 ```
 

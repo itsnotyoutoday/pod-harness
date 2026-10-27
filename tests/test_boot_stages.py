@@ -8,6 +8,8 @@ pod-control on 127.0.0.1. Nothing leaves the machine and nothing is installed.
 import hashlib
 import json
 import os
+import shutil
+import subprocess
 import sys
 import time
 import urllib.error
@@ -165,6 +167,55 @@ rq0 = len(fc.requests)
 p = pod.run(bd, args=("--exit-on-fail", "--fresh"), FAKE_SERVE="ok0")
 check("--fresh redoes what the disk says is done",
       p.returncode == 0 and any(r["path"] == "/blob/app.tgz" for r in fc.requests[rq0:]))
+
+# == 2b. an image that baked the binary and the addon in ===========================================
+print("— baked into the image")
+baked = T / "baked"
+bcomfy = T / "BakedComfyUI"
+(bcomfy / "custom_nodes").mkdir(parents=True)
+shutil.copy(pod.comfy / "main.py", bcomfy / "main.py")
+na_dir = bcomfy / "custom_nodes" / "nodeA"
+subprocess.run(["git", "clone", "-q", str(pod.repos / "fake" / "nodeA"), str(na_dir)], check=True)
+subprocess.run(["git", "-C", str(na_dir), "checkout", "-q", "--detach", pod.commit_a], check=True)
+ffd = baked / "bin" / f"ffmpeg-{pod.ff_sha[:12]}"
+ffd.mkdir(parents=True)
+for b in ("ffmpeg", "ffprobe"):
+    shutil.copy(bd / "bin" / f"ffmpeg-{pod.ff_sha[:12]}" / b, ffd / b)
+(ffd / ".podh-binary.json").write_text(json.dumps({"name": "ffmpeg", "sha256": pod.ff_sha,
+                                                   "bins": ["ffmpeg", "ffprobe"]}))
+(baked / "addons.json").write_text(json.dumps(
+    {"addons": {"nodeA": {"commit": pod.commit_a, "dir": str(na_dir)}}}))
+saved_items = pod.addon_items
+pod.addon_items = [dict(saved_items[0])]
+n0, blob_n, claims0 = len(fc.calls), len(fc.blob_gets), len(pod.kits) + len(pod.pending)
+pip_n = len(pod.pip_log.read_text().splitlines())
+p = pod.run(T / "boot-baked", FAKE_SERVE="ok0", PODH_BAKED_ROOT=str(baked),
+            PODH_COMFY_ROOT=str(bcomfy))
+show(p, "baked")
+lines = [b["line"] for pth, b, _ in fc.calls[n0:] if pth == "/v1/boot"]
+pips = pod.pip_log.read_text().splitlines()[pip_n:]
+check("a baked image boots rc 0", p.returncode == 0)
+check("binary: the baked build is used, nothing downloaded",
+      any("ffmpeg: baked into the image" in ln for ln in lines)
+      and all(g[0] != "ffmpeg.tar.gz" for g in fc.blob_gets[blob_n:]))
+check("...and its env points at the baked dir",
+      f"IMAGEIO_FFMPEG_EXE={ffd}/ffmpeg" in (T / "boot-baked" / "workload.env").read_text())
+check("addon: a baked checkout at the pinned commit is not cloned again",
+      any("nodeA" in ln and "baked into the image" in ln for ln in lines))
+check("...its requirements.txt is not run again, its pip extras are",
+      not any("requirements.txt" in x for x in pips) and any("pkg-extra==1.0" in x for x in pips))
+check("...its links are still made", (na_dir / "models" / "a.safetensors").is_symlink())
+check("...and a set of only baked addons publishes no kit",
+      len(pod.kits) + len(pod.pending) == claims0)
+(baked / "addons.json").write_text(json.dumps(
+    {"addons": {"nodeA": {"commit": "f" * 40, "dir": str(na_dir)}}}))
+pip_n = len(pod.pip_log.read_text().splitlines())
+p = pod.run(T / "boot-baked2", FAKE_SERVE="ok0", PODH_BAKED_ROOT=str(baked),
+            PODH_COMFY_ROOT=str(bcomfy))
+check("a checkout the image did not bake at that commit runs its requirements.txt",
+      p.returncode == 0 and any("requirements.txt" in x
+                                for x in pod.pip_log.read_text().splitlines()[pip_n:]))
+pod.addon_items = saved_items
 
 # == 3. failures, stage by stage =================================================================
 print("— failures")

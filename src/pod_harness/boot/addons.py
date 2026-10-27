@@ -24,6 +24,11 @@ A set with a version is kept as kit `addons-<set>` keyed `v<version>` plus the p
 CUDA and image facts: the first pod clones and publishes the trees, later ones unpack them
 (pip still runs — the venv is not in the kit — but against an image that already has most of
 it). An item already installed at its commit with the same definition is skipped (resume).
+
+An image built for podh-boot may bake addons in ($PODH_BAKED_ROOT/addons.json): an item whose
+checkout is already at its commit in the baked directory skips the clone AND its
+requirements.txt (the build installed it, under the image's constraints); `pip` extras,
+links and the probe still run. A set made only of baked items publishes no kit.
 """
 from __future__ import annotations
 
@@ -36,7 +41,7 @@ from pathlib import Path
 from typing import Optional
 
 from .. import fetch, heartbeat, kits
-from .core import NAME_RE, BootFailure, Context, digest, inside, safe_rel
+from .core import NAME_RE, BootFailure, Context, baked_addons, digest, inside, safe_rel
 
 REPO_RE = re.compile(r"^https://github\.com/[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9_.-]+?(?:\.git)?$")
 COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
@@ -170,12 +175,12 @@ def clone(ctx: Context, item: dict, dest: Path) -> None:
         shutil.rmtree(work, ignore_errors=True)
 
 
-def pip_install(ctx: Context, item: dict, d: Path) -> None:
+def pip_install(ctx: Context, item: dict, d: Path, requirements: bool = True) -> None:
     py = ctx.python
     log = ctx.boot_dir / "logs" / f"addon-{item['name']}.log"
     base = [py, "-m", "pip", "install", "--no-input", "--disable-pip-version-check"]
     timeout = float(os.environ.get("PODH_PIP_TIMEOUT") or PIP_TIMEOUT)
-    if item.get("requirements", True) and (d / "requirements.txt").is_file():
+    if requirements and item.get("requirements", True) and (d / "requirements.txt").is_file():
         rc, out = ctx.run(base + ["-r", "requirements.txt"], timeout=timeout, log=log, cwd=str(d))
         if rc != 0:
             raise BootFailure(f"pip install -r requirements.txt "
@@ -199,21 +204,36 @@ def probe(ctx: Context, item: dict, d: Path) -> None:
                           log_tail=out)
 
 
+def baked(item: dict, d: Path) -> bool:
+    """The image checked this addon out HERE at this commit and installed its requirements.
+
+    Its requirements.txt is then not run again: it was, by the build, under the image's
+    constraints — and some packs list things (an unpinned git URL, say) that a pod should
+    not be fetching at boot. The checkout itself is still verified by its git HEAD."""
+    b = baked_addons().get(item["name"])
+    return bool(b) and b.get("commit") == item["commit"] and isinstance(b.get("dir"), str) \
+        and os.path.realpath(b["dir"]) == os.path.realpath(d)
+
+
 def install(ctx: Context, item: dict, root: Path, from_kit: bool) -> str:
-    """'skipped' | 'kit' | 'built'. Raises BootFailure."""
+    """'skipped' | 'baked' | 'kit' | 'built'. Raises BootFailure."""
     d = root / item["name"]
     key = f"addon:{item['name']}"
     want = digest({**{k: item.get(k) for k in ("repo", "commit", "pip", "requirements",
                                                "links", "probe")}, "python": ctx.python})
-    if ctx.marker(key) == want and _head(ctx, d) == item["commit"]:
+    head = _head(ctx, d)
+    if ctx.marker(key) == want and head == item["commit"]:
         return "skipped"
+    requirements = True
     how = "kit"
-    if _head(ctx, d) != item["commit"]:
+    if head != item["commit"]:
         clone(ctx, item, d)
         how = "built"
+    elif baked(item, d):
+        how, requirements = "baked", False
     elif not from_kit:
         how = "built"
-    pip_install(ctx, item, d)
+    pip_install(ctx, item, d, requirements=requirements)
     for ln in item.get("links") or []:
         try:
             src, dst = link_paths(ctx, d, ln)
@@ -305,8 +325,8 @@ def run(ctx: Context) -> None:
                 continue
             raise BootFailure(msg, log_tail=e.log_tail)
         built += how == "built"
-        ctx.line(f"{it['name']} @ {it['commit'][:10]}: "
-                 f"{'already installed' if how == 'skipped' else how} ({time.time() - t0:.0f}s)")
+        said = {"skipped": "already installed", "baked": "baked into the image"}.get(how, how)
+        ctx.line(f"{it['name']} @ {it['commit'][:10]}: {said} ({time.time() - t0:.0f}s)")
 
     if built and kit and kit_key and not from_kit and heartbeat._cfg()[0]:
         publish(ctx, kit, kit_key, root, good, kit_facts)

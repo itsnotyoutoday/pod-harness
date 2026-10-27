@@ -55,6 +55,7 @@
       "PODH_COMFY_ROOT": "the ComfyUI dir; default the first of /opt/ComfyUI, /workspace/runpod-slim/ComfyUI, /workspace/ComfyUI with main.py. Exported.",
       "PODH_COMFY_PY": "the workload's python (addons install into it, probes run with it); default the ComfyUI venv, else python3. Exported.",
       "PODH_ADDONS_ROOT": "where addons are cloned; default $PODH_COMFY_ROOT/custom_nodes, else <boot dir>/addons",
+      "PODH_BAKED_ROOT": "set by images built for podh-boot: what the image installed at build time. bin/<name>-<sha12>/ (a pinned binary with its marker) is used instead of downloading the same sha256; addons.json {addons: {name: {commit, dir}}} marks checkouts whose requirements.txt the build installed, so a job pinning the same commit skips the clone and requirements.txt (pip extras, links and probes still run). Unset: nothing is baked.",
       "PODH_APP_DIR": "same as PODH_APP_ROOT (kept as an alias)",
       "PODH_IMAGE_DIGEST": "the image's digest, if the image knows it; part of every kit's key",
       "PODH_KIT_FORMAT": "zst | gz for kits this pod publishes; default zst when the zstd binary exists",
