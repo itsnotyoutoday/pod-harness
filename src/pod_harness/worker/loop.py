@@ -35,7 +35,7 @@ import time
 from pathlib import Path
 from typing import Optional
 
-from .. import local
+from .. import local, podlogs
 from ..comfy import Cancelled, ComfyError
 from . import api
 from .context import TaskContext
@@ -50,8 +50,18 @@ _NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 _SKIP = (".part", ".aria2", ".tmp", ".podh-tmp")
 
 
+_WORKER_LOG = None
+
+
 def _log(t: str) -> None:
+    """The console, and worker.log in podh-boot's logs dir (so a log request or the
+    end-of-pod upload carries the worker's own lines apart from app.serve's output)."""
+    global _WORKER_LOG
     print(t, flush=True)
+    if _WORKER_LOG is None:
+        d = podlogs.logs_dir()
+        _WORKER_LOG = podlogs.FileLog(d / "worker.log" if d else None)
+    _WORKER_LOG.write(t)
 
 
 class TaskRun:

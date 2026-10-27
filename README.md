@@ -187,6 +187,18 @@ PUTs it to `put_url` in the background: one upload at a time, at low priority, o
 the pod is ready, skipped while it drains or parks, never holding up ready or a task, with
 a boot line when it ends. Paths the manifest lists under `missing` (no source) fail the boot.
 
+**Logs** (APP-API §9). Every log is `<name>.log` in `$PODH_BOOT_DIR/logs`: `boot`
+(podh-boot's own stage lines, timestamped), `workload`, `serve`, `app-setup`,
+`addon-<name>` and, from podh-worker, `worker`. pod-control never connects in: when an app
+asks for a job's logs, the next `/v1/alive` reply carries `logs: {names, lines, req_id}`
+and the pod POSTs the last `lines` lines of each (every log when `names` is empty) to
+`/v1/pod/logs` — colour codes stripped, at most 256 KB per name, the newest lines kept. At
+the end the pod gzips every log and PUTs it into the log store through
+`POST /v1/pod/logs/upload`'s presigned URLs, one at a time within 60 s
+(`PODH_LOG_UPLOAD_S`): before it reports done (so a failed stage always keeps its logs),
+after a drain or park has stopped `app.serve`, and on SIGTERM (8 s). An older server
+(no `logs` in the reply, 404 on either route) or no log store: nothing is sent.
+
 Two ways to run it:
 
 ```bash

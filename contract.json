@@ -411,7 +411,7 @@
           "busy",
           "detail"
         ],
-        "note": "sent every PODH_HEARTBEAT_SEC only while the pod produces output; quiet means stuck or finished. busy/detail: is the app's work running now (podh-boot sends them; the idle clock runs only while busy is false). Reply {extend_until, drain, park, models_rev}; extra reply keys are ignored."
+        "note": "sent every PODH_HEARTBEAT_SEC only while the pod produces output; quiet means stuck or finished. busy/detail: is the app's work running now (podh-boot sends them; the idle clock runs only while busy is false). Reply {extend_until, drain, park, models_rev, logs?}; extra reply keys are ignored."
       },
       {
         "method": "POST",
@@ -567,6 +567,43 @@
             "container_started_at"
           ],
           "note": "first before gpu_check (image = <name>:<version> from /opt/podh/manifest.json or $PODH_IMAGE_MANIFEST; image_digest from $PODH_IMAGE_DIGEST, else the manifest's digest when present — an image cannot hold its own; container_started_at = epoch of the container's PID 1 start, else podh-boot's), again after gpu_check (vram_gb number, cuda, driver, gpu = first card's name) and after the NVENC probe (nvenc bool); every post repeats what is known. Best effort; any answer is ignored; a 400/422 resends without image, image_digest, container_started_at."
+        },
+        {
+          "method": "POST",
+          "path": "/v1/pod/logs",
+          "client": "podlogs.py",
+          "required": [
+            "logs"
+          ],
+          "optional": [
+            "req_id"
+          ],
+          "reply": {
+            "200": [
+              "job_id",
+              "stored",
+              "cleared"
+            ],
+            "404": "an older server: log requests are ignored from then on"
+          },
+          "note": "answers the `logs: {names, lines, req_id}` an /v1/alive reply carries (APP-API §9), once per req_id: logs[] = {name, lines[], truncated} — the last `lines` lines of each <name>.log in the logs dir ($PODH_LOGS_DIR, else $PODH_BOOT_DIR/logs, else $PODH_LOG_DIR), all of them when names is empty, at most 16, ANSI colour codes stripped, a carriage-returned line's last frame, at most 256 KB per name (the newest lines; truncated when that cut asked-for lines). Sent off the heartbeat's thread."
+        },
+        {
+          "method": "POST",
+          "path": "/v1/pod/logs/upload",
+          "client": "podlogs.py",
+          "required": [
+            "names"
+          ],
+          "reply": {
+            "200": [
+              "urls",
+              "refs",
+              "expires_s"
+            ],
+            "404": "an older server or no LOG_STORE: the upload is skipped"
+          },
+          "note": "names[] = {name, size}: the gzipped size of each log. Each log is then PUT (Content-Type application/gzip, no pod token) to urls[name], one at a time, all within PODH_LOG_UPLOAD_S (default 60 s) overall; logs over PODH_LOG_UPLOAD_MAX_MB (256) send their newest bytes. podh-boot uploads before it reports done (a failed stage included), once a drain/park has stopped app.serve, and on SIGTERM (PODH_LOG_UPLOAD_TERM_S, 8 s)."
         },
         {
           "method": "GET",

@@ -21,7 +21,7 @@ import time
 from pathlib import Path
 from typing import Optional
 
-from .. import heartbeat
+from .. import heartbeat, podlogs
 from ..local import LocalState
 
 #: Seconds each stage may take unless the spec says otherwise (boot.limits.<stage>, and the
@@ -45,8 +45,14 @@ class BootFailure(Exception):
         self.reason, self.rc, self.stage, self.log_tail = reason, rc, stage, log_tail
 
 
+#: podh-boot's own stage log, `boot.log` in the logs dir (set by Context): the console
+#: lines again, timestamped, so a log request or the end-of-pod upload carries them.
+BOOT_LOG = podlogs.FileLog(None)
+
+
 def say(text: str) -> None:
     print(f"[podh-boot] {text}", flush=True)
+    BOOT_LOG.write(text)
 
 
 def tail(path, n: int = TAIL_BYTES) -> Optional[str]:
@@ -247,6 +253,10 @@ class Context:
         self.boot_dir = Path(bd)
         self.boot_dir.mkdir(parents=True, exist_ok=True)
         (self.boot_dir / "logs").mkdir(exist_ok=True)
+        self.logs_dir = self.boot_dir / "logs"
+        global BOOT_LOG
+        if BOOT_LOG.path != self.logs_dir / "boot.log":
+            BOOT_LOG = podlogs.FileLog(self.logs_dir / "boot.log")
         self.models_root = Path(os.environ.get("PODH_MODELS_ROOT") or ws / "models")
         self.workload_env = Path(os.environ.get("PODH_WORKLOAD_ENV")
                                  or self.boot_dir / "workload.env")
@@ -276,6 +286,7 @@ class Context:
         self.dl_bytes = 0             # downloaded in the current stage (count())
         self.dl_files = 0
         self.stage_t0: Optional[float] = None
+        self.logs_uploaded: Optional[dict] = None   # the last end-of-pod upload's result
 
     # -- configuration --------------------------------------------------------------------
     def load(self, spec: dict) -> None:
@@ -438,6 +449,20 @@ class Context:
         os.replace(tmp, self._markers)
 
     # -- the end ---------------------------------------------------------------------------------
+    def upload_logs(self, why: str, budget_s: Optional[float] = None) -> Optional[dict]:
+        """Gzip and upload every log to the log store (podlogs.upload_all), bounded by
+        `budget_s` (default PODH_LOG_UPLOAD_S, 60 s). Best effort, never raises; skipped
+        without a control plane or log store (an older server answers 404)."""
+        url, _, pod_id = heartbeat._cfg()
+        if not url or not pod_id:
+            return None
+        say(f"logs: uploading the full logs ({why})")
+        try:
+            self.logs_uploaded = podlogs.upload_all(self.logs_dir, budget_s=budget_s, say=say)
+        except Exception as exc:       # noqa: BLE001 — never in the way of the ending
+            self.logs_uploaded = {"skipped": f"{type(exc).__name__}: {exc}"}
+        return self.logs_uploaded
+
     def finish(self, rc: int, reason: Optional[str] = None, stage: Optional[str] = None,
                log_tail: Optional[str] = None) -> dict:
         """End the pod's work exactly once: stop reporting alive, report done, stop children.
@@ -462,6 +487,10 @@ class Context:
         say(f"{mark} done rc={rc}" + (f" stage={stage}" if stage else "")
             + (f": {reason}" if reason else ""))
         if url and pod_id:
+            # BEFORE done: done terminates the pod within seconds, and the logs of a failed
+            # stage are the ones most worth keeping. Bounded, so it never holds the ending up
+            # for long.
+            self.upload_logs("failed" if rc else "finished")
             r = heartbeat.done(rc, reason=reason, stage=stage, log_tail=log_tail)
             out["requested"] = r is not None
             if r is None:

@@ -36,7 +36,7 @@ import time
 from pathlib import Path
 from typing import Optional
 
-from .. import heartbeat
+from .. import heartbeat, podlogs
 from ..local import LocalServer, LocalState, start_beat
 from . import addons, app, binaries, gpu, models, serve, workload
 from .core import BootFailure, Context, run_stage, say, stage_numbers
@@ -171,12 +171,18 @@ def main(argv: Optional[list] = None) -> int:
             return True
         return w.answers(timeout=5)
 
+    # Log requests ride on the /v1/alive reply (APP-API §9); an older server never sends one.
+    podlogs.watch(ctx.logs_dir, say=say)
     interval = float(os.environ.get("PODH_HEARTBEAT_SEC") or 60)
     _, wake = start_beat(state, interval=min(interval, 90), live=live)
     srv.on_busy = wake
 
     def on_term(signum, _frame):
         say(f"signal {signum}: stopping what this pod runs")
+        if ctx.result is None:
+            # The provider is stopping the container: a short upload, inside its grace.
+            ctx.upload_logs(f"signal {signum}",
+                            budget_s=float(os.environ.get("PODH_LOG_UPLOAD_TERM_S") or 8))
         for thing in (ctx.serve, ctx.workload):
             if thing is not None:
                 try:
@@ -201,10 +207,19 @@ def main(argv: Optional[list] = None) -> int:
     if ctx.boot.get("models"):
         models.Watcher(ctx).start()
 
+    drained = []
+
+    def drain() -> None:
+        if ctx.serve is not None:
+            ctx.serve.drain()
+        if not ctx.finished.is_set():
+            ctx.upload_logs("drained")       # the pod idles now, until pod-control stops it
+
     def on_reply(reply: dict) -> None:
-        if (reply.get("drain") or reply.get("park")) and ctx.serve is not None:
+        if (reply.get("drain") or reply.get("park")) and not drained:
+            drained.append(True)
             import threading
-            threading.Thread(target=ctx.serve.drain, daemon=True).start()
+            threading.Thread(target=drain, daemon=True).start()
     heartbeat.on_reply(on_reply)
 
     try:

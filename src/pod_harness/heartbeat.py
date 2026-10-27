@@ -587,6 +587,9 @@ def main(argv: list | None = None) -> int:
     if live is None:
         print("  [heartbeat] no --activity files: beating unconditionally until stopped",
               flush=True)
+    from . import podlogs
+    if podlogs.logs_dir() is not None:
+        podlogs.watch()             # log requests on the /v1/alive reply (APP-API §9)
     t = start(a.interval, live)
     if t is None:
         return 0
