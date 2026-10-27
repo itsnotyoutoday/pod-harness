@@ -11,10 +11,21 @@ set -eu
 umask 077
 mkdir -p /root/.ssh
 touch /root/.ssh/authorized_keys
+# Only lines that ARE public keys. A cloud's "SSH public key" setting can hold anything a
+# person pasted into it — a private key was found there once (2026-10-27): its lines were
+# fed to grep as options and appended here. Anything else is skipped, counted, never echoed.
+skipped=0
 printf '%s\n' "$PUBLIC_KEY" | while IFS= read -r k; do
     [ -n "$k" ] || continue
-    grep -qxF "$k" /root/.ssh/authorized_keys || printf '%s\n' "$k" >> /root/.ssh/authorized_keys
+    case "$k" in
+        ssh-ed25519\ *|ssh-rsa\ *|ecdsa-sha2-nistp*\ *|sk-ssh-ed25519@openssh.com\ *|sk-ecdsa-sha2-nistp256@openssh.com\ *) ;;
+        *) skipped=$((skipped + 1)); continue ;;
+    esac
+    grep -qxF -e "$k" /root/.ssh/authorized_keys || printf '%s\n' "$k" >> /root/.ssh/authorized_keys
 done
+case "$PUBLIC_KEY" in
+    *"PRIVATE KEY"*) echo "start-sshd: WARNING: PUBLIC_KEY holds a PRIVATE key; it was ignored. Remove it from the cloud account's SSH key setting and rotate that key." >&2 ;;
+esac
 chmod 700 /root/.ssh; chmod 600 /root/.ssh/authorized_keys
 ssh-keygen -A >/dev/null
 mkdir -p /run/sshd; chmod 0755 /run/sshd
