@@ -328,7 +328,15 @@ empty segments refused),
 
 `podh-catalogue check <workflow.json ...>` asks ComfyUI's `/object_info` whether every node
 type the workflows use exists (exit 1 naming the missing ones) — run it in `app.run` to
-fail the boot instead of the first task.
+fail the boot instead of the first task. `--object-info FILE` checks against a saved
+catalogue instead, so an app can check a workflow against an image without a pod.
+
+`podh-catalogue dump --out FILE [--url URL | --start | --object-info FILE]` writes the
+compact node catalogue: for every node class its inputs' and outputs' types, category and
+the module (node pack) it comes from — `{"format": 1, "count", "packs": {module: n},
+"nodes": {class: {"in", "opt"?, "out", "out_names"?, "cat"?, "pack"?, "output_node"?}}}`
+(choice lists become `COMBO`). `--start` starts ComfyUI `--cpu` on a free 127.0.0.1 port,
+waits for `/object_info` and stops it — no GPU needed, which is how the images build theirs.
 
 ### Images: podh-comfyui and podh-comfyui-video
 

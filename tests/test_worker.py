@@ -491,6 +491,70 @@ p = subprocess.run([sys.executable, "-c", "from pod_harness.comfy import catalog
 check("...and exits 1 naming a missing one", p.returncode == 1 and "LoadImage" in p.stdout)
 cf.node_types.add("LoadImage")
 
+# podh-catalogue dump
+INFO = {"KSampler": {"input": {"required": {"model": ["MODEL"], "seed": ["INT", {"default": 0}],
+                                            "sampler_name": [["euler", "dpmpp_2m"], {}]},
+                               "optional": {"noise": ["NOISE"]}, "hidden": {"x": "PROMPT"}},
+                     "output": ["LATENT"], "output_name": ["LATENT"], "category": "sampling",
+                     "python_module": "nodes"},
+        "VHS_VideoCombine": {"input": {"required": {"images": ["IMAGE"]}}, "output": [],
+                             "category": "video", "output_node": True,
+                             "python_module": "custom_nodes.ComfyUI-VideoHelperSuite"}}
+cat = comfy.compact_catalogue(INFO, {"image": "podh-x", "version": None})
+check("compact_catalogue: types per input, COMBO for choice lists, outputs, pack, counts",
+      cat["count"] == 2 and cat["image"] == "podh-x" and "version" not in cat
+      and cat["nodes"]["KSampler"] == {"in": {"model": "MODEL", "seed": "INT",
+                                              "sampler_name": "COMBO"},
+                                       "opt": {"noise": "NOISE"}, "out": ["LATENT"],
+                                       "cat": "sampling", "pack": "nodes"}
+      and cat["nodes"]["VHS_VideoCombine"].get("output_node") is True
+      and cat["packs"] == {"custom_nodes.ComfyUI-VideoHelperSuite": 1, "nodes": 1})
+saved = T / "oi.json"
+saved.write_text(json.dumps(INFO))
+out = T / "cat" / "catalogue.json"
+
+
+def dump(*args):
+    return subprocess.run([sys.executable, "-c", "from pod_harness.comfy import catalogue_main as m; "
+                           "raise SystemExit(m())", "dump", "--out", str(out), *args],
+                          env=env, capture_output=True, text=True, timeout=120)
+
+
+p = dump("--object-info", str(saved), "--require-pack", "ComfyUI-VideoHelperSuite")
+check("podh-catalogue dump --object-info writes the compact catalogue",
+      p.returncode == 0 and json.loads(out.read_text())["count"] == 2)
+p = dump("--object-info", str(saved), "--require-pack", "ComfyUI-Missing")
+check("...--require-pack fails when no node comes from that pack", p.returncode == 1
+      and "ComfyUI-Missing" in p.stdout)
+p = dump("--url", cf.url, "--min-nodes", "3")
+check("...from a running ComfyUI (--url)", p.returncode == 0
+      and set(json.loads(out.read_text())["nodes"]) == set(cf.node_types))
+fake_root = T / "fakecomfy"
+fake_root.mkdir()
+(fake_root / "main.py").write_text(
+    "import json, sys, time\n"
+    "from http.server import BaseHTTPRequestHandler, HTTPServer\n"
+    "a = sys.argv\n"
+    "assert '--cpu' in a and a[a.index('--listen') + 1] == '127.0.0.1'\n"
+    "port = int(a[a.index('--port') + 1])\n"
+    "time.sleep(1.5)                       # loading custom nodes\n"
+    f"INFO = json.loads(open({str(saved)!r}).read())\n"
+    "class H(BaseHTTPRequestHandler):\n"
+    "    def do_GET(self):\n"
+    "        b = json.dumps(INFO).encode() if self.path == '/object_info' else b'{}'\n"
+    "        self.send_response(200); self.send_header('Content-Length', str(len(b)))\n"
+    "        self.end_headers(); self.wfile.write(b)\n"
+    "    def log_message(self, *x): pass\n"
+    "HTTPServer(('127.0.0.1', port), H).serve_forever()\n")
+t0 = time.time()
+p = dump("--start", "--root", str(fake_root), "--python", sys.executable, "--timeout", "60")
+check("...--start runs ComfyUI --cpu on 127.0.0.1, waits for /object_info, and stops it",
+      p.returncode == 0 and json.loads(out.read_text())["count"] == 2 and time.time() - t0 < 30)
+(fake_root / "main.py").write_text("import sys; print('boom: a node exploded'); sys.exit(3)\n")
+p = dump("--start", "--root", str(fake_root), "--python", sys.executable, "--timeout", "30")
+check("...and fails with ComfyUI's output when it exits instead", p.returncode == 2
+      and "boom" in p.stdout)
+
 # -- the command ---------------------------------------------------------------------------------
 print("— podh-worker --once, as a process")
 ft.queue.append(task("t-cli"))

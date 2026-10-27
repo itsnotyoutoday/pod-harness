@@ -585,8 +585,157 @@ def missing_nodes(workflow: dict, object_info: dict) -> list:
     return sorted(t for t in types if t not in object_info)
 
 
+CATALOGUE_FORMAT = 1
+
+
+def _io_type(spec) -> str:
+    """An input's type from object_info: `[["a", "b"], {...}]` (a choice list) is COMBO."""
+    t = spec[0] if isinstance(spec, (list, tuple)) and spec else spec
+    if isinstance(t, (list, tuple)):
+        return "COMBO"
+    return str(t) if t is not None else "*"
+
+
+def compact_catalogue(info: dict, meta: Optional[dict] = None) -> dict:
+    """object_info, small: for each node class, its inputs' and outputs' types, category and
+    the module (node pack) that provides it. Choice lists are dropped (they name the files
+    the pod had, which at build is none).
+
+        {"format": 1, "count": n, "packs": {module: n}, "nodes": {class: {
+            "in": {name: type}, "opt"?: {name: type}, "out": [type], "out_names"?: [...],
+            "cat"?: category, "pack"?: module, "output_node"?: true}}}
+    """
+    nodes, packs = {}, {}
+    for cls, n in sorted((info or {}).items()):
+        if not isinstance(n, dict):
+            continue
+        inp = n.get("input") or {}
+        e: dict = {"in": {k: _io_type(v) for k, v in (inp.get("required") or {}).items()}}
+        opt = {k: _io_type(v) for k, v in (inp.get("optional") or {}).items()}
+        if opt:
+            e["opt"] = opt
+        e["out"] = [_io_type([o]) for o in (n.get("output") or [])]
+        names = list(n.get("output_name") or [])
+        if names and names != e["out"]:
+            e["out_names"] = [str(x) for x in names]
+        if n.get("category"):
+            e["cat"] = str(n["category"])
+        mod = n.get("python_module")
+        if mod:
+            e["pack"] = str(mod)
+            packs[str(mod)] = packs.get(str(mod), 0) + 1
+        if n.get("output_node"):
+            e["output_node"] = True
+        nodes[str(cls)] = e
+    out = {"format": CATALOGUE_FORMAT, "count": len(nodes), "packs": dict(sorted(packs.items())),
+           "nodes": nodes}
+    if meta:
+        out = {**{k: v for k, v in meta.items() if v}, **out}
+    return out
+
+
+def _free_port() -> int:
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+    return port
+
+
+def object_info_from_start(root, python: Optional[str] = None, port: Optional[int] = None,
+                           timeout: float = 600, args: Optional[list] = None, log=print) -> dict:
+    """Start ComfyUI on the CPU on 127.0.0.1 (as the image's quick-test does, but serving),
+    wait for /object_info, return it, and stop ComfyUI. Every custom node is loaded exactly
+    as on a pod; no GPU is needed. Raises ComfyError when it never answers."""
+    import signal
+    import subprocess
+    import sys
+    import tempfile
+    root = Path(root)
+    if not (root / "main.py").is_file():
+        raise ComfyError(f"no ComfyUI at {root} (main.py missing)", stage="catalogue")
+    port = port or _free_port()
+    cmd = [python or sys.executable, "main.py", "--cpu", "--listen", "127.0.0.1",
+           "--port", str(port), "--disable-auto-launch", *(args or [])]
+    logf = tempfile.NamedTemporaryFile(prefix="podh-catalogue-", suffix=".log", delete=False)
+    p = subprocess.Popen(cmd, cwd=str(root), stdout=logf, stderr=subprocess.STDOUT,
+                         start_new_session=True)
+    c = ComfyClient(f"http://127.0.0.1:{port}")
+    end = time.time() + timeout
+    try:
+        while time.time() < end:
+            if p.poll() is not None:
+                raise ComfyError(f"ComfyUI exited {p.returncode} before answering:\n"
+                                 + Path(logf.name).read_text(errors="replace")[-3000:],
+                                 stage="catalogue")
+            try:
+                st, obj = c.get("/object_info", timeout=60)
+                if st == 200 and isinstance(obj, dict):
+                    return obj
+            except (OSError, ValueError):
+                pass
+            time.sleep(1)
+        raise ComfyError(f"ComfyUI did not answer /object_info within {timeout:.0f}s:\n"
+                         + Path(logf.name).read_text(errors="replace")[-3000:], stage="catalogue")
+    finally:
+        try:
+            os.killpg(p.pid, signal.SIGTERM)
+            p.wait(timeout=20)
+        except (ProcessLookupError, PermissionError):
+            pass
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(p.pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
+            p.wait(timeout=10)
+        logf.close()
+        try:
+            os.unlink(logf.name)
+        except OSError:
+            pass
+
+
+def _dump(a) -> int:
+    try:
+        if a.object_info:
+            info = json.loads(Path(a.object_info).read_text())
+        elif a.start:
+            root = a.root or os.environ.get("PODH_COMFY_ROOT") or "/opt/ComfyUI"
+            py = a.python or os.environ.get("PODH_COMFY_PY")
+            info = object_info_from_start(root, py, a.port, a.timeout)
+        else:
+            info = ComfyClient(a.url).object_info()
+    except (ComfyError, OSError, ValueError) as e:
+        print(f"podh-catalogue dump: {e}")
+        return 2
+    cat = compact_catalogue(info, {"image": a.image, "version": a.version})
+    if cat["count"] < a.min_nodes:
+        print(f"podh-catalogue dump: only {cat['count']} node class(es), expected at least "
+              f"{a.min_nodes}")
+        return 1
+    missing = [p for p in a.require_pack or [] if not any(
+        m == p or m.endswith("." + p) or m.endswith("/" + p) for m in cat["packs"])]
+    if missing:
+        print(f"podh-catalogue dump: no nodes from {', '.join(missing)} "
+              f"(packs seen: {', '.join(cat['packs'])})")
+        return 1
+    out = Path(a.out)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    tmp = out.with_name(out.name + ".tmp")
+    tmp.write_text(json.dumps(cat, separators=(",", ":"), sort_keys=True) + "\n")
+    os.replace(tmp, out)
+    print(f"podh-catalogue: {cat['count']} node classes from {len(cat['packs'])} module(s) "
+          f"→ {out} ({out.stat().st_size} bytes)")
+    return 0
+
+
 def catalogue_main(argv: Optional[list] = None) -> int:
-    """podh-catalogue check <workflow.json ...> [--url URL]: exit 1 if a node is missing."""
+    """podh-catalogue check <workflow.json ...> [--url URL]: exit 1 if a node is missing.
+    podh-catalogue dump --out FILE [--url URL | --start | --object-info FILE]: the compact
+    node catalogue (compact_catalogue) of a running ComfyUI, of one started for the purpose
+    on the CPU (--start: what an image build runs, no GPU needed), or of a saved
+    /object_info."""
     import argparse
     ap = argparse.ArgumentParser(prog="podh-catalogue")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -594,7 +743,25 @@ def catalogue_main(argv: Optional[list] = None) -> int:
     c.add_argument("workflows", nargs="+")
     c.add_argument("--url", help="ComfyUI (default $PODH_COMFY_URL, else 127.0.0.1:8188)")
     c.add_argument("--object-info", help="a saved /object_info JSON instead of asking ComfyUI")
+    d = sub.add_parser("dump", help="write this ComfyUI's node catalogue (compact object_info)")
+    d.add_argument("--out", required=True, help="the catalogue JSON to write")
+    src = d.add_mutually_exclusive_group()
+    src.add_argument("--url", help="a running ComfyUI (default $PODH_COMFY_URL, else 127.0.0.1:8188)")
+    src.add_argument("--start", action="store_true",
+                     help="start ComfyUI --cpu on a free 127.0.0.1 port, ask it, stop it")
+    src.add_argument("--object-info", help="a saved /object_info JSON")
+    d.add_argument("--root", help="ComfyUI for --start (default $PODH_COMFY_ROOT, /opt/ComfyUI)")
+    d.add_argument("--python", help="its python for --start (default $PODH_COMFY_PY, this one)")
+    d.add_argument("--port", type=int, help="port for --start (default: a free one)")
+    d.add_argument("--timeout", type=float, default=600, help="seconds --start waits (600)")
+    d.add_argument("--min-nodes", type=int, default=1, help="fail below this many classes")
+    d.add_argument("--require-pack", action="append",
+                   help="fail unless some node comes from this module (repeatable)")
+    d.add_argument("--image", help="recorded in the catalogue")
+    d.add_argument("--version", help="recorded in the catalogue")
     a = ap.parse_args(argv)
+    if a.cmd == "dump":
+        return _dump(a)
     if a.object_info:
         info = json.loads(Path(a.object_info).read_text())
     else:
