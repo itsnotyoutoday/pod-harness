@@ -81,6 +81,19 @@ def _check_control_plane(c: dict) -> list[str]:
             if f'"{key}"' not in hb_src:
                 out.append(f"control_plane {call['path']}: field {key!r} never appears in "
                            f"heartbeat.py")
+    for call in (cp.get("pod_calls") or {}).get("calls", []):
+        client = ROOT / "src" / "pod_harness" / call["client"]
+        prefix = call["path"].split("{")[0]
+        if not client.is_file():
+            out.append(f"control_plane {call['path']}: client {call['client']} does not exist")
+            continue
+        text = client.read_text()
+        if prefix not in text:
+            out.append(f"control_plane: {call['client']} never calls {call['path']}")
+        for key in call.get("required", []) + call.get("optional", []) + call.get("query", []):
+            if f'"{key}"' not in text and f"'{key}'" not in text:
+                out.append(f"control_plane {call['path']}: field {key!r} never appears in "
+                           f"{call['client']}")
     try:
         from pod_harness import gpucheck, heartbeat
         mine = {"reason": heartbeat.MAX_REASON, "stage": heartbeat.MAX_STAGE,

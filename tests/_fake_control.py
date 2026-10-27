@@ -143,7 +143,10 @@ class FakeControl:
                     except OSError:
                         pass
                     return
-                self.wfile.write(part)
+                try:
+                    self.wfile.write(part)
+                except (BrokenPipeError, ConnectionResetError):
+                    pass                # the client gave up on purpose (a test of that)
 
             def _send(self, code, obj):
                 data = json.dumps(obj).encode()

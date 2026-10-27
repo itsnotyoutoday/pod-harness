@@ -454,6 +454,76 @@
     },
     "exit_codes": {
       "7": "the GPU is unusable (podh-gpucheck; podh-init reports it as done rc 7, stage gpu_check)"
+    },
+    "pod_calls": {
+      "_comment": [
+        "The /v1/pod/* routes: what a booting pod ASKS the control plane for. Same token and pin as `calls`.",
+        "No bytes pass through the control plane: it answers with presigned URLs, and those URLs are fetched WITHOUT the pod token.",
+        "`client` names the module that makes the call; assert_contract.py checks the path appears there."
+      ],
+      "calls": [
+        {
+          "method": "GET",
+          "path": "/v1/pod/kits/{name}",
+          "client": "kits.py",
+          "query": [
+            "key",
+            "python",
+            "torch",
+            "cuda",
+            "image"
+          ],
+          "reply": {
+            "200": [
+              "url",
+              "sha256",
+              "size"
+            ],
+            "404": "no kit for this key and these facts yet"
+          },
+          "note": "name ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$. The archive is verified against sha256 before it is unpacked; tar.zst or tar.gz, detected by magic bytes."
+        },
+        {
+          "method": "POST",
+          "path": "/v1/pod/kits/{name}",
+          "client": "kits.py",
+          "required": [
+            "key",
+            "sha256",
+            "size"
+          ],
+          "optional": [
+            "format",
+            "python",
+            "torch",
+            "cuda",
+            "image"
+          ],
+          "reply": {
+            "200": [
+              "url",
+              "headers?"
+            ],
+            "409": "another pod holds the claim; the caller does not publish"
+          },
+          "note": "claim the build and get a presigned PUT for the archive"
+        },
+        {
+          "method": "POST",
+          "path": "/v1/pod/kits/{name}/commit",
+          "client": "kits.py",
+          "required": [
+            "key",
+            "sha256",
+            "size"
+          ],
+          "reply": {
+            "200": [],
+            "404": "tolerated: a server that verifies uploads on its own"
+          },
+          "note": "sent after the PUT succeeds"
+        }
+      ]
     }
   }
 }

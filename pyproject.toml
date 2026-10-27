@@ -39,6 +39,8 @@ podh-serve = "pod_harness.sidecar:main"
 podh-report = "pod_harness.report:main"
 # Is the GPU usable? Exit 7 if not. Also `--scan-log FILE` for supervisors.
 podh-gpucheck = "pod_harness.gpucheck:main"
+# Cached tarballs (a venv, a binary, an addon set): get exits 2 when there is none yet.
+podh-kit = "pod_harness.kits:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
