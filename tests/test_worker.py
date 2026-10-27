@@ -151,13 +151,13 @@ run()
 check("the same input (a new signature) comes from the cache, not the bucket",
       ft.dones["t-cache"]["ok"] and len([g for g in fc.blob_gets if g[0] == "start.png"]) == gets0)
 fc.blobs["ref.png"] = b"REF"
-ft.queue.append(task("t-store", inputs={"start": "store://media/x/ref.png"},
+ft.queue.append(task("t-store", inputs={"start": "store://in/x/ref.png"},
                      workflow={"ref": "workflows/t2i.json", "map": "workflows/t2i.map.json",
                                "patch": {"seed": 5, "image": "{input:start}"}}))
 run()
 g = cf.prompts[-1][1]
 check("a store:// input is signed through pod-control and fetched",
-      ft.dones["t-store"]["ok"] and any(s[0] == "t-store" and s[1].get("refs") == ["store://media/x/ref.png"]
+      ft.dones["t-store"]["ok"] and any(s[0] == "t-store" and s[1].get("refs") == ["store://in/x/ref.png"]
                                         for s in ft.signs))
 check("workflow.map names patch the mapped inputs", g["3"]["inputs"]["seed"] == 5
       and g["5"]["inputs"]["image"] == "podh/t-store_start.png")
