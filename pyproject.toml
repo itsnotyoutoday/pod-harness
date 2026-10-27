@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pod-harness"
-version = "0.2.0"
+version = "0.5.5"
 description = "The in-pod execution engine: stage model, verification, resume, status"
 # 3.9 because that is what ships on macOS and what this actually runs on — every module
 # imports under it, since the annotations are all postponed via __future__. Claiming 3.10

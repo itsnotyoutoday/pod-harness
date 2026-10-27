@@ -288,9 +288,39 @@ def uploader(ctx: Context) -> StoreUploader:
         return u
 
 
+_INFLIGHT_LOCK = threading.Lock()
+_INFLIGHT: dict = {}                      # path -> [Event, error], one download per path
+
+
 def fetch_one(ctx: Context, man: Manifest, path: str, deadline: Optional[float],
               line) -> Optional[str]:
-    """Download one path; None on success, else the error. Never raises."""
+    """Download one path; None on success, else the error. Never raises.
+
+    One download per path at a time: the boot, the models_rev watcher and the worker's
+    POST /models/fetch can all ask for the same file at once. A second caller waits for the
+    first and takes its outcome — two writers on one .part would race on the rename (the
+    loser saw FileNotFoundError and reported a file that was in fact present as failed).
+    """
+    key = (str(ctx.models_root), path)
+    with _INFLIGHT_LOCK:
+        slot = _INFLIGHT.get(key)
+        mine = slot is None
+        if mine:
+            slot = _INFLIGHT[key] = [threading.Event(), None]
+    if not mine:
+        slot[0].wait()
+        return slot[1]
+    try:
+        slot[1] = _fetch_one(ctx, man, path, deadline, line)
+        return slot[1]
+    finally:
+        with _INFLIGHT_LOCK:
+            _INFLIGHT.pop(key, None)
+        slot[0].set()
+
+
+def _fetch_one(ctx: Context, man: Manifest, path: str, deadline: Optional[float],
+               line) -> Optional[str]:
     m = man.items.get(path)
     try:
         if m and present(ctx, m):
