@@ -260,6 +260,10 @@ $PODH_BAKED_ROOT/             set by images built for podh-boot (/opt/podh/baked
   bin/<name>-<sha12>/         a binary baked at build, laid out like bin/ above: used in place
   addons.json                 {addons: {name: {commit, dir}}}: checkouts whose requirements
                               the build installed — a job pinning the same commit skips both
+/opt/podh/manifest.json       what the image is (write_manifest.py; $PODH_IMAGE_MANIFEST
+                              overrides the path); podh-boot reports its image:version
+/opt/podh/catalogue.json      the image's ComfyUI node classes (podh-catalogue dump);
+                              both are also release assets, see README "Read it without a pod"
 $PODH_APP_ROOT/               default boot.app.dir, else /opt/app
   podh-handlers.json          {"handlers": {kind: "module:Class"}} for podh-worker; workflow
                               refs and maps in tasks are paths relative to this root
