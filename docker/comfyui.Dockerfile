@@ -48,9 +48,10 @@
 #
 # docker/comfyui/lock.txt pins every python package (see lock.in to regenerate) and is
 # passed as a constraints file to every install; cuda.txt pins torch's CUDA wheels.
-# docker/comfyui/guard.txt — the torch trio and numpy — is installed as $PIP_CONSTRAINT, so
-# it binds every pip run in the container, including the addons stage's at boot: a pack
-# that asks for another torch fails loudly instead of replacing the CUDA build.
+# docker/comfyui/guard.txt — the torch trio and numpy — is /opt/venv/pip.conf's constraint,
+# so it binds every pip run from ComfyUI's venv, the addons stage's at boot included (a pack
+# that asks for another torch fails loudly instead of replacing the CUDA build), and no
+# other environment an app builds on the pod.
 #
 # ## Layers
 #
@@ -176,8 +177,12 @@ RUN --mount=type=bind,source=docker/comfyui/guard.txt,target=/tmp/guard.txt \
     set -eux; \
     pip install --no-input --no-deps --index-url https://download.pytorch.org/whl/cu128 \
         $(grep -E '^(torch|torchvision|torchaudio)==' /tmp/guard.txt); \
-    install -m 0644 /tmp/guard.txt /tmp/cuda.txt /opt/podh/
-ENV PIP_CONSTRAINT=/opt/podh/guard.txt
+    install -m 0644 /tmp/guard.txt /tmp/cuda.txt /opt/podh/; \
+    printf '[install]\nconstraint = /opt/podh/guard.txt\n' > /opt/venv/pip.conf
+# The guard binds pip run from ComfyUI's venv ONLY: pip reads <venv>/pip.conf for the venv
+# it runs in. It was ENV PIP_CONSTRAINT, which also bound every OTHER environment an app
+# builds on the pod (an app's own worker venv with its own numpy pin failed to resolve,
+# 2026-10-27), and a guard for one venv has no business there.
 
 # --- 6. ComfyUI at its release tag, and pod-harness's dependencies ------------------------
 # Cloned by tag and then held to the commit the tag named when this was written: a moved
@@ -276,6 +281,12 @@ RUN --mount=type=bind,source=pyproject.toml,target=/tmp/ph-src/pyproject.toml \
         --dist transformers comfy-kitchen comfyui-frontend-package; \
     ffmpeg -hide_banner -version | head -1; ffprobe -hide_banner -version | head -1; \
     podh-boot --help >/dev/null; \
+    python -m pip config list | grep -q "install.constraint='/opt/podh/guard.txt'" \
+        || { echo "FAIL: ComfyUI's venv is not guarded"; exit 1; }; \
+    test -z "${PIP_CONSTRAINT:-}" || { echo "FAIL: PIP_CONSTRAINT is set globally"; exit 1; }; \
+    python3 -m venv /tmp/appvenv && ! /tmp/appvenv/bin/python -m pip config list | grep -q constraint \
+        || { echo "FAIL: an app's own venv inherits the guard"; exit 1; }; \
+    rm -rf /tmp/appvenv; \
     sh /opt/podh/quick-test "$QUICK_TEST_STRICT"
 
 # --- 9. identity: what this image is, readable without running it ------------------------

@@ -410,8 +410,9 @@ streaming from a network volume is likely slower than the RAM copy it saves.
 weights, are not run). A pack that fetches its weights on first use when they are not where
 it looks (LatentSyncWrapper's `checkpoints/`) should be given them with addon `links`.
 
-**pip is guarded.** `PIP_CONSTRAINT=/opt/podh/guard.txt` pins the torch trio and numpy for
-every pip run in the container, the addons stage's included: an addon that asks for another
+**ComfyUI's venv is guarded.** `/opt/venv/pip.conf` names `/opt/podh/guard.txt`, which pins the torch trio and numpy for
+every pip run from ComfyUI's venv (`/opt/venv`), the addons stage's included, and for nothing else: an app's own venv
+on the pod resolves its own pins. In the guarded venv, an addon that asks for another
 torch or `numpy<2` fails with pip's resolution error instead of replacing the CUDA build.
 
 **CUDA comes from pip, not from the base image.** There is no system CUDA: the

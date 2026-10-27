@@ -9,7 +9,7 @@
 # pass its tag.
 #
 # Everything about the base holds here unchanged: one interpreter, the lock as constraints,
-# the guard as PIP_CONSTRAINT, packs baked the addons stage's way and recorded in
+# the guard in /opt/venv/pip.conf, packs baked the addons stage's way and recorded in
 # $PODH_BAKED_ROOT/addons.json, models never baked, CUDA from torch's pip wheels.
 #
 # Three layers on top of the base's, ordered as there: the face stack (changes rarely), then

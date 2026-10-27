@@ -23,7 +23,7 @@ mkdir -p /run/sshd; chmod 0755 /run/sshd
 umask 022
 /opt/venv/bin/python -I - > /etc/profile.d/podh-env.sh <<'PY'
 import os, re, shlex
-keep = re.compile(r"^(PATH|VIRTUAL_ENV|LD_LIBRARY_PATH|PIP_CONSTRAINT|IMAGEIO_FFMPEG_EXE|NVIDIA_\w+|PODH_\w+)$")
+keep = re.compile(r"^(PATH|VIRTUAL_ENV|LD_LIBRARY_PATH|IMAGEIO_FFMPEG_EXE|NVIDIA_\w+|PODH_\w+)$")
 secret = re.compile(r"TOKEN|SECRET|KEY|PASSW|CREDENTIAL", re.I)
 for k, v in sorted(os.environ.items()):
     if keep.match(k) and not secret.search(k):

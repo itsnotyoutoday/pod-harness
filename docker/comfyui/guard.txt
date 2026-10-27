@@ -1,6 +1,6 @@
-# The image's pip guard, installed at /opt/podh/guard.txt and named by PIP_CONSTRAINT, so it
-# binds every pip run in the container: the build's, the addons stage's at boot, and a node
-# pack that pip-installs from inside ComfyUI.
+# The image's pip guard, installed at /opt/podh/guard.txt and named by /opt/venv/pip.conf (ComfyUI's venv only), so it
+# binds every pip run from ComfyUI's venv: the build's, the addons stage's at boot, and a node
+# pack that pip-installs from inside ComfyUI. An app's own venv on the pod is not bound.
 #
 # Only the ABI everything compiled is built against. A requirement that would replace one
 # of these (an addon pinning another torch, or numpy<2) makes pip fail loudly instead of
