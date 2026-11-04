@@ -351,6 +351,22 @@ the module (node pack) it comes from — `{"format": 1, "count", "packs": {modul
 (choice lists become `COMBO`). `--start` starts ComfyUI `--cpu` on a free 127.0.0.1 port,
 waits for `/object_info` and stops it — no GPU needed, which is how the images build theirs.
 
+**Prebuilt bundles.** A task's claim may list `bundles` (pod-control TASK-API §12): environments built ahead of time
+against this image's digest and stored as `tar.zst` with a sha256. Before the task's inputs, the worker does this
+for each bundle (`worker/bundles.py`):
+
+1. It refuses a bundle built for another image.
+2. It uses the cache under `$PODH_BUNDLES_DIR` (default `/workspace/bundles`), or downloads, verifies and extracts
+   the bundle. Nothing is installed.
+3. It starts it:
+   - `comfy_nodes`: linked into ComfyUI's `custom_nodes`, with its `site/` listed after site-packages, and ComfyUI
+     restarted once;
+   - `service`: `bin/serve` is run on its port until its health answers.
+
+It reports `usage.bundles`, and claims with `bundle:<name>` in `have.loaded`, so pods that already hold a bundle
+get the tasks that need it. A bundle holds `bundle.json` (name, kind, image_digest), `custom_nodes/` + `site/` or
+`venv/` + `bin/serve`, and an optional `bin/probe`.
+
 ### Images: podh-comfyui and podh-comfyui-video
 
 GPU images whose entrypoint is `podh-boot` (`/opt/podh/entry` → `tini -- podh-boot`, ports 8188 and 22), built by

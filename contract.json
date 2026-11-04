@@ -1021,8 +1021,10 @@
     "env": {
       "PODH_INPUT_CACHE_GB": "input cache budget across tasks (default 2)",
       "PODH_COMFY_URL": "ComfyUI (podh-boot exports it)",
-      "PODH_NVENC": "claimed as nvenc"
+      "PODH_NVENC": "claimed as nvenc",
+      "PODH_BUNDLES_DIR": "prebuilt bundle cache (default /workspace/bundles)"
     },
+    "bundles": "claim.bundles (pod-control TASK-API §12): before inputs, each is matched to this pod's image digest, taken from the cache or fetched, sha256-verified and extracted (nothing installed); comfy_nodes are linked into ComfyUI's custom_nodes with their site/ in a .pth after site-packages and ComfyUI restarts once; a service runs entry with PORT, MODELS_DIR, BUNDLE_DIR until its health answers. usage.bundles [{name, fresh, bytes, pull_s, start_s, sha256}], phases.bundles_s; held bundles are claimed as have.loaded bundle:<name>",
     "handlers_file": "$PODH_APP_ROOT/podh-handlers.json: {\"handlers\": {kind: \"module:Class\"}}; built in: comfy (outputs matching outputs.keep, each named subfolder/filename under ComfyUI's output directory)",
     "handler": [
       "prepare(task, ctx) → prepared",

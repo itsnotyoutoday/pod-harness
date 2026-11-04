@@ -38,6 +38,7 @@ from typing import Optional
 from .. import local, podlogs
 from ..comfy import Cancelled, ComfyError
 from . import api
+from .bundles import Bundles
 from .context import TaskContext
 from .handlers import TaskFailed, load_handlers
 
@@ -83,6 +84,7 @@ class TaskRun:
         self.beat_stop = threading.Event()
         self.held_s = 0.0
         self.vram_peak = 0
+        self.bundles: list = []         # usage.bundles: what ensure() did for this task
 
 
 class InputCache:
@@ -134,7 +136,8 @@ class Worker:
                  kinds: Optional[list] = None, poll_s: float = 5.0, stall_s: float = 600.0,
                  interrupt_grace: float = 20.0, app_root=None, workdir=None,
                  models_root=None, model_timeout_s: float = 3600.0, use_ws: bool = True,
-                 local_client: Optional[local.Client] = None, log=_log):
+                 local_client: Optional[local.Client] = None, log=_log,
+                 bundles: Optional[Bundles] = None):
         self.capacity = max(1, int(capacity))
         self.prefetch = max(0, int(prefetch))
         self.once = once
@@ -168,6 +171,8 @@ class Worker:
         self.busy: Optional[bool] = None
         self.reports: list = []             # (task_id, outcome), for logs and tests
         self.threads: list = []
+        self.bundles = bundles or Bundles(restart_comfy=lambda: self.local.restart_workload(),
+                                          others_running=self._others_running, log=log)
 
     # -- the loop -------------------------------------------------------------------------
     def run(self) -> int:
@@ -208,10 +213,17 @@ class Worker:
         self._set_busy(force=False)
         for th in self.threads:
             th.join(timeout=5)
+        self.bundles.close()
         if self.broken:
             self.log(f"[podh-worker] exiting 1: {self.broken}")
             return 1
         return 0
+
+    def _others_running(self) -> bool:
+        """More than one task executing (the caller's own included): a ComfyUI restart now
+        would kill another task's run."""
+        with self.lock:
+            return sum(1 for t in self.tasks.values() if t.started and not t.closed) > 1
 
     def _set_busy(self, force: Optional[bool] = None) -> None:
         with self.lock:
@@ -250,7 +262,8 @@ class Worker:
         return max(0.0, until - time.time())
 
     def _claim(self, n: int, st: dict) -> None:
-        status, obj = api.claim(n, self.have_models(), list(self.loaded), self.nvenc,
+        held = list(self.loaded) + [x for x in self.bundles.loaded() if x not in self.loaded]
+        status, obj = api.claim(n, self.have_models(), held, self.nvenc,
                                 self.kinds or None, self._window_s(st))
         if status != 200 or not isinstance(obj, dict):
             if status not in (204,):
@@ -479,6 +492,11 @@ class Worker:
             if not 200 <= st < 300:
                 return self._release(t, f"start answered {st or 'nothing'}")
             ctx.check()
+            if task.get("bundles"):
+                phase = "bundles"
+                t.bundles = self.bundles.ensure(task.get("bundles"), ctx.log)
+                lap("bundles_s")
+                ctx.check()
             phase = "inputs"
             self._fetch_inputs(t)
             lap("fetch_s")
@@ -520,6 +538,8 @@ class Worker:
             ctx.log(f"failed at {error['stage']}: {error['reason'][:300]}")
             error["log_tail"] = ctx.log_tail()
         usage = {"phases": phases, "held_s": round(t.held_s, 3), "prefetched": t.prefetched}
+        if t.bundles:
+            usage["bundles"] = t.bundles
         if t.vram_peak:
             usage["vram_peak_mb"] = t.vram_peak
         if error and retryable is None:

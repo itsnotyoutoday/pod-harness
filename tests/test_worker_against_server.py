@@ -408,6 +408,71 @@ check(f"the app gets the uploaded log's ref, size and a presigned GET ({d.status
 check(f"…and the pod reported done after the upload (job {REG.job(jid).get('state')})",
       REG.job(jid).get("state") not in ("running", "booting"))
 
+# -- prebuilt bundles (pod-control TASK-API §12): a node bundle the task needs ------------------
+print("— a task that needs a prebuilt node bundle")
+import io as _io  # noqa: E402
+import subprocess as _sp  # noqa: E402
+import tarfile as _tar  # noqa: E402
+from pod_harness.worker.bundles import Bundles  # noqa: E402
+
+DIG = "sha256:" + "ab" * 32
+_buf = _io.BytesIO()
+with _tar.open(fileobj=_buf, mode="w") as _tf:
+    for _p, _d in {"bundle.json": json.dumps({"name": "nodes1", "kind": "comfy_nodes",
+                                              "image_digest": DIG}).encode(),
+                   "custom_nodes/NodeA/__init__.py": b"X = 1\n", "site/libfoo/__init__.py": b""}.items():
+        _ti = _tar.TarInfo(_p); _ti.size = len(_d); _tf.addfile(_ti, _io.BytesIO(_d))
+BLOB = _sp.run(["zstd", "-q", "-c"], input=_buf.getvalue(), capture_output=True, check=True).stdout
+BSHA = hashlib.sha256(BLOB).hexdigest()
+fc.blobs["models/bundles/nodes1/abab/nodes1.tar.zst"] = BLOB
+BT = {**TEMPLATE, "image": f"repo/img@{DIG}",
+      "boot": {**TEMPLATE["boot"], "bundles": {"store": "models", "allowed": ["nodes1"]}}}
+r = app.put("/v1/pools/media/bvideo", headers=A, json={"job": BT, "scale": {"max_pods": 1}, "match": {}})
+check(f"a pool opts in to bundles ({r.status_code})", r.status_code == 200)
+bj = pools.launch(CFG, REG, service.LOADERS, pools.get(REG, "media", "bvideo"), reason="test",
+                  now=time.time())
+for _ in range(5):
+    queue.dispatch_once(CFG, REG, service.LOADERS)
+    if REG.job(bj)["pod_id"]:
+        break
+app.post("/v1/boot", json={"line": "up", "stage": "ready"}, headers={"X-Podh-Token": TOK[bj]})
+os.environ.update(PODH_CONTROL_TOKEN=TOK[bj], RUNPOD_POD_ID=REG.job(bj)["pod_id"])
+cf.mode, cf.steps, cf.step_delay, cf.outputs = "ok", 1, 0.01, ["out_00001.png"]
+NEED = {"name": "nodes1", "kind": "comfy_nodes", "ref": "store://models/bundles/nodes1/abab/nodes1.tar.zst",
+        "sha256": BSHA, "size_bytes": len(BLOB), "image_digest": DIG, "start": {"comfyui_restart": True}}
+st, body = submit("t-bundle", pool="bvideo", needs={"bundles": [NEED], "loads": ["bundle:nodes1"]})
+check(f"pod-control takes a task naming the bundle ({st})", st == 202)
+RESTARTS = []
+SITE = T / "comfy-site"
+SITE.mkdir()
+bnd = Bundles(cache_dir=T / "bundles", image_digest=DIG, comfy_root=T / "comfy", comfy_site=SITE,
+              restart_comfy=lambda: (RESTARTS.append(1) or (200, {"restarted": True})))
+w = Worker(poll_s=0.2, interrupt_grace=1.0, once=True, prefetch=0, bundles=bnd)
+box = {}
+th = threading.Thread(target=lambda: box.setdefault("rc", w.run()), daemon=True)
+th.start(); th.join(60)
+v = task("t-bundle")
+ub = ((v.get("usage") or {}).get("bundles") or [{}])[0]
+check(f"the task succeeded with its bundle (state {v.get('state')}, error {v.get('error')})",
+      v.get("state") == "succeeded")
+check("the pod fetched it through the presigned GET, verified it and restarted ComfyUI once",
+      ("models", "GET", "bundles/nodes1/abab/nodes1.tar.zst") in SIGNED and RESTARTS == [1]
+      and (T / "comfy" / "custom_nodes" / "NodeA").is_symlink())
+check("usage.bundles reports it: fresh, bytes, pull and start seconds, sha256",
+      ub.get("name") == "nodes1" and ub.get("fresh") is True and ub.get("bytes") == len(BLOB)
+      and ub.get("sha256") == BSHA and "pull_s" in ub and "start_s" in ub)
+st, body = submit("t-bundle2", pool="bvideo", needs={"bundles": [NEED], "loads": ["bundle:nodes1"]})
+w = Worker(poll_s=0.2, interrupt_grace=1.0, once=True, prefetch=0, bundles=bnd)
+box = {}
+th = threading.Thread(target=lambda: box.setdefault("rc", w.run()), daemon=True)
+th.start(); th.join(60)
+v2 = task("t-bundle2")
+jv = app.get(f"/v1/jobs/{bj}", headers=A).json()
+check("the next task finds it cached (no fetch, no restart)",
+      v2.get("state") == "succeeded" and RESTARTS == [1]
+      and ((v2.get("usage") or {}).get("bundles") or [{}])[0].get("fresh") is False)
+check(f"pod-control shows the pod holding it ({jv.get('bundles')})", jv.get("bundles") == ["nodes1"])
+
 server.should_exit = True
 cf.close(); fc.close()
 print(f"\n{sum(ok)}/{len(ok)} passed")
