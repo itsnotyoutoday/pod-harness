@@ -1,4 +1,0 @@
-{"boot": {"gpu_check": true,
-          "models": [],
-          "workload": {"comfyui": {"port": 8188, "up_timeout_s": 600}}},
- "policy": {}}
