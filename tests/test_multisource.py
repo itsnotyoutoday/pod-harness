@@ -108,7 +108,7 @@ fetch.download(fc.blob_url("m.bin"), d / "x2.bin")
 c = last_cmd()
 check("PODH_FETCH_ARIA2_ARGS adds flags after the defaults, before the URLs",
       "--disk-cache=64M" in c and c.index("--min-split-size=4M") > c.index("--min-split-size=16M")
-      and c.index("--disk-cache=64M") < c.index("-o"))
+      and c.index("--disk-cache=64M") < c.index(" -o "))
 os.environ.pop("PODH_FETCH_ARIA2_ARGS")
 fetch.download(fc.blob_url("m.bin"), d / "g.bin", headers={"Authorization": "Bearer t"})
 check("headers go on the command for a single URL", "--header=Authorization: Bearer t" in last_cmd())
