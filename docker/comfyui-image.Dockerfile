@@ -112,22 +112,16 @@ ENV DEBIAN_FRONTEND=noninteractive \
 # mount the driver, as the nvidia/cuda images had it.
 ENV LD_LIBRARY_PATH=/opt/venv/lib/python3.12/site-packages/nvidia/cudnn/lib:/opt/venv/lib/python3.12/site-packages/nvidia/cublas/lib:/opt/venv/lib/python3.12/site-packages/nvidia/cuda_runtime/lib:/opt/venv/lib/python3.12/site-packages/nvidia/cuda_nvrtc/lib:/opt/venv/lib/python3.12/site-packages/nvidia/cufft/lib:/opt/venv/lib/python3.12/site-packages/nvidia/curand/lib:/opt/venv/lib/python3.12/site-packages/nvidia/cusolver/lib:/opt/venv/lib/python3.12/site-packages/nvidia/cusparse/lib:/opt/venv/lib/python3.12/site-packages/nvidia/nvjitlink/lib:/usr/local/nvidia/lib:/usr/local/nvidia/lib64
 
-# --- 1. system, the venv, ffmpeg ----------------------------------------------------------
-# libgl1 + libglib2.0-0: opencv's non-headless build (one of the packs asks for it). aria2:
-# the models stage's parallel ranged downloads. zstd: kits are published as tar.zst when it
-# exists. git stays: podh-boot's addons stage clones, and recognises a baked pack by its
-# HEAD. openssh-server: for start-sshd; the host keys its install generates are deleted
-# (every container makes its own), and logins are key-only. gcc + libc6-dev + python3-dev:
-# not for building wheels (every pinned wheel is binary) but for Triton, which compiles its
-# GPU kernels' host launcher with a C compiler AT RUN TIME — torch.compile, Triton-backed ops
-# and SageAttention fail without one. ~80 MB.
-# safe.directory: a pod that runs as another uid must still be able to read a baked
-# checkout's HEAD, or it would re-clone over it.
-#
-# ffmpeg: BtbN's static GPL build (NVENC included), sha256-verified, into
-# $PODH_BAKED_ROOT/bin/ffmpeg-<sha12>/ with the binaries stage's own marker, so a boot spec
-# pinning this sha256 finds it; /usr/local/bin links to it for everything else.
-RUN set -eux; \
+# --- 1. ONE layer: the system, the venv, torch's CUDA wheels, torch, ComfyUI, pod-harness's dependencies
+# (fewer layers = fewer registry round trips and unpacks on every pull; it used to be six layers).
+# In order: libgl1/aria2/git/ssh and a C compiler (Triton compiles at run time); the venv; the
+# nvidia-*-cu12 wheels exactly as cuda.txt pins them (--no-deps, checked against the pins); torch,
+# torchvision, torchaudio from the cu128 index; the guard (pip.conf, this venv only); ComfyUI cloned by
+# tag and held to its commit; its requirements and a worker's common needs under lock.txt + cuda.txt.
+RUN --mount=type=bind,source=docker/comfyui/cuda.txt,target=/tmp/cuda.txt \
+    --mount=type=bind,source=docker/comfyui/guard.txt,target=/tmp/guard.txt \
+    --mount=type=bind,source=docker/comfyui/lock.txt,target=/tmp/lock.txt \
+    set -eux; \
     apt-get update -qq; \
     apt-get install -y -qq --no-install-recommends \
         python3 python3-venv \
@@ -141,55 +135,18 @@ RUN set -eux; \
     git config --system --add safe.directory '*'; \
     python3 -m venv /opt/venv; \
     /opt/venv/bin/python -m pip install --no-input "pip==${PIP_VERSION}"; \
-    mkdir -p /opt/podh/baked /workspace/models
-
-# --- 2–4. torch's CUDA: the nvidia-*-cu12 wheels, in three layers ---------------------------
-# Exactly the versions cuda.txt pins (torch's own requirements), from PyPI, --no-deps; which
-# wheel lands in which layer is decided here, by name, to keep the three about one size.
-# Section 6 resolves torch's requirements against cuda.txt, so a torch that wanted anything
-# else would fail there rather than download a second copy into a later layer.
-RUN --mount=type=bind,source=docker/comfyui/cuda.txt,target=/tmp/cuda.txt \
-    set -eux; \
+    mkdir -p /opt/podh/baked /workspace/models; \
     pip install --no-input --no-deps --only-binary=:all: \
-        $(grep -E '^(nvidia-cudnn-cu12|nvidia-nccl-cu12)==' /tmp/cuda.txt)
-RUN --mount=type=bind,source=docker/comfyui/cuda.txt,target=/tmp/cuda.txt \
-    set -eux; \
+        $(grep -E '^(nvidia-cudnn-cu12|nvidia-nccl-cu12)==' /tmp/cuda.txt); \
     pip install --no-input --no-deps --only-binary=:all: \
-        $(grep -E '^(nvidia-cublas-cu12|nvidia-cusparse-cu12|nvidia-cusolver-cu12)==' /tmp/cuda.txt)
-RUN --mount=type=bind,source=docker/comfyui/cuda.txt,target=/tmp/cuda.txt \
-    set -eux; \
+        $(grep -E '^(nvidia-cublas-cu12|nvidia-cusparse-cu12|nvidia-cusolver-cu12)==' /tmp/cuda.txt); \
     pip install --no-input --no-deps --only-binary=:all: \
         $(grep -vE '^(#|$|nvidia-cudnn-cu12==|nvidia-nccl-cu12==|nvidia-cublas-cu12==|nvidia-cusparse-cu12==|nvidia-cusolver-cu12==)' /tmp/cuda.txt); \
-    python -I -B -c 'import importlib.metadata as m, sys; p = [l.strip().split("==") for l in open(sys.argv[1]) if "==" in l and not l.startswith("#")]; b = [n for n, v in p if m.version(n) != v]; sys.exit("FAIL: not as cuda.txt pins: %s" % b if b else 0)' /tmp/cuda.txt
-
-# --- 5. torch, from the cu128 index -------------------------------------------------------
-# The exact trio (the guard's), --no-deps (its CUDA is already in; its small pure-python
-# requirements come with section 6, under the lock), and only from download.pytorch.org:
-# the +cu128 local version exists nowhere else. guard.txt and cuda.txt go into the image
-# here, with the torch they describe.
-RUN --mount=type=bind,source=docker/comfyui/guard.txt,target=/tmp/guard.txt \
-    --mount=type=bind,source=docker/comfyui/cuda.txt,target=/tmp/cuda.txt \
-    set -eux; \
+    python -I -B -c 'import importlib.metadata as m, sys; p = [l.strip().split("==") for l in open(sys.argv[1]) if "==" in l and not l.startswith("#")]; b = [n for n, v in p if m.version(n) != v]; sys.exit("FAIL: not as cuda.txt pins: %s" % b if b else 0)' /tmp/cuda.txt; \
     pip install --no-input --no-deps --index-url https://download.pytorch.org/whl/cu128 \
         $(grep -E '^(torch|torchvision|torchaudio)==' /tmp/guard.txt); \
     install -m 0644 /tmp/guard.txt /tmp/cuda.txt /opt/podh/; \
-    printf '[install]\nconstraint = /opt/podh/guard.txt\n' > /opt/venv/pip.conf
-# The guard binds pip run from ComfyUI's venv ONLY: pip reads <venv>/pip.conf for the venv
-# it runs in. It was ENV PIP_CONSTRAINT, which also bound every OTHER environment an app
-# builds on the pod (an app's own worker venv with its own numpy pin failed to resolve,
-# 2026-10-27), and a guard for one venv has no business there.
-
-# --- 6. ComfyUI at its release tag, pod-harness's dependencies, and a worker's common needs
-# (ImageHash, cryptography, PyWavelets, httpx: the base gets httpx from its node packs, this image has
-# none, so it is named here): an app's pod worker runs in THIS venv, with these
-# versions, instead of building a second environment at boot. ------------------------
-# Cloned by tag and then held to the commit the tag named when this was written: a moved
-# tag fails the build rather than shipping something else under the same name.
-# ComfyUI-Manager is deliberately absent: what a pod runs is decided by its boot spec.
-# The torch trio is named again so that its own requirements (filelock, sympy, … and the
-# CUDA wheels, already present) resolve here, under the lock AND cuda.txt.
-RUN --mount=type=bind,source=docker/comfyui/lock.txt,target=/tmp/lock.txt \
-    set -eux; \
+    printf '[install]\nconstraint = /opt/podh/guard.txt\n' > /opt/venv/pip.conf; \
     install -m 0644 /tmp/lock.txt /opt/podh/lock.txt; \
     while read -r l; do \
         case "$l" in ''|'#'*) continue;; esac; \
@@ -208,24 +165,16 @@ RUN --mount=type=bind,source=docker/comfyui/lock.txt,target=/tmp/lock.txt \
     rm -rf /root/.cache; \
     python -B -c "import torch, torchvision, torchaudio; print('torch', torch.__version__, 'cuda', torch.version.cuda, 'cudnn', torch.backends.cudnn.version())"
 
-# --- 8. pod-harness, the small files, and the image proves itself ---------------------------
-# Last, because it changes most: a harness change rebuilds this layer and nothing else. Its
-# dependencies are already in (section 6), so this is the package alone, built from a
-# scratch copy of the bind-mounted source (pip builds inside the tree it is given).
-#
-# Then, with no GPU at build time: one interpreter; imports and versions against the lock
-# and cuda.txt; every CUDA library resolvable (ldd) and every LD_LIBRARY_PATH directory
-# present; cv2's build; every baked addon at its commit (check_image.py); ffmpeg;
-# podh-boot; no baked ssh host key; and ComfyUI's own CI start — --quick-test-for-ci --cpu
-# loads every custom node and exits. ComfyUI only LOGS a custom node that failed to
-# import; here it fails the build (QUICK_TEST_STRICT=0 reports it instead, for a pack that
-# cannot import without a GPU). No bytecode is written and what the test writes into the
-# tree is cleaned, so the checks leave nothing behind.
-#
-# Started on its own (no control plane, no spec), the image still boots: GPU check, then
-# ComfyUI on :8188 with models under /workspace/models (standalone.json). Under a control
-# plane the job's spec wins.
+# --- 2. ONE layer: pod-harness, the small files, the image proves itself, and its identity files
+# (manifest.json, catalogue.json). Changes with every commit, so it is last. The checks run with no GPU:
+# imports and versions against the lock and cuda.txt, every CUDA library resolvable, podh-boot, no baked
+# ssh host key, the guard on ComfyUI's venv only, and ComfyUI's own CI start (QUICK_TEST_STRICT=0
+# reports a custom node that cannot import without a GPU instead of failing).
 ARG QUICK_TEST_STRICT=1
+ARG BASE_IMAGE_REF
+ARG IMAGE_VERSION=dev
+ARG GIT_SHA=unknown
+ARG SOURCE_URL=
 RUN --mount=type=bind,source=pyproject.toml,target=/tmp/ph-src/pyproject.toml \
     --mount=type=bind,source=src,target=/tmp/ph-src/src \
     --mount=type=bind,source=docker/comfyui,target=/tmp/ctx \
@@ -251,31 +200,12 @@ RUN --mount=type=bind,source=pyproject.toml,target=/tmp/ph-src/pyproject.toml \
     python3 -m venv /tmp/appvenv && ! /tmp/appvenv/bin/python -m pip config list | grep -q constraint \
         || { echo "FAIL: an app's own venv inherits the guard"; exit 1; }; \
     rm -rf /tmp/appvenv; \
-    sh /opt/podh/quick-test "$QUICK_TEST_STRICT"
-
-# --- 9. identity: what this image is, readable without running it ------------------------
-# /opt/podh/manifest.json (write_manifest.py: name, version, revision, base, python, torch,
-# CUDA/cuDNN, ComfyUI tag+commit, baked node packs and binaries, feature flags) and
-# /opt/podh/catalogue.json (podh-catalogue dump --start: every node class ComfyUI loads, with
-# its input/output types — ComfyUI started --cpu just long enough to answer /object_info).
-# Podh-boot reports the manifest's image:version as a pod fact; CI publishes both files per
-# digest (build-comfyui.yml) so an app can read them without a pod.
-#
-# Its own layer, last, and the only one that sees the per-build ARGs (version, revision):
-# declaring them earlier would rebuild every layer after the declaration on every commit.
-# What the catalogue run writes into the ComfyUI tree is cleaned, as after the quick test.
-ARG BASE_IMAGE_REF
-ARG IMAGE_VERSION=dev
-ARG GIT_SHA=unknown
-ARG SOURCE_URL=
-RUN --mount=type=bind,source=docker/comfyui/write_manifest.py,target=/tmp/write_manifest.py \
-    set -eux; \
-    export PYTHONDONTWRITEBYTECODE=1; \
+    sh /opt/podh/quick-test "$QUICK_TEST_STRICT"; \
     podh-catalogue dump --start --out /opt/podh/catalogue.json --timeout 900 \
         --image podh-comfyui-image --version "$IMAGE_VERSION" --min-nodes 300; \
     git -C /opt/ComfyUI clean -fdxq -e custom_nodes; \
     rm -rf /root/.cache; \
-    python /tmp/write_manifest.py --image podh-comfyui-image --version "$IMAGE_VERSION" \
+    python /tmp/ctx/write_manifest.py --image podh-comfyui-image --version "$IMAGE_VERSION" \
         --revision "$GIT_SHA" --source "$SOURCE_URL" --base "$BASE_IMAGE_REF" \
         --comfyui-tag "$COMFYUI_TAG" --catalogue /opt/podh/catalogue.json \
         --out /opt/podh/manifest.json; \
