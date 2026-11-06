@@ -30,7 +30,8 @@ A manifest entry may come as {path, in_store: false, source, put_url, sha256?, s
 instead of {path, url}: the app's store lacks the file, and the pod is the fallback. The
 file is downloaded straight from `source` (https://, hf://<owner>/<repo>/<file>@<rev> with
 $HF_TOKEN, civitai://<version id> with $CIVITAI_TOKEN — fetch.resolve_source), resumable and
-checked like any other, and used at once. Then, in the BACKGROUND, it is PUT to `put_url`
+checked like any other, and used at once. Only when the pod has PODH_UPLOAD_BACK=1 (off by
+default; a plain download never writes anywhere), it is then, in the BACKGROUND, PUT to `put_url`
 so the next pod finds it in the store: one upload at a time, at low priority, only once the
 pod is ready, never while it drains or parks, and never holding up ready or a task. Each
 upload ends in a boot line ("uploaded back to the store" or why not). Paths the manifest
@@ -196,13 +197,12 @@ def from_source(ctx: Context, path: str, m: dict, deadline: Optional[float], lin
     _remember(ctx, path, m.get("sha256"))
     size = dest.stat().st_size
     ctx.count(size)
-    if m.get("put_url"):
-        line(f"{path}: not in store: fetched from source ({size / 1e6:.0f} MB in "
-             f"{time.time() - t0:.0f}s); uploading back to the store in the background")
+    took = f"{size / 1e6:.0f} MB in {time.time() - t0:.0f}s"
+    if m.get("put_url") and os.environ.get("PODH_UPLOAD_BACK") == "1":
+        line(f"{path}: fetched from source ({took}); PODH_UPLOAD_BACK is on, so it is copied to the store in the background")
         uploader(ctx).add(path, dest, m["put_url"])
     else:
-        line(f"{path}: not in store: fetched from source ({size / 1e6:.0f} MB in "
-             f"{time.time() - t0:.0f}s); no put_url, so it stays on this pod only")
+        line(f"{path}: fetched from source ({took}); nothing is written back to the store")
     return None
 
 
@@ -338,7 +338,10 @@ def _mirrors(m: dict) -> list:
     two copies equal, so then the store's link goes alone."""
     urls = [m["url"]]
     if m.get("sha256"):
-        urls = _public_urls(m) + urls
+        pub = _public_urls(m)
+        if os.environ.get("PODH_SKIP_STORE") == "1" and pub:
+            return pub                # a measurement knob: the public sources alone, the store's link unused
+        urls = pub + urls
     return urls
 
 

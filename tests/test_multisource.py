@@ -149,6 +149,12 @@ check("one unresolvable source in the list is skipped, the rest are used",
       bm._mirrors({"url": store, "sources": ["ftp://nope", pub2], "sha256": sha}) == [pub2, store])
 check("the source list of an entry", bm._source_list({"sources": [pub, pub2]}) == [pub, pub2]
       and bm._source_list({"source": pub}) == [pub] and bm._source_list({"url": store}) == [])
+os.environ["PODH_SKIP_STORE"] = "1"
+check("PODH_SKIP_STORE=1: the public sources alone",
+      bm._mirrors({"url": store, "sources": [pub, pub2], "sha256": sha}) == [pub, pub2])
+check("PODH_SKIP_STORE=1 with no public source still uses the store",
+      bm._mirrors({"url": store, "sha256": sha}) == [store])
+os.environ.pop("PODH_SKIP_STORE")
 os.environ["HF_TOKEN"] = "hf_secret"
 check("a source that needs a token is never mixed with the store's link",
       bm._mirrors({"url": store, "source": "hf://o/r/x.safetensors@abc123", "sha256": sha}) == [store])
