@@ -86,7 +86,7 @@ class Manifest:
             items = {}
             for m in raw:
                 if not isinstance(m, dict) or not isinstance(m.get("path"), str) or not (
-                        m.get("url") or m.get("source")):
+                        m.get("url") or m.get("source") or m.get("sources")):
                     raise BootFailure(f"models manifest: bad item {_redact(m)!r}", stage="models")
                 try:
                     inside(self.ctx.models_root, m["path"], "model path")
@@ -165,17 +165,26 @@ def _redact(m) -> dict:
 def from_source(ctx: Context, path: str, m: dict, deadline: Optional[float], line) -> Optional[str]:
     """The §10 fallback: the store lacks `path`; fetch it from its source, then queue the
     upload back to the store. None on success, else the error."""
+    srcs = _source_list(m)
     try:
-        url, headers = fetch.resolve_source(m.get("source"))
+        resolved = [fetch.resolve_source(x) for x in srcs]
     except ValueError as e:
         return str(e)
-    scheme = str(m.get("source")).split(":", 1)[0]
+    if not resolved:
+        return "no source"
+    public = [u for u, h in resolved if not h]
+    if len(public) > 1 and not m.get("sha256"):
+        public = public[:1]                  # nothing proves two copies equal: one source
+    url, headers = (public, None) if public else (resolved[0][0], resolved[0][1])
+    scheme = str(srcs[0]).split(":", 1)[0]
     line(f"{path}: not in the store — fetching it from its source ({scheme})")
     t0 = time.time()
     try:
         dest = inside(ctx.models_root, path, "model path")
         fetch.download(url, dest, size=m.get("size"), sha256=m.get("sha256"),
                        headers=headers or None, deadline=deadline)
+        if isinstance(url, list) and len(url) > 1:
+            line(f"{path}: fetched from {len(url)} sources at once")
     except fetch.LinkExpired as e:
         hint = {"hf": " (is HF_TOKEN set and allowed this repo?)",
                 "civitai": " (is CIVITAI_TOKEN set?)"}.get(scheme, "")
@@ -301,17 +310,35 @@ _INFLIGHT_LOCK = threading.Lock()
 _INFLIGHT: dict = {}                      # path -> [Event, error], one download per path
 
 
-def _mirrors(m: dict) -> list:
-    """The URLs that serve this model's bytes: its public source first (when it can be used with
-    no token) and the store's link. One list, one file: aria2c takes chunks from all of them."""
-    urls = [m["url"]]
-    if m.get("source") and m.get("sha256"):      # without a sha256 nothing proves two copies equal
+def _source_list(m: dict) -> list:
+    """Every source an entry names: `sources` (a list), else the one `source`."""
+    v = m.get("sources")
+    if isinstance(v, list) and v:
+        return [x for x in dict.fromkeys(v) if isinstance(x, str)]
+    return [m["source"]] if m.get("source") else []
+
+
+def _public_urls(m: dict) -> list:
+    """The URLs of an entry's sources that need no token, in the order given. A source that carries
+    a token is left out: it would be sent to the other mirrors' hosts too."""
+    out = []
+    for src in _source_list(m):
         try:
-            src, headers = fetch.resolve_source(m["source"])
+            url, headers = fetch.resolve_source(src)
         except ValueError:
-            return urls
-        if not headers:                          # a token would be sent to the store's host too
-            urls.insert(0, src)
+            continue
+        if not headers:
+            out.append(url)
+    return out
+
+
+def _mirrors(m: dict) -> list:
+    """The URLs that serve this model's bytes: its public sources first and the store's link last.
+    One list, one file: aria2c takes chunks from all of them at once. Without a sha256 nothing proves
+    two copies equal, so then the store's link goes alone."""
+    urls = [m["url"]]
+    if m.get("sha256"):
+        urls = _public_urls(m) + urls
     return urls
 
 
@@ -350,7 +377,7 @@ def _fetch_one(ctx: Context, man: Manifest, path: str, deadline: Optional[float]
             report(ctx, path, "present", man.rev)
             return None
         report(ctx, path, "fetching", man.rev)
-        if m and not m.get("url") and m.get("source"):
+        if m and not m.get("url") and (m.get("source") or m.get("sources")):
             err = from_source(ctx, path, m, deadline, line)
             report(ctx, path, "failed" if err else "present", man.rev, err)
             return err
@@ -513,11 +540,12 @@ def ensure(ctx: Context, files: list, paths: list, deadline_s: float = 6 * 3600)
     given: dict = {}
     for m in files:
         if not isinstance(m, dict) or not isinstance(m.get("path"), str) or not (
-                m.get("url") or m.get("source")):
-            return 422, {"error": f"bad file {_redact(m)!r}: needs path and url (or source)"}
+                m.get("url") or m.get("source") or m.get("sources")):
+            return 422, {"error": f"bad file {_redact(m)!r}: needs path and url (or source[s])"}
         if not m.get("url"):
             try:
-                fetch.resolve_source(m.get("source"))
+                for src in _source_list(m):
+                    fetch.resolve_source(src)
             except ValueError as e:
                 return 422, {"error": str(e)}
         given[m["path"]] = m

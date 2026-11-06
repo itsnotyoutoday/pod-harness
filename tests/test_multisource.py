@@ -135,9 +135,25 @@ check("without a sha256 nothing proves two copies are the same: the store alone"
 check("no source: the store alone", bm._mirrors({"url": store, "sha256": sha}) == [store])
 check("a source that cannot be resolved is ignored, not fatal",
       bm._mirrors({"url": store, "source": "ftp://nope", "sha256": sha}) == [store])
+pub2 = "https://mirror.example/o/r/x.safetensors"
+pub3 = "https://other.example/x.safetensors"
+check("several sources + the store: every public source first, in order, the store last",
+      bm._mirrors({"url": store, "sources": [pub, pub2, pub3], "sha256": sha}) == [pub, pub2, pub3, store])
+check("a duplicated source is used once",
+      bm._mirrors({"url": store, "sources": [pub, pub, pub2], "sha256": sha}) == [pub, pub2, store])
+check("`source` and `sources` together: the list wins (pod-control sends the first as `source` too)",
+      bm._mirrors({"url": store, "source": pub, "sources": [pub, pub2], "sha256": sha}) == [pub, pub2, store])
+check("several sources without a sha256: the store alone",
+      bm._mirrors({"url": store, "sources": [pub, pub2]}) == [store])
+check("one unresolvable source in the list is skipped, the rest are used",
+      bm._mirrors({"url": store, "sources": ["ftp://nope", pub2], "sha256": sha}) == [pub2, store])
+check("the source list of an entry", bm._source_list({"sources": [pub, pub2]}) == [pub, pub2]
+      and bm._source_list({"source": pub}) == [pub] and bm._source_list({"url": store}) == [])
 os.environ["HF_TOKEN"] = "hf_secret"
 check("a source that needs a token is never mixed with the store's link",
       bm._mirrors({"url": store, "source": "hf://o/r/x.safetensors@abc123", "sha256": sha}) == [store])
+check("with HF_TOKEN set, the hf:// source is left out of a list and the public mirrors stay",
+      bm._mirrors({"url": store, "sources": ["hf://o/r/x.safetensors@abc123", pub2], "sha256": sha}) == [pub2, store])
 os.environ.pop("HF_TOKEN")
 
 print(f"\n  {sum(ok)}/{len(ok)} passed")
