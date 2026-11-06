@@ -103,6 +103,13 @@ fetch.download(fc.blob_url("m.bin"), d / "f.bin", connections=8)
 c = last_cmd()
 check("connections= is honoured, and one source gets 8 chunks at once",
       "--max-connection-per-server=8" in c and "--split=8" in c and "--checksum" not in c)
+os.environ["PODH_FETCH_ARIA2_ARGS"] = "--min-split-size=4M --disk-cache=64M"
+fetch.download(fc.blob_url("m.bin"), d / "x2.bin")
+c = last_cmd()
+check("PODH_FETCH_ARIA2_ARGS adds flags after the defaults, before the URLs",
+      "--disk-cache=64M" in c and c.index("--min-split-size=4M") > c.index("--min-split-size=16M")
+      and c.index("--disk-cache=64M") < c.index("-o"))
+os.environ.pop("PODH_FETCH_ARIA2_ARGS")
 fetch.download(fc.blob_url("m.bin"), d / "g.bin", headers={"Authorization": "Bearer t"})
 check("headers go on the command for a single URL", "--header=Authorization: Bearer t" in last_cmd())
 try:

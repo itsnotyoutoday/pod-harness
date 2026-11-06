@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import shlex
 import re
 import shutil
 import socket
@@ -248,6 +249,9 @@ def aria2c_download(urls, dest, *, size: Optional[int] = None,
         cmd.append(f"--header={k}: {v}")
     if sha256:
         cmd.append(f"--checksum=sha-256={sha256.lower()}")
+    # PODH_FETCH_ARIA2_ARGS: extra aria2c flags from the job's env, after the defaults so they win
+    # (aria2c takes the last of a repeated option): download tuning needs no new image.
+    cmd += shlex.split(os.environ.get("PODH_FETCH_ARIA2_ARGS") or "")
     cmd += ["-d", str(dest.parent), "-o", part.name] + urls
     try:
         p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
