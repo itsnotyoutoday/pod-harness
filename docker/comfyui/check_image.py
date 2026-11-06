@@ -48,19 +48,23 @@ def main() -> int:
     ap.add_argument("--dist", dest="dists", nargs="*", default=[])
     ap.add_argument("--pins", nargs="*", default=[],
                     help="name==version files whose every line must be installed exactly")
+    ap.add_argument("--no-video", action="store_true",
+                    help="an image-only build: no opencv, no baked node packs (so no addons.json)")
     ap.add_argument("--ldd", nargs="*", default=[],
                     help="globs under site-packages whose shared libraries must all resolve")
     a = ap.parse_args()
     bad = []
 
-    for mod in ALWAYS_IMPORT + a.imports:
+    always_import = [m for m in ALWAYS_IMPORT if not (a.no_video and m == "cv2")]
+    always_dist = [d for d in ALWAYS_DIST if not (a.no_video and d.startswith("opencv"))]
+    for mod in always_import + a.imports:
         try:
             importlib.import_module(mod)
         except Exception as e:                      # noqa: BLE001 — report every miss
             bad.append(f"import {mod}: {type(e).__name__}: {e}")
 
     lock = lock_versions(os.environ.get("PODH_LOCK", "/opt/podh/lock.txt"))
-    for dist in ALWAYS_DIST + a.dists:
+    for dist in always_dist + a.dists:
         want = lock.get(dist.lower())
         try:
             have = md.version(dist)
@@ -103,6 +107,8 @@ def main() -> int:
                     bad.append(f"ldd {os.path.relpath(lib, site)}: {name} not found")
 
     try:
+        if a.no_video:
+            raise ImportError("image-only build: no cv2")
         import cv2
         if not hasattr(cv2, "ximgproc"):
             bad.append("cv2 is not the contrib build: another opencv package overwrote it")
@@ -116,7 +122,8 @@ def main() -> int:
         addons = json.load(open(baked)).get("addons", {})
     except (OSError, ValueError) as e:
         addons = {}
-        bad.append(f"{baked}: {e}")
+        if not a.no_video:
+            bad.append(f"{baked}: {e}")
     for name, rec in sorted(addons.items()):
         try:
             head = subprocess.run(["git", "-C", rec["dir"], "rev-parse", "HEAD"],

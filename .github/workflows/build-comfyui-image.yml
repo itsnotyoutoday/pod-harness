@@ -1,0 +1,125 @@
+name: Build ComfyUI image-only image
+
+# podh-comfyui-image: the base's torch/CUDA stack and ComfyUI without the video tools (ffmpeg, the baked
+# node packs, opencv). Independent of the other images: it builds from Ubuntu, not from podh-comfyui.
+on:
+  push:
+    branches: [main, feat/image-slim]
+    paths:
+      - 'docker/comfyui-image.Dockerfile'
+      - 'docker/comfyui/**'
+      - '.github/workflows/build-comfyui-image.yml'
+      - 'src/**'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  packages: write
+
+concurrency:
+  group: build-comfyui-image-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  DOCKERHUB_USER: ${{ secrets.DOCKERHUB_USER }}
+
+jobs:
+  image:
+    runs-on: ubuntu-latest
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+      owner: ${{ steps.meta.outputs.owner }}
+      version: ${{ steps.meta.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # The harness's own checks, before spending an hour on an image that embeds it.
+      - name: Contract, independence, env
+        run: |
+          PYTHONPATH=src python3 docker/assert_contract.py
+          PYTHONPATH=src python3 docker/assert_independence.py
+          PYTHONPATH=src python3 docker/assert_env.py
+
+      - name: Compute tags
+        id: meta
+        run: |
+          OWNER=$(echo '${{ github.repository_owner }}' | tr A-Z a-z)
+          SHA=$(git rev-parse --short HEAD)
+          TAG=$(sed -n 's/^ARG COMFYUI_TAG=//p' docker/comfyui-image.Dockerfile)
+          test -n "$TAG" || { echo "::error::no ARG COMFYUI_TAG in docker/comfyui-image.Dockerfile"; exit 1; }
+          VERSION="$TAG-cu128-$SHA"
+          echo "owner=$OWNER" >> $GITHUB_OUTPUT
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          TAGS="ghcr.io/$OWNER/podh-comfyui-image:$VERSION,ghcr.io/$OWNER/podh-comfyui-image:latest"
+          if [ -n "$DOCKERHUB_USER" ]; then
+            TAGS="$TAGS,docker.io/$DOCKERHUB_USER/podh-comfyui-image:$VERSION,docker.io/$DOCKERHUB_USER/podh-comfyui-image:latest"
+          else
+            echo "::warning::no DOCKERHUB_USER secret — publishing to GHCR only"
+          fi
+          echo "tags=$TAGS" >> $GITHUB_OUTPUT
+
+      # The image is over 10 GB unpacked; the runner starts with ~20 GB free.
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /opt/hostedtoolcache/CodeQL \
+                      /usr/local/share/boost /usr/share/swift
+          sudo docker image prune --all --force >/dev/null || true
+          df -h /
+
+      - name: Log in to Docker Hub
+        if: env.DOCKERHUB_USER != ''
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USER }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build and push podh-comfyui-image
+        id: build
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: docker/comfyui-image.Dockerfile
+          platforms: linux/amd64        # RunPod is x86; an arm64 image fails there opaquely
+          tags: ${{ steps.meta.outputs.tags }}
+          # Only the last (identity) layer reads these: the manifest's version and revision.
+          build-args: |
+            IMAGE_VERSION=${{ steps.meta.outputs.version }}
+            GIT_SHA=${{ github.sha }}
+            SOURCE_URL=${{ github.server_url }}/${{ github.repository }}
+          # Pushed to every tag above, every layer zstd: smaller than gzip and several times
+          # faster to decompress, which is most of a pod's pull. force-compression recompresses
+          # layers that arrive as gzip (Ubuntu's, a gzip cache). Pulling needs Docker >= 23 /
+          # containerd >= 1.5 — see the README.
+          outputs: type=image,push=true,compression=zstd,compression-level=3,force-compression=true,oci-mediatypes=true
+          # Registry cache, as build-harness.yml explains: the Actions cache is 10 GB per
+          # repository, less than this image alone. Also zstd, so a cached layer is pushed
+          # as-is instead of being recompressed.
+          cache-from: type=registry,ref=ghcr.io/${{ steps.meta.outputs.owner }}/podh-comfyui-image:buildcache,ignore-error=true
+          cache-to: type=registry,ref=ghcr.io/${{ steps.meta.outputs.owner }}/podh-comfyui-image:buildcache,mode=max,ignore-error=true,compression=zstd,compression-level=3,force-compression=true,oci-mediatypes=true
+
+      - name: Digest
+        run: echo "::notice::podh-comfyui-image ${{ steps.meta.outputs.version }} = ${{ steps.build.outputs.digest }}"
+
+      - uses: imjasonh/setup-crane@v0.4
+
+      - name: Publish manifest and catalogue
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          OWNER=$(echo '${{ github.repository_owner }}' | tr A-Z a-z)
+          PRIMARY=""
+          if [ -n "$DOCKERHUB_USER" ]; then PRIMARY="docker.io/$DOCKERHUB_USER/podh-comfyui-image"; fi
+          bash docker/comfyui/publish-identity --name podh-comfyui-image \
+            --version '${{ steps.meta.outputs.version }}' --digest '${{ steps.build.outputs.digest }}' \
+            --revision '${{ github.sha }}' --mirror "ghcr.io/$OWNER/podh-comfyui-image" \
+            ${PRIMARY:+--primary "$PRIMARY"} --repo '${{ github.repository }}'
+
