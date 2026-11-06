@@ -241,7 +241,7 @@ def aria2c_download(urls, dest, *, size: Optional[int] = None,
         raise DownloadError(f"{dest.name}: timed out (partial download kept)")
     cmd = [exe, "--continue=true", "--allow-overwrite=true", "--auto-file-renaming=false",
            f"--max-connection-per-server={min(n, 16)}", f"--split={n * len(urls)}",
-           "--min-split-size=16M", "--file-allocation=none", "--summary-interval=0",
+           f"--min-split-size={os.environ.get('PODH_FETCH_MIN_SPLIT') or '16M'}", "--file-allocation=none", "--summary-interval=0",
            "--console-log-level=warn", f"--user-agent={_UA}",
            "--max-tries=5", "--retry-wait=2", "--uri-selector=adaptive"]
     for k, v in (headers or {}).items():

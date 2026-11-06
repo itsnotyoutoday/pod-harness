@@ -55,7 +55,7 @@ from typing import Optional
 from .. import fetch, heartbeat
 from .core import BootFailure, Context, inside, say
 
-PARALLEL = 2
+PARALLEL = max(1, int(os.environ.get("PODH_FETCH_PARALLEL") or 2))   # files fetched at the same time
 ATTEMPTS = 4
 
 
