@@ -52,6 +52,8 @@ from typing import Callable, Optional
 _UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
        "(KHTML, like Gecko) Chrome/120.0 Safari/537.36")
 CHUNK = 1 << 20
+#: aria2c connections per source, per file. Several mirrors for one file get this many EACH.
+DEFAULT_CONNECTIONS = max(1, int(os.environ.get("PODH_FETCH_CONNECTIONS") or 16))
 
 
 class _DropAuthOnRedirect(urllib.request.HTTPRedirectHandler):
@@ -211,10 +213,26 @@ def http_download(url: str, dest, *, size: Optional[int] = None,
             return _finish(part, dest, size, sha256)
 
 
-def aria2c_download(url: str, dest, *, size: Optional[int] = None,
+def aria2c_download(urls, dest, *, size: Optional[int] = None,
                     sha256: Optional[str] = None, deadline: Optional[float] = None,
-                    exe: str = "aria2c", connections: int = 4) -> Path:
-    """The same contract as http_download, through aria2c (several connections, resume)."""
+                    exe: str = "aria2c", connections: Optional[int] = None,
+                    headers: Optional[dict] = None) -> Path:
+    """The same contract as http_download, through aria2c (several connections, resume).
+
+    `urls` is one URL, or several for the SAME file (mirrors, e.g. a model's public source and our
+    store). aria2c then splits the file into chunks and fetches them from all of them at once,
+    preferring the faster source as it goes (--uri-selector=adaptive), and carries on from the
+    others when one is slow, refused or down. The mirrors MUST serve identical bytes: when a sha256
+    is known aria2c verifies it (--checksum), and a file that does not match is refused. `headers`
+    go to every URL, so pass them only with a single URL (a token for one host must not be sent
+    to another).
+    """
+    urls = [urls] if isinstance(urls, str) else list(urls)
+    if not urls:
+        raise DownloadError("no URL to download from")
+    if headers and len(urls) > 1:
+        raise ValueError("headers apply to every mirror: use them with one URL only")
+    n = max(1, connections or DEFAULT_CONNECTIONS)
     dest = Path(dest)
     dest.parent.mkdir(parents=True, exist_ok=True)
     part = dest.with_name(dest.name + ".part")
@@ -222,10 +240,15 @@ def aria2c_download(url: str, dest, *, size: Optional[int] = None,
     if left is not None and left <= 0:
         raise DownloadError(f"{dest.name}: timed out (partial download kept)")
     cmd = [exe, "--continue=true", "--allow-overwrite=true", "--auto-file-renaming=false",
-           f"--max-connection-per-server={connections}", f"--split={connections}",
+           f"--max-connection-per-server={min(n, 16)}", f"--split={n * len(urls)}",
            "--min-split-size=16M", "--file-allocation=none", "--summary-interval=0",
            "--console-log-level=warn", f"--user-agent={_UA}",
-           "-d", str(dest.parent), "-o", part.name, url]
+           "--max-tries=5", "--retry-wait=2", "--uri-selector=adaptive"]
+    for k, v in (headers or {}).items():
+        cmd.append(f"--header={k}: {v}")
+    if sha256:
+        cmd.append(f"--checksum=sha-256={sha256.lower()}")
+    cmd += ["-d", str(dest.parent), "-o", part.name] + urls
     try:
         p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
                            timeout=None if left is None else max(1.0, left))
@@ -233,6 +256,9 @@ def aria2c_download(url: str, dest, *, size: Optional[int] = None,
         raise DownloadError(f"{dest.name}: timed out (partial download kept)")
     if p.returncode != 0:
         out = p.stdout or ""
+        if p.returncode == 32:
+            part.unlink(missing_ok=True)
+            raise DownloadError(f"{dest.name}: sha256 does not match what was expected")
         if p.returncode == 24 or re.search(r"\b(401|403)\b|expired|AccessDenied", out):
             raise LinkExpired(f"{dest.name}: aria2c: link refused (exit {p.returncode})")
         tail = " ".join(out.strip().splitlines()[-2:])[:300]
@@ -240,7 +266,8 @@ def aria2c_download(url: str, dest, *, size: Optional[int] = None,
     ctl = dest.with_name(part.name + ".aria2")
     if ctl.exists():
         ctl.unlink()
-    return _finish(part, dest, size, sha256)
+    # aria2c already hashed it (--checksum): hashing 20 GB again would cost seconds for nothing.
+    return _finish(part, dest, size, None if sha256 else sha256)
 
 
 def put_file(url: str, path, timeout: float = 600) -> int:
@@ -303,15 +330,32 @@ def resolve_source(source: str) -> tuple:
     raise ValueError(f"source {source!r}: not https://, hf:// or civitai://")
 
 
-def download(url: str, dest, *, size: Optional[int] = None, sha256: Optional[str] = None,
-             deadline: Optional[float] = None, use_aria2: Optional[bool] = None) -> Path:
-    """aria2c when present (unless use_aria2=False or PODH_NO_ARIA2=1), else Python."""
+def download(url, dest, *, size: Optional[int] = None, sha256: Optional[str] = None,
+             deadline: Optional[float] = None, use_aria2: Optional[bool] = None,
+             headers: Optional[dict] = None, connections: Optional[int] = None) -> Path:
+    """aria2c when present (unless use_aria2=False or PODH_NO_ARIA2=1), else Python.
+
+    `url` may be a list of mirrors for the same file (see aria2c_download). Without aria2c the
+    mirrors are tried in order, the next one when a download fails."""
     if use_aria2 is None:
         use_aria2 = os.environ.get("PODH_NO_ARIA2") != "1"
+    urls = [url] if isinstance(url, str) else list(url)
     exe = shutil.which("aria2c") if use_aria2 else None
     if exe:
-        return aria2c_download(url, dest, size=size, sha256=sha256, deadline=deadline, exe=exe)
-    return http_download(url, dest, size=size, sha256=sha256, deadline=deadline)
+        return aria2c_download(urls, dest, size=size, sha256=sha256, deadline=deadline,
+                               exe=exe, connections=connections, headers=headers)
+    last: Optional[Exception] = None
+    for u in urls:
+        try:
+            return http_download(u, dest, size=size, sha256=sha256, deadline=deadline,
+                                 headers=headers)
+        except LinkExpired as e:
+            last = e
+        except DownloadError as e:
+            last = e
+            if "timed out" in str(e):
+                break
+    raise last if last else DownloadError("no URL to download from")
 
 
 # -- unpacking ------------------------------------------------------------------------------

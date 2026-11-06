@@ -15,6 +15,15 @@ listed when a parked pod resumes) is fetched without holding up ready. After rea
 heartbeat reply; a higher one fetches the manifest again and downloads what is new, while
 the workload keeps running. A failed addition is reported and never ends the pod.
 
+## Two sources for one file
+
+A manifest entry may carry BOTH `url` (the store's presigned GET) and `source` (the file's public
+home, e.g. hf://…@<rev>), with the same sha256. The pod then downloads it from both at once: aria2c
+splits the file into chunks, takes them from whichever source is faster at that moment, and carries
+on from the other if one is slow or down (fetch.aria2c_download). The bytes are verified against the
+sha256, so a mirror that serves anything else is refused. A source that needs a token (HF_TOKEN) is
+never mixed with the store's link: a token for one host must not be sent to another.
+
 ## When the store does not have a file (TASK-API §10)
 
 A manifest entry may come as {path, in_store: false, source, put_url, sha256?, size?}
@@ -165,8 +174,8 @@ def from_source(ctx: Context, path: str, m: dict, deadline: Optional[float], lin
     t0 = time.time()
     try:
         dest = inside(ctx.models_root, path, "model path")
-        fetch.http_download(url, dest, size=m.get("size"), sha256=m.get("sha256"),
-                            headers=headers, deadline=deadline)
+        fetch.download(url, dest, size=m.get("size"), sha256=m.get("sha256"),
+                       headers=headers or None, deadline=deadline)
     except fetch.LinkExpired as e:
         hint = {"hf": " (is HF_TOKEN set and allowed this repo?)",
                 "civitai": " (is CIVITAI_TOKEN set?)"}.get(scheme, "")
@@ -292,6 +301,20 @@ _INFLIGHT_LOCK = threading.Lock()
 _INFLIGHT: dict = {}                      # path -> [Event, error], one download per path
 
 
+def _mirrors(m: dict) -> list:
+    """The URLs that serve this model's bytes: its public source first (when it can be used with
+    no token) and the store's link. One list, one file: aria2c takes chunks from all of them."""
+    urls = [m["url"]]
+    if m.get("source") and m.get("sha256"):      # without a sha256 nothing proves two copies equal
+        try:
+            src, headers = fetch.resolve_source(m["source"])
+        except ValueError:
+            return urls
+        if not headers:                          # a token would be sent to the store's host too
+            urls.insert(0, src)
+    return urls
+
+
 def fetch_one(ctx: Context, man: Manifest, path: str, deadline: Optional[float],
               line) -> Optional[str]:
     """Download one path; None on success, else the error. Never raises.
@@ -343,14 +366,16 @@ def _fetch_one(ctx: Context, man: Manifest, path: str, deadline: Optional[float]
                 err = "not in the manifest"
                 break
             t0 = time.time()
+            urls = _mirrors(m)
             try:
                 dest = inside(ctx.models_root, path, "model path")
-                fetch.download(m["url"], dest, size=m.get("size"), sha256=m.get("sha256"),
+                fetch.download(urls, dest, size=m.get("size"), sha256=m.get("sha256"),
                                deadline=deadline)
                 _remember(ctx, path, m.get("sha256"))
                 size = dest.stat().st_size
                 ctx.count(size)
-                line(f"{path}: {size / 1e6:.0f} MB in {time.time() - t0:.0f}s")
+                line(f"{path}: {size / 1e6:.0f} MB in {time.time() - t0:.0f}s"
+                     + (f" from {len(urls)} sources at once" if len(urls) > 1 else ""))
                 report(ctx, path, "present", man.rev)
                 return None
             except fetch.LinkExpired as e:
