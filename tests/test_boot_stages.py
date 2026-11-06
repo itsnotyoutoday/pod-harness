@@ -293,6 +293,7 @@ pod.extra_models = {}
 # the store lacks a model that has a source (TASK-API §10)
 src_data = os.urandom(50_000)
 pod.sourced = {"loras/from_source.safetensors": src_data}
+pod.upload_back = True      # upload-back happens only when the request asks for it
 n0, r0 = len(fc.calls), len(fc.requests)
 p = pod.run(T / "m-source", FAKE_SERVE="ok0", FAKE_SERVE_SLEEP="5")
 d = dones(fc, n0)
@@ -301,7 +302,7 @@ check("a model the store lacks is fetched from its source and the boot completes
       p.returncode == 0 and d and d[-1]["rc"] == 0
       and (pod.tmp / "models" / "loras/from_source.safetensors").read_bytes() == src_data)
 check("...logged clearly as the fallback",
-      any("not in store: fetched from source" in ln and "uploading back to the store" in ln
+      any("fetched from source" in ln and "copied to the store in the background" in ln
           for ln in lines))
 check("...then put back into the store in the background, after ready, with a boot line",
       fc.blobs.get("store_loras_from_source.safetensors") == src_data
@@ -311,6 +312,7 @@ check("...then put back into the store in the background, after ready, with a bo
 puts = [r for r in fc.requests[r0:] if r["method"] == "PUT"]
 check("...one PUT, without the pod token", len(puts) == 1
       and "x-podh-token" not in puts[0]["headers"])
+pod.upload_back = False
 pod.sourced = {}
 pod.missing_paths = ["loras/nowhere.safetensors"]
 n0 = len(fc.calls)

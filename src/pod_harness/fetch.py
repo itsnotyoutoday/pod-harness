@@ -39,6 +39,7 @@ import socket
 import stat
 import subprocess
 import tarfile
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -53,8 +54,10 @@ from typing import Callable, Optional
 _UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
        "(KHTML, like Gecko) Chrome/120.0 Safari/537.36")
 CHUNK = 1 << 20
-#: aria2c connections per source, per file. Several mirrors for one file get this many EACH.
-DEFAULT_CONNECTIONS = max(1, int(os.environ.get("PODH_FETCH_CONNECTIONS") or 16))
+#: aria2c connections per source, per file. Several mirrors for one file get this many EACH. One is the
+#: default: measured on a pod, 16 per host was slower than 1 per source (35 vs 56 MB/s) and the sources
+#: themselves supply the parallelism.
+DEFAULT_CONNECTIONS = max(1, int(os.environ.get("PODH_FETCH_CONNECTIONS") or 1))
 
 
 class _DropAuthOnRedirect(urllib.request.HTTPRedirectHandler):
@@ -217,7 +220,8 @@ def http_download(url: str, dest, *, size: Optional[int] = None,
 def aria2c_download(urls, dest, *, size: Optional[int] = None,
                     sha256: Optional[str] = None, deadline: Optional[float] = None,
                     exe: str = "aria2c", connections: Optional[int] = None,
-                    headers: Optional[dict] = None) -> Path:
+                    headers: Optional[dict] = None, flags: Optional[list] = None,
+                    progress: Optional[Callable] = None, interval: float = 30.0) -> Path:
     """The same contract as http_download, through aria2c (several connections, resume).
 
     `urls` is one URL, or several for the SAME file (mirrors, e.g. a model's public source and our
@@ -240,38 +244,128 @@ def aria2c_download(urls, dest, *, size: Optional[int] = None,
     left = _remaining(deadline)
     if left is not None and left <= 0:
         raise DownloadError(f"{dest.name}: timed out (partial download kept)")
-    cmd = [exe, "--continue=true", "--allow-overwrite=true", "--auto-file-renaming=false",
-           f"--max-connection-per-server={min(n, 16)}", f"--split={n * len(urls)}",
-           f"--min-split-size={os.environ.get('PODH_FETCH_MIN_SPLIT') or '16M'}", "--file-allocation=none", "--summary-interval=0",
-           "--console-log-level=warn", f"--user-agent={_UA}",
-           "--max-tries=5", "--retry-wait=2", "--uri-selector=adaptive"]
+    if flags is not None:                  # built by pod_harness.dl from the layered options
+        cmd = [exe] + list(flags)
+    else:
+        cmd = [exe, "--continue=true", "--allow-overwrite=true", "--auto-file-renaming=false",
+               f"--max-connection-per-server={min(n, 16)}", f"--split={n * len(urls)}",
+               "--min-split-size=16M", "--file-allocation=none", "--summary-interval=0",
+               "--console-log-level=warn", f"--user-agent={_UA}",
+               "--max-tries=5", "--retry-wait=2", "--uri-selector=adaptive"]
     for k, v in (headers or {}).items():
         cmd.append(f"--header={k}: {v}")
     if sha256:
         cmd.append(f"--checksum=sha-256={sha256.lower()}")
-    # PODH_FETCH_ARIA2_ARGS: extra aria2c flags from the job's env, after the defaults so they win
-    # (aria2c takes the last of a repeated option): download tuning needs no new image.
-    cmd += shlex.split(os.environ.get("PODH_FETCH_ARIA2_ARGS") or "")
     cmd += ["-d", str(dest.parent), "-o", part.name] + urls
-    try:
-        p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-                           timeout=None if left is None else max(1.0, left))
-    except subprocess.TimeoutExpired:
-        raise DownloadError(f"{dest.name}: timed out (partial download kept)")
-    if p.returncode != 0:
-        out = p.stdout or ""
-        if p.returncode == 32:
+    rc, out = _run_watched(cmd, part, left, progress, interval, dest.name)
+    if rc != 0:
+        if rc == 32:
             part.unlink(missing_ok=True)
             raise DownloadError(f"{dest.name}: sha256 does not match what was expected")
-        if p.returncode == 24 or re.search(r"\b(401|403)\b|expired|AccessDenied", out):
-            raise LinkExpired(f"{dest.name}: aria2c: link refused (exit {p.returncode})")
+        if rc == 24 or re.search(r"\b(401|403)\b|expired|AccessDenied", out):
+            raise LinkExpired(f"{dest.name}: aria2c: link refused (exit {rc})")
         tail = " ".join(out.strip().splitlines()[-2:])[:300]
-        raise DownloadError(f"{dest.name}: aria2c exit {p.returncode}: {tail}")
+        raise DownloadError(f"{dest.name}: aria2c exit {rc}: {tail}")
     ctl = dest.with_name(part.name + ".aria2")
     if ctl.exists():
         ctl.unlink()
     # aria2c already hashed it (--checksum): hashing 20 GB again would cost seconds for nothing.
     return _finish(part, dest, size, None if sha256 else sha256)
+
+
+def _on_disk(part: Path) -> int:
+    """Bytes actually written to a (sparse) .part: allocated blocks, not the apparent size."""
+    try:
+        st = part.stat()
+    except OSError:
+        return 0
+    return min(st.st_size, st.st_blocks * 512) if hasattr(st, "st_blocks") else st.st_size
+
+
+def _run_watched(cmd: list, part: Path, left: Optional[float], progress: Optional[Callable],
+                 interval: float, name: str) -> tuple:
+    """Run a downloader (no shell), return (returncode, output). While it runs, call
+    progress(bytes_on_disk) every `interval` seconds so a long download is never silent."""
+    t_end = None if left is None else time.time() + max(1.0, left)
+    p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    out_parts: list = []
+    reader = threading.Thread(target=lambda: out_parts.append(p.stdout.read()), daemon=True)
+    reader.start()
+    try:
+        while True:
+            wait = interval if t_end is None else max(0.1, min(interval, t_end - time.time()))
+            try:
+                p.wait(timeout=wait)
+                break
+            except subprocess.TimeoutExpired:
+                if t_end is not None and time.time() >= t_end:
+                    p.kill()
+                    p.wait()
+                    raise DownloadError(f"{name}: timed out (partial download kept)")
+                if progress:
+                    try:
+                        progress(_on_disk(part))
+                    except Exception:
+                        pass
+    finally:
+        if p.poll() is None:
+            p.kill()
+    reader.join(5)
+    return p.returncode, "".join(out_parts)
+
+
+def curl_download(urls, dest, *, size: Optional[int] = None, sha256: Optional[str] = None,
+                  deadline: Optional[float] = None, exe: str = "curl", headers: Optional[dict] = None,
+                  flags: Optional[list] = None, progress: Optional[Callable] = None,
+                  interval: float = 30.0) -> Path:
+    """One stream through curl (resumes the .part), the next URL when one fails."""
+    urls = [urls] if isinstance(urls, str) else list(urls)
+    dest = Path(dest)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    part = dest.with_name(dest.name + ".part")
+    last: Optional[Exception] = None
+    for u in urls:
+        left = _remaining(deadline)
+        if left is not None and left <= 0:
+            raise DownloadError(f"{dest.name}: timed out (partial download kept)")
+        cmd = [exe, "-sS", "-L", "--fail", "-C", "-", "--retry", "3", "-A", _UA] + list(flags or [])
+        for k, v in (headers or {}).items():
+            cmd += ["-H", f"{k}: {v}"]
+        cmd += ["-o", str(part), u]
+        rc, out = _run_watched(cmd, part, left, progress, interval, dest.name)
+        if rc == 0:
+            return _finish(part, dest, size, sha256)
+        if rc == 22 and re.search(r"\b(401|403)\b", out):
+            last = LinkExpired(f"{dest.name}: curl: link refused")
+        else:
+            last = DownloadError(f"{dest.name}: curl exit {rc}: {' '.join(out.strip().splitlines()[-1:])[:200]}")
+    raise last if last else DownloadError("no URL to download from")
+
+
+def exec_download(argv: list, urls, dest, *, size: Optional[int] = None, sha256: Optional[str] = None,
+                  deadline: Optional[float] = None, progress: Optional[Callable] = None,
+                  interval: float = 30.0) -> Path:
+    """Run a caller-chosen downloader (argv template, no shell). `{url}` is the first URL, a lone
+    `{urls}` element expands to all of them, `{dest}`/`{part}`/`{dir}`/`{name}` are the paths. The
+    tool must write `{part}`; it is then size/sha256-checked and renamed like any download."""
+    urls = [urls] if isinstance(urls, str) else list(urls)
+    dest = Path(dest)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    part = dest.with_name(dest.name + ".part")
+    cmd: list = []
+    for a in argv:
+        if a == "{urls}":
+            cmd += urls
+        else:
+            cmd.append(a.replace("{url}", urls[0]).replace("{dest}", str(dest)).replace("{part}", str(part))
+                        .replace("{dir}", str(dest.parent)).replace("{name}", dest.name))
+    rc, out = _run_watched(cmd, part, _remaining(deadline), progress, interval, dest.name)
+    if rc != 0:
+        raise DownloadError(f"{dest.name}: {os.path.basename(cmd[0])} exit {rc}: "
+                            f"{' '.join(out.strip().splitlines()[-1:])[:200]}")
+    if not part.exists():
+        raise DownloadError(f"{dest.name}: {os.path.basename(cmd[0])} finished but wrote no {part.name}")
+    return _finish(part, dest, size, sha256)
 
 
 def put_file(url: str, path, timeout: float = 600) -> int:

@@ -30,11 +30,10 @@ A manifest entry may come as {path, in_store: false, source, put_url, sha256?, s
 instead of {path, url}: the app's store lacks the file, and the pod is the fallback. The
 file is downloaded straight from `source` (https://, hf://<owner>/<repo>/<file>@<rev> with
 $HF_TOKEN, civitai://<version id> with $CIVITAI_TOKEN — fetch.resolve_source), resumable and
-checked like any other, and used at once. Only when the pod has PODH_UPLOAD_BACK=1 (off by
-default; a plain download never writes anywhere), it is then, in the BACKGROUND, PUT to `put_url`
-so the next pod finds it in the store: one upload at a time, at low priority, only once the
-pod is ready, never while it drains or parks, and never holding up ready or a task. Each
-upload ends in a boot line ("uploaded back to the store" or why not). Paths the manifest
+checked like any other, and used at once. By default the pod writes nothing to the store: a `put_url` is ignored
+(seeding is a separate process, not the pod runner's job). Only a request that asks for it (fetch.upload_back=true, or upload_back on the file) gets the file
+copied back, in the BACKGROUND: one upload at a time, at low priority, only once the pod is ready, never while it
+drains or parks, and never holding up ready or a task. Each upload ends in a boot line. Paths the manifest
 lists under `missing` (not in the store and no source) fail: at boot they fail the boot.
 
 The worker can also ask for models directly, through the local POST /models/fetch
@@ -52,10 +51,10 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Optional
 
-from .. import fetch, heartbeat
+from .. import dl, fetch, heartbeat
 from .core import BootFailure, Context, inside, say
 
-PARALLEL = max(1, int(os.environ.get("PODH_FETCH_PARALLEL") or 2))   # files fetched at the same time
+PARALLEL = max(1, int(os.environ.get("PODH_FETCH_PARALLEL") or 2))   # the default; a job's fetch.parallel_files wins
 ATTEMPTS = 4
 
 
@@ -69,6 +68,14 @@ class Manifest:
         self.items: dict = {}
         self.missing: list = []           # paths not in the store, with no source
         self.fetched_at = 0.0
+        self.job = self._job(None)        # the job's `fetch` settings (dl.job_settings), re-read on refresh
+
+    def _job(self, from_manifest) -> dict:
+        spec = self.ctx.boot.get("models")
+        try:
+            return dl.job_settings(spec.get("fetch") if isinstance(spec, dict) else None, from_manifest)
+        except dl.OptionError as e:
+            raise BootFailure(f"models: fetch settings: {e}", stage="models")
 
     def refresh(self, stale: Optional[tuple] = None) -> dict:
         """Fetch the manifest. With `stale=(path, url)`, only if that path still has that
@@ -99,6 +106,12 @@ class Manifest:
                     self.rev = int(obj["models_rev"])
                 except (TypeError, ValueError):
                     pass
+            self.job = self._job(obj.get("fetch") if isinstance(obj, dict) else None)
+            for m in items.values():                       # a bad per-file option fails the boot early
+                try:
+                    dl.plan_for(m, self.job)
+                except dl.OptionError as e:
+                    raise BootFailure(f"models: {e}", stage="models")
             miss = obj.get("missing") if isinstance(obj, dict) else None
             self.missing = [p for p in (miss or []) if isinstance(p, str)]
             self.items, self.fetched_at = items, time.time()
@@ -163,12 +176,35 @@ def _redact(m) -> dict:
             for k, v in m.items()}
 
 
-def from_source(ctx: Context, path: str, m: dict, deadline: Optional[float], line) -> Optional[str]:
+def _job_of(man) -> dict:
+    """The job's fetch settings from a manifest (the defaults for a bare stand-in)."""
+    j = getattr(man, "job", None)
+    return j if isinstance(j, dict) else dl.job_settings()
+
+
+def _download(ctx: Context, man: Optional["Manifest"], path: str, m: dict, urls, dest: Path,
+              deadline: Optional[float], line, headers=None) -> dict:
+    """One file through the downloader its plan names. Returns the stats dict."""
+    job = _job_of(man)
+    plan = dl.plan_for(m, job)
+    prog = dl.Progress(path, m.get("size"), line)
+    return dl.download(urls, dest, plan, size=m.get("size"), sha256=m.get("sha256"), deadline=deadline,
+                       headers=headers, parallel_files=job["parallel_files"],
+                       budget=job["max_total_connections"], progress=prog, log=line)
+
+
+def _stats_line(path: str, st: dict) -> str:
+    return (f"{path}: {st['bytes'] / 1e6:.0f} MB in {st['secs']:.0f}s ({st['mbps']} MB/s) via {st['method']}, "
+            f"{st['sources']} source(s) x {st['connections']} connection(s)")
+
+
+def from_source(ctx: Context, path: str, m: dict, deadline: Optional[float], line,
+                man: Optional["Manifest"] = None) -> Optional[str]:
     """The §10 fallback: the store lacks `path`; fetch it from its source, then queue the
     upload back to the store. None on success, else the error."""
-    srcs = _source_list(m)
+    srcs = _entries(m)
     try:
-        resolved = [fetch.resolve_source(x) for x in srcs]
+        resolved = [r for r in (_resolve(x) for x in srcs) if r is not None]
     except ValueError as e:
         return str(e)
     if not resolved:
@@ -177,15 +213,13 @@ def from_source(ctx: Context, path: str, m: dict, deadline: Optional[float], lin
     if len(public) > 1 and not m.get("sha256"):
         public = public[:1]                  # nothing proves two copies equal: one source
     url, headers = (public, None) if public else (resolved[0][0], resolved[0][1])
-    scheme = str(srcs[0]).split(":", 1)[0]
+    scheme = (srcs[0] if isinstance(srcs[0], str) else str((srcs[0] or {}).get("url") or "")).split(":", 1)[0]
     line(f"{path}: not in the store — fetching it from its source ({scheme})")
     t0 = time.time()
     try:
         dest = inside(ctx.models_root, path, "model path")
-        fetch.download(url, dest, size=m.get("size"), sha256=m.get("sha256"),
-                       headers=headers or None, deadline=deadline)
-        if isinstance(url, list) and len(url) > 1:
-            line(f"{path}: fetched from {len(url)} sources at once")
+        st = _download(ctx, man, path, m, url, dest, deadline, line, headers=headers or None)
+        line(_stats_line(path, st))
     except fetch.LinkExpired as e:
         hint = {"hf": " (is HF_TOKEN set and allowed this repo?)",
                 "civitai": " (is CIVITAI_TOKEN set?)"}.get(scheme, "")
@@ -198,8 +232,9 @@ def from_source(ctx: Context, path: str, m: dict, deadline: Optional[float], lin
     size = dest.stat().st_size
     ctx.count(size)
     took = f"{size / 1e6:.0f} MB in {time.time() - t0:.0f}s"
-    if m.get("put_url") and os.environ.get("PODH_UPLOAD_BACK") == "1":
-        line(f"{path}: fetched from source ({took}); PODH_UPLOAD_BACK is on, so it is copied to the store in the background")
+    up = m["upload_back"] if isinstance(m.get("upload_back"), bool) else _job_of(man)["upload_back"]
+    if m.get("put_url") and up:
+        line(f"{path}: fetched from source ({took}); upload_back was asked for, so it is copied to the store in the background")
         uploader(ctx).add(path, dest, m["put_url"])
     else:
         line(f"{path}: fetched from source ({took}); nothing is written back to the store")
@@ -310,39 +345,79 @@ _INFLIGHT_LOCK = threading.Lock()
 _INFLIGHT: dict = {}                      # path -> [Event, error], one download per path
 
 
-def _source_list(m: dict) -> list:
-    """Every source an entry names: `sources` (a list), else the one `source`."""
+def _entries(m: dict) -> list:
+    """The raw source entries: `sources` (a list), else the one `source`. Each is a string
+    ("https://…", "hf://…", "civitai://…") or an object: {"store": true} marks where the store's own
+    link goes in the order; {"url": "…", "auth_env": "NAME"} is a source that needs a token."""
     v = m.get("sources")
     if isinstance(v, list) and v:
-        return [x for x in dict.fromkeys(v) if isinstance(x, str)]
+        return list(v)
     return [m["source"]] if m.get("source") else []
 
 
+def _source_list(m: dict) -> list:
+    """The plain-string sources of an entry, once each."""
+    return [x for x in dict.fromkeys(e for e in _entries(m) if isinstance(e, str))]
+
+
+def _resolve(e) -> Optional[tuple]:
+    """(url, headers) for one entry; None for the store marker; ValueError if it makes no sense."""
+    if isinstance(e, str):
+        return fetch.resolve_source(e)
+    if isinstance(e, dict):
+        if e.get("store") is True:
+            return None
+        if isinstance(e.get("url"), str):
+            url, headers = fetch.resolve_source(e["url"])
+            env = e.get("auth_env")
+            if env:
+                tok = os.environ.get(str(env))
+                if not tok:
+                    raise ValueError(f"source {url.split('?', 1)[0]}: ${env} is not set on this pod")
+                headers = {**headers, "Authorization": f"Bearer {tok}"}
+            return url, headers
+    raise ValueError(f"source {e!r}: not a URL string, {{\"store\": true}} or {{\"url\": …}}")
+
+
 def _public_urls(m: dict) -> list:
-    """The URLs of an entry's sources that need no token, in the order given. A source that carries
-    a token is left out: it would be sent to the other mirrors' hosts too."""
+    """The URLs of an entry's sources that need no token, in the order given (the store marker is
+    skipped). A source that carries a token is left out: it would be sent to the other mirrors' hosts
+    too."""
     out = []
-    for src in _source_list(m):
+    for e in _entries(m):
         try:
-            url, headers = fetch.resolve_source(src)
+            r = _resolve(e)
         except ValueError:
             continue
-        if not headers:
-            out.append(url)
-    return out
+        if r and not r[1]:
+            out.append(r[0])
+    return list(dict.fromkeys(out))
 
 
 def _mirrors(m: dict) -> list:
-    """The URLs that serve this model's bytes: its public sources first and the store's link last.
-    One list, one file: aria2c takes chunks from all of them at once. Without a sha256 nothing proves
-    two copies equal, so then the store's link goes alone."""
-    urls = [m["url"]]
-    if m.get("sha256"):
-        pub = _public_urls(m)
-        if os.environ.get("PODH_SKIP_STORE") == "1" and pub:
-            return pub                # a measurement knob: the public sources alone, the store's link unused
-        urls = pub + urls
-    return urls
+    """The URLs that serve this model's bytes, in the order given: the public sources, and the store's
+    link where {"store": true} sits (last when there is no marker). One list, one file: the downloader
+    takes chunks from all of them at once. Without a sha256 nothing proves two copies equal, so then the
+    store's link goes alone."""
+    if not m.get("sha256"):
+        return [m["url"]]
+    ordered: list = []
+    for e in _entries(m):
+        try:
+            r = _resolve(e)
+        except ValueError:
+            continue
+        if r is None:
+            ordered.append(None)
+        elif not r[1]:
+            ordered.append(r[0])
+    ordered = list(dict.fromkeys(ordered))
+    pub = [u for u in ordered if u]
+    if os.environ.get("PODH_SKIP_STORE") == "1" and pub:
+        return pub                    # a measurement knob: the public sources alone, the store's link unused
+    if None not in ordered:
+        ordered.append(None)
+    return [m["url"] if u is None else u for u in ordered]
 
 
 def fetch_one(ctx: Context, man: Manifest, path: str, deadline: Optional[float],
@@ -381,7 +456,7 @@ def _fetch_one(ctx: Context, man: Manifest, path: str, deadline: Optional[float]
             return None
         report(ctx, path, "fetching", man.rev)
         if m and not m.get("url") and (m.get("source") or m.get("sources")):
-            err = from_source(ctx, path, m, deadline, line)
+            err = from_source(ctx, path, m, deadline, line, man)
             report(ctx, path, "failed" if err else "present", man.rev, err)
             return err
         err = "not in the manifest"
@@ -399,13 +474,10 @@ def _fetch_one(ctx: Context, man: Manifest, path: str, deadline: Optional[float]
             urls = _mirrors(m)
             try:
                 dest = inside(ctx.models_root, path, "model path")
-                fetch.download(urls, dest, size=m.get("size"), sha256=m.get("sha256"),
-                               deadline=deadline)
+                st = _download(ctx, man, path, m, urls, dest, deadline, line)
                 _remember(ctx, path, m.get("sha256"))
-                size = dest.stat().st_size
-                ctx.count(size)
-                line(f"{path}: {size / 1e6:.0f} MB in {time.time() - t0:.0f}s"
-                     + (f" from {len(urls)} sources at once" if len(urls) > 1 else ""))
+                ctx.count(st["bytes"])
+                line(_stats_line(path, st))
                 report(ctx, path, "present", man.rev)
                 return None
             except fetch.LinkExpired as e:
@@ -431,7 +503,8 @@ def fetch_all(ctx: Context, man: Manifest, paths: list, deadline: Optional[float
     """{path: error} for the ones that failed."""
     if not paths:
         return {}
-    with ThreadPoolExecutor(max_workers=PARALLEL, thread_name_prefix="podh-model") as ex:
+    par = max(1, int(_job_of(man)["parallel_files"]))
+    with ThreadPoolExecutor(max_workers=par, thread_name_prefix="podh-model") as ex:
         results = dict(zip(paths, ex.map(lambda p: fetch_one(ctx, man, p, deadline, line), paths)))
     return {p: e for p, e in results.items() if e}
 
@@ -462,7 +535,15 @@ def run(ctx: Context) -> None:
         ctx.line(f"all {len(items) - len(later)} boot model(s) present"
                  + (f"; {len(later)} addition(s) after ready" if later else ""))
         return
-    ctx.line(f"downloading {len(todo)} of {len(items)} model(s)")
+    todo = dl.order_paths(items, todo, man.job)
+    short = dl.preflight(ctx.models_root, items, todo)
+    if short:
+        raise BootFailure(short, stage="models")
+    j = man.job
+    conns = dl.normalize_options(dl.env_layer(), j["options"])["connections_per_source"]
+    ctx.line(f"downloading {len(todo)} of {len(items)} model(s): {j['method']}, {conns} connection(s) per source, "
+             f"{j['parallel_files']} file(s) at once, {j['order'].replace('_', ' ')}; "
+             f"models on {dl.fs_type(ctx.models_root) or 'unknown fs'}")
     t0 = time.time()
     failed = fetch_all(ctx, man, todo, ctx.deadline, ctx.line)
     if failed:
@@ -547,8 +628,8 @@ def ensure(ctx: Context, files: list, paths: list, deadline_s: float = 6 * 3600)
             return 422, {"error": f"bad file {_redact(m)!r}: needs path and url (or source[s])"}
         if not m.get("url"):
             try:
-                for src in _source_list(m):
-                    fetch.resolve_source(src)
+                for src in _entries(m):
+                    _resolve(src)
             except ValueError as e:
                 return 422, {"error": str(e)}
         given[m["path"]] = m

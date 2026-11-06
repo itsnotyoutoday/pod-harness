@@ -14,7 +14,7 @@ def check(n, c):
     ok.append(bool(c)); print(f"  {'✅' if c else '❌'} {n}")
 
 
-from pod_harness import fetch  # noqa: E402
+from pod_harness import dl  # noqa: E402
 from pod_harness.boot import models  # noqa: E402
 from pod_harness.boot.core import Context  # noqa: E402
 from pod_harness import local  # noqa: E402
@@ -26,7 +26,7 @@ ctx = Context(boot_dir=tmp / "bd", state=local.LocalState())
 calls = []
 
 
-def fake_download(url, dest, size=None, sha256=None, deadline=None):
+def fake_download(url, dest, plan, **kw):
     calls.append(url)
     dest = Path(dest)
     dest.parent.mkdir(parents=True, exist_ok=True)
@@ -34,10 +34,10 @@ def fake_download(url, dest, size=None, sha256=None, deadline=None):
     part.write_bytes(b"x" * 10)
     time.sleep(0.3)                       # long enough for the second caller to arrive
     os.replace(part, dest)                # a second writer would now miss the .part
-    return dest
+    return {"bytes": 10, "secs": 0.3, "mbps": 0.0, "method": "aria2", "sources": 1, "connections": 1, "isolated": False}
 
 
-fetch.download = fake_download
+dl.download = fake_download
 models.report = lambda *a, **k: None
 
 

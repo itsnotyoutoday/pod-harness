@@ -95,21 +95,14 @@ fetch.download([u1, u2], d / "e.bin", size=len(data), sha256=sha)
 c = last_cmd()
 check("both mirrors are on one aria2c command, after -o", c.count("http") == 2 and c.index("-o") < c.index("http"))
 check("the faster source is preferred as it goes (--uri-selector=adaptive)", "--uri-selector=adaptive" in c)
-check("16 connections per source by default, 32 chunks in flight for two sources",
-      "--max-connection-per-server=16" in c and "--split=32" in c)
+check("one connection per source by default, 2 chunks in flight for two sources",
+      "--max-connection-per-server=1" in c and "--split=2" in c)
 check("aria2c verifies the sha256 itself (--checksum)", f"--checksum=sha-256={sha}" in c)
 check("a refused first mirror: the second serves it", (d / "e.bin").read_bytes() == data)
 fetch.download(fc.blob_url("m.bin"), d / "f.bin", connections=8)
 c = last_cmd()
 check("connections= is honoured, and one source gets 8 chunks at once",
       "--max-connection-per-server=8" in c and "--split=8" in c and "--checksum" not in c)
-os.environ["PODH_FETCH_ARIA2_ARGS"] = "--min-split-size=4M --disk-cache=64M"
-fetch.download(fc.blob_url("m.bin"), d / "x2.bin")
-c = last_cmd()
-check("PODH_FETCH_ARIA2_ARGS adds flags after the defaults, before the URLs",
-      "--disk-cache=64M" in c and c.index("--min-split-size=4M") > c.index("--min-split-size=16M")
-      and c.index("--disk-cache=64M") < c.index(" -o "))
-os.environ.pop("PODH_FETCH_ARIA2_ARGS")
 fetch.download(fc.blob_url("m.bin"), d / "g.bin", headers={"Authorization": "Bearer t"})
 check("headers go on the command for a single URL", "--header=Authorization: Bearer t" in last_cmd())
 try:

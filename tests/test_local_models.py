@@ -111,7 +111,14 @@ from pod_harness import fetch as _fetch  # noqa: E402
 sdata = os.urandom(20_000)
 fc.blobs["srcfile"] = sdata
 state.ready = True
-st, obj = c.models_fetch([{"path": "loras/s.safetensors", "source": fc.blob_url("srcfile"),
+# a plain download writes nothing back: first a file with a put_url and upload-back off
+fc.blobs["nob"] = b"nobody uploads me"
+c.models_fetch([{"path": "loras/nob.bin", "source": fc.blob_url("nob"),
+                 "put_url": f"{fc.url}/put/stored_nob"}], [])
+check("by default a source-fetched file is NOT uploaded back",
+      wait_for(lambda: state.models.get("loras/nob.bin") == "present") and (time.sleep(1.5) or True)
+      and "stored_nob" not in fc.blobs)
+st, obj = c.models_fetch([{"path": "loras/s.safetensors", "source": fc.blob_url("srcfile"), "upload_back": True,
                            "put_url": f"{fc.url}/put/stored_s",
                            "sha256": hashlib.sha256(sdata).hexdigest(), "size": len(sdata)}], [])
 check("a {path, source, put_url} file is accepted", st == 202)
@@ -125,7 +132,7 @@ check("a source that is not https/hf/civitai is refused (422)", st == 422 and "f
 fc.blobs["src2"] = b"two"
 state.take_reply({"drain": True})
 before = set(fc.blobs)
-c.models_fetch([{"path": "loras/d.bin", "source": fc.blob_url("src2"),
+c.models_fetch([{"path": "loras/d.bin", "source": fc.blob_url("src2"), "upload_back": True,
                  "put_url": f"{fc.url}/put/stored_d"}], [])
 check("while the pod drains, the file is still fetched and used",
       wait_for(lambda: state.models.get("loras/d.bin") == "present"))
@@ -135,7 +142,7 @@ check("...but its upload is skipped", wait_for(
 state.take_reply({"drain": False})
 fc.blobs["src3"] = b"three"
 fc.put_refuse["stored_e"] = 5
-c.models_fetch([{"path": "loras/e.bin", "source": fc.blob_url("src3"),
+c.models_fetch([{"path": "loras/e.bin", "source": fc.blob_url("src3"), "upload_back": True,
                  "put_url": f"{fc.url}/put/stored_e"}], [])
 check("a refused upload (expired put_url) is reported failed and the model stays present",
       wait_for(lambda: models.uploader(ctx).done.get("loras/e.bin", "").startswith("failed"))

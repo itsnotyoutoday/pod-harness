@@ -193,6 +193,7 @@ echo "ffmpeg version n8.1-fake"
         self.late: set = set()        # paths the manifest marks "boot": false (mid-life)
         self.models_rev = 1
         self.sourced: dict = {}      # path -> bytes: not in the store, served from a "source"
+        self.upload_back = False     # sourced entries ask to be copied back to the store
         self.missing_paths: list = []  # not in the store, no source (manifest `missing`)
         # addons (git repos reached through insteadOf)
         self.repos = t / "repos"
@@ -264,7 +265,7 @@ echo "ffmpeg version n8.1-fake"
                 items.append({"path": p, "in_store": False, "source": fc.blob_url("src_" + name),
                               "put_url": f"{fc.url}/put/store_{name}?X-Amz-Signature=x",
                               "size": len(data), "sha256": hashlib.sha256(data).hexdigest(),
-                              "boot": p not in self.late})
+                              "boot": p not in self.late, **({"upload_back": True} if self.upload_back else {})})
             return 200, {"job_id": "job_1", "models_rev": self.models_rev, "files": items,
                          "missing": list(self.missing_paths)}
         fc.routes[("GET", "/v1/pod/models")] = manifest

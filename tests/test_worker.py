@@ -462,7 +462,7 @@ state.ready = True
 ft.queue.append(task("t-src", needs={"models": [{"path": "checkpoints/src.safetensors"}]},
                      from_source=[{"path": "checkpoints/src.safetensors",
                                    "source": fc.blob_url("hf_ckpt"),
-                                   "put_url": f"{fc.url}/put/store_src?sig=p",
+                                   "put_url": f"{fc.url}/put/store_src?sig=p", "upload_back": True,
                                    "sha256": hashlib.sha256(sdata).hexdigest(),
                                    "size": len(sdata)}]))
 run()
