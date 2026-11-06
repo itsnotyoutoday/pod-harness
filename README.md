@@ -57,6 +57,7 @@ it did not create is reported `unverified`, never `ok`.
 | `docker.io/itsnotyoutoday/lingua-pipeline` | `ghcr.io/itsnotyoutoday/lingua-pipeline` | ~6 GB | forced alignment + audio measurement |
 | `docker.io/itsnotyoutoday/podh-comfyui` | `ghcr.io/itsnotyoutoday/podh-comfyui` | ~6 GB (zstd) | ComfyUI on CUDA 12.8, booted by `podh-boot` ([below](#images-podh-comfyui-and-podh-comfyui-video)) |
 | `docker.io/itsnotyoutoday/podh-comfyui-video` | `ghcr.io/itsnotyoutoday/podh-comfyui-video` | ~6.5 GB (zstd) | the same plus lip-sync and voice node packs |
+| `docker.io/itsnotyoutoday/podh-comfyui-imagegen` | `ghcr.io/itsnotyoutoday/podh-comfyui-imagegen` | ~26 GB (zstd) | ComfyUI-GGUF + Qwen-Image-Edit-2511 GGUF weights **baked in**: a cached host boots with nothing to download |
 
 Pull from Docker Hub: measured from RunPod, it is the faster of the two (137 s against
 158 s for the same image in the same data centre). GHCR carries the same tags and digests
@@ -85,7 +86,7 @@ them on this base, install the control surface beside the workload:
 ```bash
 pip install "pod-harness[serve] @ git+https://github.com/itsnotyoutoday/pod-harness@v0.2.0"
 PODH_API_TOKEN=<per-pod token> \
-PODH_SIDECAR_LOGS="comfy=/workspace/comfyui.log,/workspace/doppel/*.log" \
+PODH_SIDECAR_LOGS="comfy=/workspace/comfyui.log,/workspace/app/*.log" \
 PODH_SIDECAR_ARTIFACTS=/workspace/outputs \
 podh-serve --sidecar &          # port PODH_SIDECAR_PORT, default 8000; expose "8000/http"
 ```
@@ -449,12 +450,47 @@ so a pull downloads them in parallel and a harness change ships as a layer of a 
 KB. All
 layers are **zstd**-compressed: pulling needs Docker ≥ 23 or containerd ≥ 1.5 on the host.
 
+### Image: podh-comfyui-imagegen (weights baked in)
+
+`podh-comfyui-imagegen` is `podh-comfyui` plus `ComfyUI-GGUF` and the image models **baked
+into the image** (`docker/comfyui-imagegen.Dockerfile`), so a host that already holds the
+image boots with nothing to download. It is the deliberate exception to "models are never
+baked": for a single fast image-gen/edit pool the model download (measured ~6–8 min) *is* the
+wait being removed, against which a one-time image pull is worth it — and hosts cache images
+they have run, so the pull is paid once per host, not per pod.
+
+Baked:
+
+- `ComfyUI-GGUF` (city96, pinned commit) under `$PODH_ADDONS_ROOT` and recorded in
+  `addons.json`, so a job pinning the same commit skips the clone at boot;
+- **Qwen-Image-Edit-2511** GGUF `Q6_K` (edit; Apache-2.0), its **Qwen2.5-VL-7B** text
+  encoder GGUF + mmproj (also the pod's vision model), and the **Qwen-Image VAE**, under
+  `/opt/models/{diffusion_models,text_encoders,vae}/` — the folders `extra_model_paths.yaml`
+  maps.
+
+Two things make the baking actually skip the download (both verified against `podh-boot`):
+
+1. `ENV PODH_MODELS_ROOT=/opt/models` — **overriding the base's `/workspace/models`**. A
+   RunPod `/workspace` can come from a mounted volume, which would bury baked weights under
+   the mount; `/opt/models` is in the image's own layers and cannot be hidden. `podh-boot`
+   wires every ComfyUI model folder under `$PODH_MODELS_ROOT`, and `boot/models.py`'s
+   `present()` sees the file and reports it present.
+2. The standalone spec (`docker/imagegen/standalone-imagegen.json`, baked to
+   `$PODH_STANDALONE_SPEC`) ships `"models": []`, so the models stage prints "no models
+   requested" and never asks a store for anything.
+
+Models are never both baked *and* listed: keep the job spec's `models` empty for this image.
+Sizing: the base plus ~24 GB of weights, ~26 GB in all. On a cached host the boot is the
+ComfyUI start alone (target ~30 s–2 min, against ~10–11 min on the plain path); on a host
+seeing it for the first time, the pull is a few minutes.
+
 **SSH.** Set `PUBLIC_KEY` (one or more `authorized_keys` lines) and the entrypoint starts
 `sshd` on :22 before `podh-boot`: root, key-only (no password or keyboard-interactive
 logins), host keys generated per container. Without `PUBLIC_KEY` nothing listens on 22.
 
 **Tags.** `<registry>/<owner>/podh-comfyui:<comfyui tag>-cu128-<short sha>` (e.g.
-`v0.43.0-cu128-1a2b3c4`) and `:latest`; the same for `podh-comfyui-video`. Docker Hub
+`v0.43.0-cu128-1a2b3c4`) and `:latest`; the same for `podh-comfyui-video` and
+`podh-comfyui-imagegen`. Docker Hub
 (`docker.io/itsnotyoutoday/…`, pushed when the repository has the
 `DOCKERHUB_USER`/`DOCKERHUB_TOKEN` secrets) is the one to pull; GHCR always gets the same
 push and is the mirror. Pin the versioned tag, or better the digest, in a job; `latest`

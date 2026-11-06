@@ -28,7 +28,9 @@ on:
     paths:
       - 'docker/comfyui.Dockerfile'
       - 'docker/comfyui-video.Dockerfile'
+      - 'docker/comfyui-imagegen.Dockerfile'
       - 'docker/comfyui/**'
+      - 'docker/imagegen/**'
       # The engine every image embeds: podh-boot is this image's entrypoint.
       - 'src/**'
       - 'serve/**'
@@ -228,4 +230,89 @@ jobs:
           bash docker/comfyui/publish-identity --name podh-comfyui-video \
             --version '${{ needs.base.outputs.version }}' --digest '${{ steps.build.outputs.digest }}' \
             --revision '${{ github.sha }}' --mirror "ghcr.io/$OWNER/podh-comfyui-video" \
+            ${PRIMARY:+--primary "$PRIMARY"} --repo '${{ github.repository }}'
+
+  # The baked image-gen/edit image: the base plus ComfyUI-GGUF and the Qwen weights, so a
+  # cached host boots and generates with nothing to download. Built FROM the base digest this
+  # run just pushed, like video, so it can never sit on a different base than it was built on.
+  imagegen:
+    needs: base
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compute tags
+        id: meta
+        run: |
+          # Recomputed here, not taken from the base job: GitHub blanks a job output whose
+          # value matches a secret (the owner equals DOCKERHUB_USER), which gave "ghcr.io//…".
+          OWNER=$(echo '${{ github.repository_owner }}' | tr A-Z a-z)
+          echo "owner=$OWNER" >> $GITHUB_OUTPUT
+          VERSION='${{ needs.base.outputs.version }}'
+          TAGS="ghcr.io/$OWNER/podh-comfyui-imagegen:$VERSION,ghcr.io/$OWNER/podh-comfyui-imagegen:latest"
+          if [ -n "$DOCKERHUB_USER" ]; then
+            TAGS="$TAGS,docker.io/$DOCKERHUB_USER/podh-comfyui-imagegen:$VERSION,docker.io/$DOCKERHUB_USER/podh-comfyui-imagegen:latest"
+          fi
+          echo "tags=$TAGS" >> $GITHUB_OUTPUT
+          echo "base=ghcr.io/$OWNER/podh-comfyui@${{ needs.base.outputs.digest }}" >> $GITHUB_OUTPUT
+
+      # The image is ~26 GB unpacked (base + baked weights); the runner starts with ~20 GB free.
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /opt/hostedtoolcache/CodeQL \
+                      /usr/local/share/boost /usr/share/swift
+          sudo docker image prune --all --force >/dev/null || true
+          df -h /
+
+      - name: Log in to Docker Hub
+        if: env.DOCKERHUB_USER != ''
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USER }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # Also how this job PULLS the base: a new GHCR package starts private.
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build and push podh-comfyui-imagegen
+        id: build
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: docker/comfyui-imagegen.Dockerfile
+          platforms: linux/amd64
+          build-args: |
+            BASE_IMAGE=${{ steps.meta.outputs.base }}
+            IMAGE_VERSION=${{ needs.base.outputs.version }}
+            GIT_SHA=${{ github.sha }}
+            SOURCE_URL=${{ github.server_url }}/${{ github.repository }}
+            HF_TOKEN=${{ secrets.HF_TOKEN }}
+          tags: ${{ steps.meta.outputs.tags }}
+          # As the base's: zstd throughout. The baked-weight layer is one big gzip-free layer.
+          outputs: type=image,push=true,compression=zstd,compression-level=3,force-compression=true,oci-mediatypes=true
+          cache-from: type=registry,ref=ghcr.io/${{ steps.meta.outputs.owner }}/podh-comfyui-imagegen:buildcache,ignore-error=true
+          cache-to: type=registry,ref=ghcr.io/${{ steps.meta.outputs.owner }}/podh-comfyui-imagegen:buildcache,mode=max,ignore-error=true,compression=zstd,compression-level=3,force-compression=true,oci-mediatypes=true
+
+      - name: Digest
+        run: echo "::notice::podh-comfyui-imagegen ${{ needs.base.outputs.version }} = ${{ steps.build.outputs.digest }}"
+
+      - uses: imjasonh/setup-crane@v0.4
+
+      - name: Publish manifest and catalogue
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          OWNER=$(echo '${{ github.repository_owner }}' | tr A-Z a-z)
+          PRIMARY=""
+          if [ -n "$DOCKERHUB_USER" ]; then PRIMARY="docker.io/$DOCKERHUB_USER/podh-comfyui-imagegen"; fi
+          bash docker/comfyui/publish-identity --name podh-comfyui-imagegen \
+            --version '${{ needs.base.outputs.version }}' --digest '${{ steps.build.outputs.digest }}' \
+            --revision '${{ github.sha }}' --mirror "ghcr.io/$OWNER/podh-comfyui-imagegen" \
             ${PRIMARY:+--primary "$PRIMARY"} --repo '${{ github.repository }}'
