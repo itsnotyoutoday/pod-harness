@@ -180,7 +180,8 @@ RUN --mount=type=bind,source=docker/comfyui/guard.txt,target=/tmp/guard.txt \
 # 2026-10-27), and a guard for one venv has no business there.
 
 # --- 6. ComfyUI at its release tag, pod-harness's dependencies, and a worker's common needs
-# (ImageHash, cryptography, PyWavelets): an app's pod worker runs in THIS venv, with these
+# (ImageHash, cryptography, PyWavelets, httpx: the base gets httpx from its node packs, this image has
+# none, so it is named here): an app's pod worker runs in THIS venv, with these
 # versions, instead of building a second environment at boot. ------------------------
 # Cloned by tag and then held to the commit the tag named when this was written: a moved
 # tag fails the build rather than shipping something else under the same name.
@@ -203,7 +204,7 @@ RUN --mount=type=bind,source=docker/comfyui/lock.txt,target=/tmp/lock.txt \
         $(grep -E '^(torch|torchvision|torchaudio)==' /opt/podh/guard.txt) \
         -r /opt/ComfyUI/requirements.txt \
         "boto3>=1.34" "fastapi>=0.110" "uvicorn[standard]>=0.29" \
-        ImageHash cryptography PyWavelets; \
+        ImageHash cryptography PyWavelets httpx; \
     rm -rf /root/.cache; \
     python -B -c "import torch, torchvision, torchaudio; print('torch', torch.__version__, 'cuda', torch.version.cuda, 'cudnn', torch.backends.cudnn.version())"
 
