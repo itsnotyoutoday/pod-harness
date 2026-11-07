@@ -60,21 +60,28 @@ RUN --mount=type=bind,from=insightface,source=/wheels,target=/tmp/wheels \
 # Loudness normalization disabled" otherwise), and its requirements do not list it, so it is
 # installed here at the lock's pin. Its Perth watermarker is deliberately NOT installed.
 #
+# PromptRelay (kijai, pinned commit) schedules per-segment prompts across a clip's frames. Its only
+# requirement is word2number, installed here at a pin before the pack is baked so the install is not
+# left to whatever PyPI serves. Reviewed at this commit: stdlib + torch + comfy imports only, no network,
+# subprocess, eval/exec or file writes. The pack declares no licence upstream.
+#
 # The checks are the base's (check_image.py, quick-test) plus the face and voice stacks,
 # run in this same layer, writing no bytecode, so they add nothing to it.
 ARG QUICK_TEST_STRICT=1
 RUN --mount=type=bind,source=docker/comfyui,target=/tmp/ctx \
     set -eux; \
     bake=/opt/podh/podh-bake-node; \
+    pip install --no-input -c /opt/podh/lock.txt word2number==1.1; \
     $bake ComfyUI-LatentSyncWrapper https://github.com/ShmuelRonen/ComfyUI-LatentSyncWrapper 360d5283d7276aee68b4237b1387e594e4ce640e; \
     $bake ComfyUI_Fill-ChatterBox https://github.com/filliptm/ComfyUI_Fill-ChatterBox f7d7a16187430abcaf91a3039b9c83aa9960816a; \
+    $bake ComfyUI-PromptRelay https://github.com/kijai/ComfyUI-PromptRelay ca5d4e3edb6abd9c2a4c68a3a6798eec1980f450; \
     pip install --no-input -c /opt/podh/lock.txt pytorch-lightning accelerate pyloudnorm; \
     echo "Dependencies installed at image build" > /root/.latentsync16_dependencies_installed; \
     rm -rf /root/.cache; \
     cat /opt/podh/baked/addons.json; \
     export PYTHONDONTWRITEBYTECODE=1; \
     python /opt/podh/check_image.py --pins /opt/podh/cuda.txt \
-        --import insightface onnxruntime decord librosa diffusers s3tokenizer pyloudnorm \
+        --import insightface onnxruntime decord librosa diffusers s3tokenizer pyloudnorm word2number \
         --dist onnxruntime-gpu transformers diffusers librosa \
         --ldd 'onnxruntime/capi/libonnxruntime_providers_cuda.so'; \
     python -c "import importlib.metadata as m; v = m.version('insightface'); assert v == '${INSIGHTFACE_VERSION}', v"; \
